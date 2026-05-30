@@ -10,8 +10,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .database import get_record, init_db, list_records, save_record, update_record
 from .agent_runtime import AGENT_DEFINITIONS, list_providers, run_agent
+from .job_queue import cancel_job, get_job, list_jobs, process_job, process_next_job, queue_summary, retry_job, submit_job
 from .otel import SAMPLE_OTEL_PAYLOAD, normalize_otel_payload, replay_trace
 from .schemas import (
+    AgentJob,
+    AgentJobProcessResponse,
+    AgentJobSubmitRequest,
+    AgentJobSubmitResponse,
     AgentRuntime,
     AgentDefinition,
     AgentRunRecord,
@@ -267,6 +272,61 @@ def execute_agent(request: AgentRunRequest) -> AgentRunResponse:
     save_record("agent_runs", run.id, run.model_dump())
     save_record("traces", trace.id, trace.model_dump())
     return AgentRunResponse(run=run, trace=trace)
+
+
+@app.get("/api/agent-runtime/jobs", response_model=list[AgentJob])
+def agent_jobs() -> list[AgentJob]:
+    return list_jobs()
+
+
+@app.get("/api/agent-runtime/jobs/summary")
+def agent_jobs_summary() -> dict[str, Any]:
+    return queue_summary()
+
+
+@app.get("/api/agent-runtime/jobs/{job_id}", response_model=AgentJob)
+def agent_job_detail(job_id: str) -> AgentJob:
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Agent job not found")
+    return job
+
+
+@app.post("/api/agent-runtime/jobs", response_model=AgentJobSubmitResponse)
+def submit_agent_job(request: AgentJobSubmitRequest) -> AgentJobSubmitResponse:
+    return AgentJobSubmitResponse(job=submit_job(request))
+
+
+@app.post("/api/agent-runtime/jobs/process-next", response_model=AgentJobProcessResponse)
+def process_next_agent_job() -> AgentJobProcessResponse:
+    result = process_next_job()
+    if result is None:
+        raise HTTPException(status_code=404, detail="No queued agent jobs")
+    return result
+
+
+@app.post("/api/agent-runtime/jobs/{job_id}/process", response_model=AgentJobProcessResponse)
+def process_agent_job(job_id: str) -> AgentJobProcessResponse:
+    result = process_job(job_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Agent job not found")
+    return result
+
+
+@app.post("/api/agent-runtime/jobs/{job_id}/retry", response_model=AgentJob)
+def retry_agent_job(job_id: str) -> AgentJob:
+    job = retry_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Agent job not found")
+    return job
+
+
+@app.post("/api/agent-runtime/jobs/{job_id}/cancel", response_model=AgentJob)
+def cancel_agent_job(job_id: str) -> AgentJob:
+    job = cancel_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Agent job not found")
+    return job
 
 
 @app.get("/api/settings", response_model=SettingsPayload)

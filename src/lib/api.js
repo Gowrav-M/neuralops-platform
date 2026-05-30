@@ -73,6 +73,37 @@ export function fetchAgentRuns() {
   return request('/api/agent-runtime/runs');
 }
 
+export function fetchAgentJobs() {
+  return request('/api/agent-runtime/jobs');
+}
+
+export function fetchAgentJobSummary() {
+  return request('/api/agent-runtime/jobs/summary');
+}
+
+export function submitAgentJob(payload) {
+  return request('/api/agent-runtime/jobs', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function processAgentJob(jobId) {
+  return request(`/api/agent-runtime/jobs/${jobId}/process`, { method: 'POST' });
+}
+
+export function processNextAgentJob() {
+  return request('/api/agent-runtime/jobs/process-next', { method: 'POST' });
+}
+
+export function retryAgentJob(jobId) {
+  return request(`/api/agent-runtime/jobs/${jobId}/retry`, { method: 'POST' });
+}
+
+export function cancelAgentJob(jobId) {
+  return request(`/api/agent-runtime/jobs/${jobId}/cancel`, { method: 'POST' });
+}
+
 export function runAgent(payload) {
   return request('/api/agent-runtime/run', {
     method: 'POST',

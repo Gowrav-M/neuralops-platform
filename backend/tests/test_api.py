@@ -109,3 +109,41 @@ def test_sample_otel_ingest_and_replay(client: TestClient) -> None:
     replay = client.post(f"/api/traces/{payload['trace']['id']}/replay")
     assert replay.status_code == 200
     assert replay.json()["decision"] in {"review", "block"}
+
+
+def test_agent_job_queue_lifecycle(client: TestClient) -> None:
+    submit = client.post(
+        "/api/agent-runtime/jobs",
+        json={
+            "agentId": "cost_anomaly",
+            "input": "Model spend spiked 40 percent after a retry loop. Investigate budget risk.",
+            "providerMode": "local",
+            "maxAttempts": 2,
+        },
+    )
+    assert submit.status_code == 200
+    job = submit.json()["job"]
+    assert job["status"] == "queued"
+
+    process = client.post(f"/api/agent-runtime/jobs/{job['id']}/process")
+    assert process.status_code == 200
+    processed = process.json()
+    assert processed["job"]["status"] in {"succeeded", "blocked"}
+    assert processed["run"]["traceId"] == processed["trace"]["id"]
+
+    detail = client.get(f"/api/agent-runtime/jobs/{job['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["runId"] == processed["run"]["id"]
+
+
+def test_agent_job_can_cancel_queued_job(client: TestClient) -> None:
+    submit = client.post(
+        "/api/agent-runtime/jobs",
+        json={"agentId": "rag_answer", "input": "What is the billing policy?", "providerMode": "local"},
+    )
+    assert submit.status_code == 200
+    job_id = submit.json()["job"]["id"]
+
+    cancel = client.post(f"/api/agent-runtime/jobs/{job_id}/cancel")
+    assert cancel.status_code == 200
+    assert cancel.json()["status"] == "cancelled"

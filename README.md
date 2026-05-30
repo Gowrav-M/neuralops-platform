@@ -43,6 +43,18 @@ Each run creates:
 
 The local deterministic runtime works without keys. To test live providers, set `GROQ_API_KEY`, `NVIDIA_API_KEY`, or another OpenAI-compatible API key using `.env.example`. Groq is the fastest first live provider path because it uses the OpenAI-compatible chat completions API at `https://api.groq.com/openai/v1`.
 
+## Worker Queue
+
+NeuralOps also includes a local worker queue for production-style agent execution:
+
+- submit jobs into `queued` state
+- process jobs through a worker API
+- track `running`, `succeeded`, `blocked`, `failed`, and `cancelled`
+- retry failed/blocked jobs
+- store run and trace evidence when the job completes
+
+This makes the project closer to how real AI platforms run asynchronous agent workloads instead of only direct button-triggered calls.
+
 ## Run Locally
 
 Install frontend dependencies:
@@ -118,6 +130,14 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/agent-runtime/run `
 - `GET /api/agent-runtime/runs`
 - `GET /api/agent-runtime/runs/{run_id}`
 - `POST /api/agent-runtime/run`
+- `GET /api/agent-runtime/jobs`
+- `GET /api/agent-runtime/jobs/summary`
+- `GET /api/agent-runtime/jobs/{job_id}`
+- `POST /api/agent-runtime/jobs`
+- `POST /api/agent-runtime/jobs/process-next`
+- `POST /api/agent-runtime/jobs/{job_id}/process`
+- `POST /api/agent-runtime/jobs/{job_id}/retry`
+- `POST /api/agent-runtime/jobs/{job_id}/cancel`
 - `POST /api/traces/otel`
 - `POST /api/traces/otel/sample`
 - `POST /api/traces/{trace_id}/replay`

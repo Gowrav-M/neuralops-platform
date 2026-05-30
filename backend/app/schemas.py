@@ -138,6 +138,38 @@ class AgentRunRequest(BaseModel):
     environment: Literal["prod", "staging", "dev"] = "staging"
 
 
+JobStatus = Literal["queued", "running", "succeeded", "blocked", "failed", "cancelled"]
+
+
+class AgentJob(BaseModel):
+    id: str
+    status: JobStatus
+    request: AgentRunRequest
+    attempts: int = Field(ge=0)
+    maxAttempts: int = Field(default=2, ge=1)
+    runId: str | None = None
+    traceId: str | None = None
+    error: str | None = None
+    createdAt: str
+    updatedAt: str
+    startedAt: str | None = None
+    finishedAt: str | None = None
+
+
+class AgentJobSubmitRequest(AgentRunRequest):
+    maxAttempts: int = Field(default=2, ge=1, le=5)
+
+
+class AgentJobSubmitResponse(BaseModel):
+    job: AgentJob
+
+
+class AgentJobProcessResponse(BaseModel):
+    job: AgentJob
+    run: "AgentRunRecord | None" = None
+    trace: Trace | None = None
+
+
 class AgentEvalCheck(BaseModel):
     name: str
     status: Literal["pass", "warn", "fail"]
