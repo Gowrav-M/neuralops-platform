@@ -35,6 +35,20 @@ class Trace(BaseModel):
     prompt: str
     output: str
     toolCalls: str | None = None
+    source: Literal["seed", "api", "otel", "local"] = "seed"
+    spanCount: int = Field(default=0, ge=0)
+    riskFlags: list[str] = Field(default_factory=list)
+    spans: list["TraceSpan"] = Field(default_factory=list)
+
+
+class TraceSpan(BaseModel):
+    id: str
+    parentId: str | None = None
+    name: str
+    operation: str
+    durationMs: float = Field(ge=0)
+    status: Literal["ok", "error", "unset"] = "unset"
+    attributes: dict[str, Any] = Field(default_factory=dict)
 
 
 class Incident(BaseModel):
@@ -98,6 +112,63 @@ class AgentRuntime(BaseModel):
     risk: Severity
 
 
+class AgentDefinition(BaseModel):
+    id: str
+    name: str
+    role: str
+    industrySignal: str
+    defaultModel: str
+    capabilities: list[str]
+    riskControls: list[str]
+
+
+class ProviderStatus(BaseModel):
+    id: str
+    label: str
+    configured: bool
+    baseUrl: str | None = None
+    defaultModel: str
+
+
+class AgentRunRequest(BaseModel):
+    agentId: str
+    input: str = Field(min_length=1)
+    providerMode: Literal["local", "auto", "live"] = "auto"
+    model: str | None = None
+    environment: Literal["prod", "staging", "dev"] = "staging"
+
+
+class AgentEvalCheck(BaseModel):
+    name: str
+    status: Literal["pass", "warn", "fail"]
+    score: float = Field(ge=0, le=1)
+    reason: str
+
+
+class AgentRunRecord(BaseModel):
+    id: str
+    agentId: str
+    agentName: str
+    provider: Literal["local", "nvidia", "openai", "custom"]
+    model: str
+    input: str
+    output: str
+    decision: Literal["allow", "review", "block"]
+    score: float = Field(ge=0, le=1)
+    evals: list[AgentEvalCheck]
+    policyFindings: list[str]
+    latencyMs: int = Field(ge=0)
+    tokens: int = Field(ge=0)
+    costUsd: float = Field(ge=0)
+    traceId: str
+    createdAt: str
+
+
+class AgentRunResponse(BaseModel):
+    run: AgentRunRecord
+    trace: Trace
+
+
 class SettingsPayload(BaseModel):
     retentionDays: int = Field(ge=1)
     apiKeys: list[dict[str, Any]]
@@ -126,6 +197,32 @@ class PolicyTestResult(BaseModel):
     severity: Severity | None = None
     reason: str
     matchedPatterns: list[str]
+
+
+class OtelIngestRequest(BaseModel):
+    payload: dict[str, Any]
+    environment: Literal["prod", "staging", "dev"] = "prod"
+
+
+class OtelIngestResult(BaseModel):
+    decision: Literal["allow", "review", "block"]
+    trace: Trace
+    spanCount: int = Field(ge=0)
+    findings: list[str]
+
+
+class ReplayCheck(BaseModel):
+    name: str
+    status: Literal["pass", "warn", "fail"]
+    reason: str
+
+
+class ReplayResult(BaseModel):
+    traceId: str
+    decision: Literal["allow", "review", "block"]
+    score: float = Field(ge=0, le=1)
+    checks: list[ReplayCheck]
+    recommendation: str
 
 
 class ApiEnvelope(BaseModel):

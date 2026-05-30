@@ -61,6 +61,33 @@ export function fetchAgents() {
   return request('/api/agents');
 }
 
+export function fetchAgentDefinitions() {
+  return request('/api/agent-runtime/definitions');
+}
+
+export function fetchAgentProviders() {
+  return request('/api/agent-runtime/providers');
+}
+
+export function fetchAgentRuns() {
+  return request('/api/agent-runtime/runs');
+}
+
+export function runAgent(payload) {
+  return request('/api/agent-runtime/run', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function ingestSampleOtelTrace() {
+  return request('/api/traces/otel/sample', { method: 'POST' });
+}
+
+export function replayTrace(traceId) {
+  return request(`/api/traces/${traceId}/replay`, { method: 'POST' });
+}
+
 export function fetchSettings() {
   return request('/api/settings');
 }

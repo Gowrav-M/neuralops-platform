@@ -9,18 +9,28 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import get_record, init_db, list_records, save_record, update_record
+from .agent_runtime import AGENT_DEFINITIONS, list_providers, run_agent
+from .otel import SAMPLE_OTEL_PAYLOAD, normalize_otel_payload, replay_trace
 from .schemas import (
     AgentRuntime,
+    AgentDefinition,
+    AgentRunRecord,
+    AgentRunRequest,
+    AgentRunResponse,
     CostSummary,
     DashboardSnapshot,
     Evaluator,
     Incident,
     IncidentPatch,
+    OtelIngestRequest,
+    OtelIngestResult,
     Policy,
     PolicyTestRequest,
     PolicyTestResult,
+    ProviderStatus,
     PromptVersion,
     RagQuery,
+    ReplayResult,
     SettingsPayload,
     Stats,
     Trace,
@@ -68,6 +78,32 @@ def trace_detail(trace_id: str) -> Trace:
     if trace is None:
         raise HTTPException(status_code=404, detail="Trace not found")
     return Trace.model_validate(trace)
+
+
+@app.post("/api/traces/otel", response_model=OtelIngestResult)
+def ingest_otel_trace(request: OtelIngestRequest) -> OtelIngestResult:
+    try:
+        trace, findings = normalize_otel_payload(request.payload, request.environment)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    save_record("traces", trace.id, trace.model_dump())
+    decision = "block" if trace.status == "blocked" else "review" if trace.status == "warning" else "allow"
+    return OtelIngestResult(decision=decision, trace=trace, spanCount=trace.spanCount, findings=findings)
+
+
+@app.post("/api/traces/otel/sample", response_model=OtelIngestResult)
+def ingest_sample_otel_trace() -> OtelIngestResult:
+    trace, findings = normalize_otel_payload(SAMPLE_OTEL_PAYLOAD, "prod")
+    save_record("traces", trace.id, trace.model_dump())
+    return OtelIngestResult(decision="block", trace=trace, spanCount=trace.spanCount, findings=findings)
+
+
+@app.post("/api/traces/{trace_id}/replay", response_model=ReplayResult)
+def replay_existing_trace(trace_id: str) -> ReplayResult:
+    trace = get_record("traces", trace_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return replay_trace(trace)
 
 
 @app.post("/api/traces/simulate", response_model=Trace)
@@ -194,6 +230,43 @@ def test_policy(request: PolicyTestRequest) -> PolicyTestResult:
 @app.get("/api/agents", response_model=list[AgentRuntime])
 def agents() -> list[AgentRuntime]:
     return [AgentRuntime.model_validate(item) for item in list_records("agents")]
+
+
+@app.get("/api/agent-runtime/definitions", response_model=list[AgentDefinition])
+def agent_definitions() -> list[AgentDefinition]:
+    return AGENT_DEFINITIONS
+
+
+@app.get("/api/agent-runtime/providers", response_model=list[ProviderStatus])
+def provider_status() -> list[ProviderStatus]:
+    return list_providers()
+
+
+@app.get("/api/agent-runtime/runs", response_model=list[AgentRunRecord])
+def agent_runs() -> list[AgentRunRecord]:
+    return [AgentRunRecord.model_validate(item) for item in list_records("agent_runs")]
+
+
+@app.get("/api/agent-runtime/runs/{run_id}", response_model=AgentRunRecord)
+def agent_run_detail(run_id: str) -> AgentRunRecord:
+    run = get_record("agent_runs", run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    return AgentRunRecord.model_validate(run)
+
+
+@app.post("/api/agent-runtime/run", response_model=AgentRunResponse)
+def execute_agent(request: AgentRunRequest) -> AgentRunResponse:
+    try:
+        run, trace = run_agent(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    save_record("agent_runs", run.id, run.model_dump())
+    save_record("traces", trace.id, trace.model_dump())
+    return AgentRunResponse(run=run, trace=trace)
 
 
 @app.get("/api/settings", response_model=SettingsPayload)
