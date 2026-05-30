@@ -23,7 +23,7 @@ def test_dashboard_has_seeded_data(client: TestClient) -> None:
     response = client.get("/api/dashboard")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["stats"]["totalRequests"] > 0
+    assert payload["stats"]["totalRequests"] >= len(payload["traces"])
     assert len(payload["traces"]) >= 3
     assert len(payload["incidents"]) >= 1
 

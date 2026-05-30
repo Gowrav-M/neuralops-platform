@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .database import get_record, init_db, list_records, save_record, update_record
 from .agent_runtime import AGENT_DEFINITIONS, list_providers, run_agent
 from .job_queue import cancel_job, get_job, list_jobs, process_job, process_next_job, queue_summary, retry_job, submit_job
+from .metrics import build_stats
 from .otel import SAMPLE_OTEL_PAYLOAD, normalize_otel_payload, replay_trace
 from .schemas import (
     AgentJob,
@@ -66,9 +67,9 @@ def health() -> dict[str, Any]:
 
 @app.get("/api/dashboard", response_model=DashboardSnapshot)
 def dashboard() -> DashboardSnapshot:
-    stats = Stats.model_validate(get_record("stats", "current"))
     traces = [Trace.model_validate(item) for item in list_records("traces")]
     incidents = [Incident.model_validate(item) for item in list_records("incidents")]
+    stats = build_stats(traces, incidents)
     return DashboardSnapshot(stats=stats, traces=traces[:50], incidents=incidents)
 
 

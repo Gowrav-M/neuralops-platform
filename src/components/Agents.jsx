@@ -16,11 +16,6 @@ import {
 } from '../lib/api';
 
 export default function Agents({ addToast }) {
-  const [approvalQueue, setApprovalQueue] = useState([
-    { id: 'app_101', agent: 'rag_support_agent', session: 'sess_9281', tool: 'fs_write_file', params: "{ path: '/config/rate_limits.json', content: '...' }", risk: 'High' },
-    { id: 'app_102', agent: 'code_copilot_agent', session: 'sess_7421', tool: 'run_terminal_command', params: "{ command: 'npm install --force' }", risk: 'Critical' }
-  ]);
-
   const fallbackAgentsList = [
     { id: 'ag_01', name: 'customer_support_agent', status: 'Active', sessions: 14, memory: '1.4GB', sandbox: 'Isolated', health: 'Healthy' },
     { id: 'ag_02', name: 'data_analytics_agent', status: 'Idle', sessions: 2, memory: '240MB', sandbox: 'Isolated', health: 'Healthy' },
@@ -42,11 +37,30 @@ export default function Agents({ addToast }) {
   const [queueBusy, setQueueBusy] = useState(false);
   const [otelBusy, setOtelBusy] = useState(false);
 
-  const activeSessions = [
-    { id: 'sess_9281', agent: 'customer_support_agent', duration: '12m 4s', memory: '142MB', warnings: 0, status: 'Executing' },
-    { id: 'sess_7421', agent: 'dev_automation_bot', duration: '45m 12s', memory: '412MB', warnings: 2, status: 'Blocked (Pending)' },
-    { id: 'sess_0931', agent: 'data_analytics_agent', duration: '1m 20s', memory: '34MB', warnings: 0, status: 'Idle' }
-  ];
+  const activeSessions = agentJobs
+    .filter((job) => ['queued', 'running', 'blocked', 'failed'].includes(job.status))
+    .slice(0, 6)
+    .map((job) => ({
+      id: job.id,
+      agent: agentDefinitions.find((agent) => agent.id === job.request.agentId)?.name ?? job.request.agentId,
+      duration: job.startedAt ? elapsedLabel(job.startedAt, job.finishedAt) : 'queued',
+      memory: job.status === 'running' ? 'live' : 'persisted',
+      warnings: ['blocked', 'failed'].includes(job.status) ? 1 : 0,
+      status: job.status,
+    }));
+
+  const approvalQueue = agentJobs
+    .filter((job) => ['blocked', 'failed'].includes(job.status))
+    .slice(0, 6)
+    .map((job) => ({
+      id: job.id,
+      agent: agentDefinitions.find((agent) => agent.id === job.request.agentId)?.name ?? job.request.agentId,
+      session: job.runId ?? job.id,
+      tool: `${job.request.agentId}.run`,
+      params: JSON.stringify({ providerMode: job.request.providerMode, traceId: job.traceId, error: job.error }, null, 2),
+      risk: job.status === 'blocked' ? 'Critical' : 'High',
+      status: job.status,
+    }));
 
   useEffect(() => {
     let cancelled = false;
@@ -212,13 +226,13 @@ export default function Agents({ addToast }) {
   };
 
   const handleApproveTool = (id, toolName) => {
-    setApprovalQueue(prev => prev.filter(item => item.id !== id));
-    addToast(`Approved risky tool call (${toolName}) execution! Dispatching back to runtime sandbox.`, 'success');
+    handleRetryJob(id);
+    addToast(`Requeued reviewed job (${toolName}) for another worker attempt.`, 'success');
   };
 
   const handleDenyTool = (id, toolName) => {
-    setApprovalQueue(prev => prev.filter(item => item.id !== id));
-    addToast(`Blocked tool call (${toolName}) execution! Session halted by policy admin.`, 'error');
+    handleCancelJob(id);
+    addToast(`Kept job blocked (${toolName}); no execution approved.`, 'error');
   };
 
   return (
@@ -497,7 +511,7 @@ export default function Agents({ addToast }) {
                     <td>
                       <span style={{ 
                         fontWeight: 600, 
-                        color: sess.status.includes('Blocked') ? 'var(--color-error)' : 'var(--color-success)' 
+                        color: ['blocked', 'failed'].includes(sess.status) ? 'var(--color-error)' : 'var(--color-success)'
                       }}>
                         {sess.status}
                       </span>
@@ -601,7 +615,7 @@ export default function Agents({ addToast }) {
                   </svg>
                 </span>
                 <span style={{ fontWeight: '600', fontSize: '12px', color: '#FFF' }}>Approval queue clear</span>
-                <span style={{ fontSize: '10px', color: 'rgba(255,255,255,0.4)' }}>No pending agent actions require manual reviews.</span>
+                <span style={{ fontSize: '10px', color: 'rgba(255,255,255,0.4)' }}>No blocked or failed jobs require manual review.</span>
               </div>
             )}
           </div>
@@ -609,4 +623,17 @@ export default function Agents({ addToast }) {
       </div>
     </div>
   );
+}
+
+function elapsedLabel(startedAt, finishedAt) {
+  const start = new Date(startedAt).getTime();
+  const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
+  if (Number.isNaN(start) || Number.isNaN(end)) {
+    return 'unknown';
+  }
+  const seconds = Math.max(0, Math.round((end - start) / 1000));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }

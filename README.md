@@ -55,6 +55,24 @@ NeuralOps also includes a local worker queue for production-style agent executio
 
 This makes the project closer to how real AI platforms run asynchronous agent workloads instead of only direct button-triggered calls.
 
+## Live Provider Proof
+
+Groq live provider support has been verified locally with `providerMode: live`.
+
+Example stored evidence shape:
+
+```json
+{
+  "provider": "groq",
+  "model": "llama-3.3-70b-versatile",
+  "decision": "allow",
+  "traceId": "trace_...",
+  "source": "api"
+}
+```
+
+Secrets are read from local `.env` and are intentionally excluded from Git.
+
 ## Run Locally
 
 Install frontend dependencies:
