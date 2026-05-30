@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { deployPrompt, fetchPrompts } from '../lib/api';
+import { deployPrompt, fetchPrompts, rollbackPrompt, updatePromptTraffic } from '../lib/api';
 
 export default function PromptRegistry({ addToast }) {
-  const [selectedPromptId, setSelectedPromptId] = useState('prompt_chat_completion');
+  const [selectedPromptId, setSelectedPromptId] = useState('');
   const [canaryValue, setCanaryValue] = useState(25);
   const [variables, setVariables] = useState({
     user_name: 'NeuralOps User',
@@ -10,41 +10,7 @@ export default function PromptRegistry({ addToast }) {
     context_chunk: 'Token costs are calculated per 1000 input/output tokens based on the model tier.'
   });
 
-  const fallbackPromptRegistryData = {
-    prompt_chat_completion: {
-      name: 'prompt_chat_completion',
-      description: 'Primary customer service chatbot helper prompt.',
-      activeVersion: 'v2.4',
-      environment: 'prod',
-      owner: 'AI Platform Oncall',
-      lastUpdated: '12 hours ago',
-      evalScore: 0.94,
-      versions: ['v2.4', 'v2.3', 'v2.2', 'v2.1'],
-      template: 'You are an AI assistant helping {{user_name}}.\nAnswer their query: {{query_text}}\nUse only the retrieved context to answer: {{context_chunk}}',
-      history: [
-        { version: 'v2.4', date: 'May 30, 2026', owner: 'AI Platform', score: 0.94, status: 'Active (25% Canary)' },
-        { version: 'v2.3', date: 'May 24, 2026', owner: 'Trust Eng', score: 0.89, status: 'Rollback Approved' },
-        { version: 'v2.2', date: 'May 10, 2026', owner: 'AI Platform', score: 0.91, status: 'Archived' }
-      ]
-    },
-    prompt_code_helper: {
-      name: 'prompt_code_helper',
-      description: 'Used by the code generation copilot workflow.',
-      activeVersion: 'v1.8',
-      environment: 'staging',
-      owner: 'Developer Experience',
-      lastUpdated: '2 days ago',
-      evalScore: 0.87,
-      versions: ['v1.8', 'v1.7', 'v1.6'],
-      template: 'Write a high-quality React component for {{query_text}}.\nFollow modular structures. Keep variables in English.',
-      history: [
-        { version: 'v1.8', date: 'May 28, 2026', owner: 'Developer Experience', score: 0.87, status: 'Active' },
-        { version: 'v1.7', date: 'May 15, 2026', owner: 'Trust Eng', score: 0.82, status: 'Archived' }
-      ]
-    }
-  };
-
-  const [promptRegistryData, setPromptRegistryData] = useState(fallbackPromptRegistryData);
+  const [promptRegistryData, setPromptRegistryData] = useState({});
   const [dataSource, setDataSource] = useState('loading');
 
   const selectedPrompt = promptRegistryData[selectedPromptId] || Object.values(promptRegistryData)[0];
@@ -62,23 +28,17 @@ export default function PromptRegistry({ addToast }) {
             description: prompt.name,
             activeVersion: prompt.version,
             environment: prompt.status === 'Production' ? 'prod' : 'staging',
-            owner: 'AI Platform',
+            owner: prompt.owner,
             lastUpdated: new Date(prompt.updatedAt).toLocaleString(),
             evalScore: prompt.evalScore,
-            versions: [prompt.version, 'previous', 'baseline'],
-            template: prompt.id.includes('rag')
-              ? 'Answer {{query_text}} using only retrieved context: {{context_chunk}}'
-              : 'You are an AI assistant helping {{user_name}}.\nAnswer their query: {{query_text}}\nUse only the retrieved context to answer: {{context_chunk}}',
-            history: [
-              { version: prompt.version, date: 'May 30, 2026', owner: 'AI Platform', score: prompt.evalScore, status: `${prompt.status} (${prompt.canaryPercent}% Canary)` },
-              { version: 'previous', date: 'May 24, 2026', owner: 'Trust Eng', score: Math.max(0.75, prompt.evalScore - 0.05), status: 'Rollback Approved' },
-              { version: 'baseline', date: 'May 10, 2026', owner: 'AI Platform', score: Math.max(0.7, prompt.evalScore - 0.08), status: 'Archived' }
-            ]
+            versions: prompt.history?.map((item) => item.version) ?? [prompt.version],
+            template: prompt.template,
+            history: prompt.history ?? []
           }
         ]));
         setPromptRegistryData(nextPrompts);
-        setSelectedPromptId(prompts[0]?.id || 'prompt_chat_completion');
-        setCanaryValue(prompts[0]?.canaryPercent ?? 25);
+        setSelectedPromptId(prompts[0]?.id || '');
+        setCanaryValue(prompts[0]?.canaryPercent ?? 0);
         setDataSource('api');
       })
       .catch(() => {
@@ -104,6 +64,10 @@ export default function PromptRegistry({ addToast }) {
   };
 
   const triggerDeploy = async (env) => {
+    if (!selectedPrompt) {
+      addToast('No backend prompt is selected.', 'error');
+      return;
+    }
     if (env !== 'prod') {
       addToast(`Successfully queued deploy of ${selectedPrompt.name} ${selectedPrompt.activeVersion} to ${env}!`, 'success');
       return;
@@ -113,13 +77,76 @@ export default function PromptRegistry({ addToast }) {
       const deployed = await deployPrompt(selectedPromptId);
       addToast(`Backend deployed ${deployed.name} ${deployed.version} to production.`, 'success');
     } catch {
-      addToast(`Queued local fallback deploy of ${selectedPrompt.name} ${selectedPrompt.activeVersion} to ${env}.`, 'warning');
+      addToast(`Backend unavailable. Deploy for ${selectedPrompt.name} was not queued.`, 'error');
     }
   };
 
-  const triggerRollback = () => {
-    addToast(`Initiated rollback of ${selectedPrompt.name} to prior version! Checking evaluation scores...`, 'warning');
+  const refreshPromptFromBackend = (prompt) => {
+    setPromptRegistryData((prev) => ({
+      ...prev,
+      [prompt.id]: {
+        name: prompt.id,
+        description: prompt.name,
+        activeVersion: prompt.version,
+        environment: prompt.status === 'Production' ? 'prod' : 'staging',
+        owner: prompt.owner,
+        lastUpdated: new Date(prompt.updatedAt).toLocaleString(),
+        evalScore: prompt.evalScore,
+        versions: prompt.history?.map((item) => item.version) ?? [prompt.version],
+        template: prompt.template,
+        history: prompt.history ?? []
+      }
+    }));
+    setCanaryValue(prompt.canaryPercent ?? 0);
   };
+
+  const triggerRollback = async () => {
+    if (!selectedPrompt) {
+      addToast('No backend prompt is selected.', 'error');
+      return;
+    }
+    try {
+      const rolledBack = await rollbackPrompt(selectedPromptId);
+      refreshPromptFromBackend(rolledBack);
+      addToast(`Backend rolled ${selectedPrompt.name} back to ${rolledBack.version}.`, 'success');
+    } catch {
+      addToast(`Backend could not roll back ${selectedPrompt.name}. No previous version may exist.`, 'error');
+    }
+  };
+
+  const handleTrafficUpdate = async () => {
+    if (!selectedPrompt) {
+      addToast('No backend prompt is selected.', 'error');
+      return;
+    }
+    try {
+      const updated = await updatePromptTraffic(selectedPromptId, Number(canaryValue));
+      refreshPromptFromBackend(updated);
+      addToast(`Backend saved canary traffic at ${updated.canaryPercent}%.`, 'success');
+    } catch {
+      addToast(`Backend unavailable. Canary traffic for ${selectedPrompt.name} was not changed.`, 'error');
+    }
+  };
+
+  if (!selectedPrompt) {
+    return (
+      <div className="main-panel">
+        <div className="page-header">
+          <div>
+            <h1 className="page-title">Prompt Registry</h1>
+            <p className="page-subtitle">
+              Manage prompt templates, compare versions, and rollout changes via staging/production canaries.
+              {dataSource === 'fallback' ? ' Backend offline; no local prompt samples are shown.' : ' Loading backend data...'}
+            </p>
+          </div>
+        </div>
+        <div className="state-container">
+          <span style={{ fontWeight: 600 }}>No prompt records available</span>
+          <span>Start the backend or add prompt records to SQLite.</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="main-panel">
@@ -129,17 +156,17 @@ export default function PromptRegistry({ addToast }) {
           <h1 className="page-title">Prompt Registry</h1>
           <p className="page-subtitle">
             Manage prompt templates, compare versions, and rollout changes via staging/production canaries.
-            {dataSource === 'api' ? ' Backend data loaded.' : dataSource === 'fallback' ? ' Offline fallback active.' : ' Loading backend data...'}
+            {dataSource === 'api' ? ' Backend data loaded.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
           </p>
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.6fr', gap: '24px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 360px), 1fr))', gap: '24px' }}>
         {/* Left Side: Prompt List & History */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
           <div className="table-container" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
             <span style={{ fontSize: '15px', fontWeight: '600' }}>Active Prompt List</span>
-            
+
             <table className="dense-table">
               <thead>
                 <tr>
@@ -153,8 +180,8 @@ export default function PromptRegistry({ addToast }) {
                 {Object.keys(promptRegistryData).map((key) => {
                   const p = promptRegistryData[key];
                   return (
-                    <tr 
-                      key={p.name} 
+                    <tr
+                      key={p.name}
                       onClick={() => setSelectedPromptId(p.name)}
                       style={{ background: selectedPromptId === p.name ? 'rgba(26,26,25,0.03)' : '' }}
                     >
@@ -182,13 +209,13 @@ export default function PromptRegistry({ addToast }) {
 
             <div className="canary-slider-container" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
               <div className="canary-slider-labels">
-                <span>Stable v2.3</span>
-                <span style={{ color: 'var(--color-warning)', fontWeight: 600 }}>Canary v2.4 ({canaryValue}%)</span>
+                <span>Stable baseline</span>
+                <span style={{ color: 'var(--color-warning)', fontWeight: 600 }}>{selectedPrompt.activeVersion} ({canaryValue}%)</span>
               </div>
-              <input 
-                type="range" 
-                min="0" 
-                max="100" 
+              <input
+                type="range"
+                min="0"
+                max="100"
                 className="canary-range-input"
                 value={canaryValue}
                 onChange={(e) => setCanaryValue(e.target.value)}
@@ -196,32 +223,32 @@ export default function PromptRegistry({ addToast }) {
 
               {/* Dynamic Traffic Split Bar */}
               <div style={{ display: 'flex', height: '24px', borderRadius: '12px', overflow: 'hidden', border: '1px solid var(--border-color)', marginTop: '4px', position: 'relative', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.02)' }}>
-                <div 
-                  style={{ 
-                    width: `${100 - canaryValue}%`, 
-                    background: 'var(--text-primary)', 
-                    color: '#FFF', 
-                    display: 'flex', 
-                    alignItems: 'center', 
-                    justifyContent: 'center', 
-                    fontSize: '10px', 
-                    fontWeight: 600, 
+                <div
+                  style={{
+                    width: `${100 - canaryValue}%`,
+                    background: 'var(--text-primary)',
+                    color: '#FFF',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: '10px',
+                    fontWeight: 600,
                     transition: 'width 0.1s ease',
                     whiteSpace: 'nowrap'
                   }}
                 >
                   {100 - canaryValue > 15 && `Stable: ${100 - canaryValue}%`}
                 </div>
-                <div 
-                  style={{ 
-                    width: `${canaryValue}%`, 
-                    background: 'var(--accent-gold)', 
-                    color: 'var(--text-primary)', 
-                    display: 'flex', 
-                    alignItems: 'center', 
-                    justifyContent: 'center', 
-                    fontSize: '10px', 
-                    fontWeight: 700, 
+                <div
+                  style={{
+                    width: `${canaryValue}%`,
+                    background: 'var(--accent-gold)',
+                    color: 'var(--text-primary)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: '10px',
+                    fontWeight: 700,
                     transition: 'width 0.1s ease',
                     whiteSpace: 'nowrap'
                   }}
@@ -232,11 +259,11 @@ export default function PromptRegistry({ addToast }) {
             </div>
 
             <div style={{ display: 'flex', gap: '10px', marginTop: '4px' }}>
-              <button className="btn-primary" style={{ flex: 1 }} onClick={() => addToast(`Canary traffic saved at ${canaryValue}%`, 'success')}>
+              <button className="btn-primary" style={{ flex: 1 }} onClick={handleTrafficUpdate}>
                 Apply Traffic Split
               </button>
               <button className="btn-secondary" onClick={triggerRollback} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                Rollback to v2.3
+                Rollback
               </button>
             </div>
           </div>
@@ -244,7 +271,7 @@ export default function PromptRegistry({ addToast }) {
           {/* History */}
           <div className="table-container" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
             <span style={{ fontSize: '14px', fontWeight: '600' }}>Evaluation & Version History</span>
-            
+
             <table className="dense-table" style={{ fontSize: '11px' }}>
               <thead>
                 <tr>
@@ -301,23 +328,23 @@ export default function PromptRegistry({ addToast }) {
             {/* Variable Inputs */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', background: 'rgba(26,26,25,0.015)', padding: '16px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
               <span style={{ fontSize: '11px', fontWeight: '600', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Interpolation Playground</span>
-              
+
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {selectedPrompt.name === 'prompt_chat_completion' ? (
+                {selectedPrompt.template.includes('{{user_name}}') ? (
                   <>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                       <label style={{ fontSize: '10px', fontWeight: 600 }}>user_name</label>
-                      <input 
-                        className="filter-search-input" 
-                        value={variables.user_name} 
+                      <input
+                        className="filter-search-input"
+                        value={variables.user_name}
                         onChange={(e) => handleVariableChange('user_name', e.target.value)}
                       />
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                       <label style={{ fontSize: '10px', fontWeight: 600 }}>query_text</label>
-                      <input 
-                        className="filter-search-input" 
-                        value={variables.query_text} 
+                      <input
+                        className="filter-search-input"
+                        value={variables.query_text}
                         onChange={(e) => handleVariableChange('query_text', e.target.value)}
                       />
                     </div>
@@ -325,9 +352,9 @@ export default function PromptRegistry({ addToast }) {
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                     <label style={{ fontSize: '10px', fontWeight: 600 }}>query_text</label>
-                    <input 
-                      className="filter-search-input" 
-                      value={variables.query_text} 
+                    <input
+                      className="filter-search-input"
+                      value={variables.query_text}
                       onChange={(e) => handleVariableChange('query_text', e.target.value)}
                     />
                   </div>
@@ -335,7 +362,7 @@ export default function PromptRegistry({ addToast }) {
               </div>
             </div>
 
-            {/* Simulated Live Output */}
+            {/* Resolved prompt preview */}
             <div>
               <span style={{ fontSize: '11px', fontWeight: '600', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Resolved Output Preview</span>
               <div className="code-editor-panel" style={{ background: '#252522', color: '#FFF', marginTop: '6px', fontSize: '11px' }}>
@@ -346,24 +373,24 @@ export default function PromptRegistry({ addToast }) {
 
           {/* Side-by-Side Version Diff */}
           <div className="card-container">
-            <span className="card-title">Side-by-Side Version Diff (v2.3 vs v2.4)</span>
-            
+            <span className="card-title">Version History Snapshot</span>
+
             <div className="diff-viewer-grid">
               <div className="diff-column">
-                <span className="diff-column-header">v2.3 (Stable)</span>
+                <span className="diff-column-header">{selectedPrompt.history[1]?.version || 'Previous'}</span>
                 <div className="diff-content">
-                  You are an AI assistant helping {"{"}{"{"}user_name{"}"}{"}"}.{"\n"}
-                  Answer their query: {"{"}{"{"}query_text{"}"}{"}"}.{"\n"}
-                  <span className="diff-removed">Make sure to talk polite and brief.</span>
+                  {selectedPrompt.history[1]
+                    ? `${selectedPrompt.history[1].status}\nOwner: ${selectedPrompt.history[1].owner}\nScore: ${selectedPrompt.history[1].score}`
+                    : 'No previous version recorded by backend.'}
                 </div>
               </div>
 
               <div className="diff-column">
-                <span className="diff-column-header" style={{ color: 'var(--color-success)' }}>v2.4 (Canary)</span>
+                <span className="diff-column-header" style={{ color: 'var(--color-success)' }}>{selectedPrompt.activeVersion}</span>
                 <div className="diff-content">
-                  You are an AI assistant helping {"{"}{"{"}user_name{"}"}{"}"}.{"\n"}
-                  Answer their query: {"{"}{"{"}query_text{"}"}{"}"}.{"\n"}
-                  <span className="diff-added">Use only the retrieved context to answer: {"{"}{"{"}context_chunk{"}"}{"}"}</span>
+                  {selectedPrompt.history[0]
+                    ? `${selectedPrompt.history[0].status}\nOwner: ${selectedPrompt.history[0].owner}\nScore: ${selectedPrompt.history[0].score}`
+                    : `Current backend version\nOwner: ${selectedPrompt.owner}\nScore: ${selectedPrompt.evalScore}`}
                 </div>
               </div>
             </div>

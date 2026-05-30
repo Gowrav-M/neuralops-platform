@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime
 from random import choice, randint, random
+from secrets import token_hex
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -19,6 +20,7 @@ from .schemas import (
     AgentJobSubmitRequest,
     AgentJobSubmitResponse,
     AgentRuntime,
+    ApiKeyCreateRequest,
     AgentDefinition,
     AgentRunRecord,
     AgentRunRequest,
@@ -31,15 +33,21 @@ from .schemas import (
     OtelIngestRequest,
     OtelIngestResult,
     Policy,
+    PolicyPatch,
     PolicyTestRequest,
     PolicyTestResult,
+    PolicyViolation,
+    PromptTrafficUpdate,
     ProviderStatus,
     PromptVersion,
+    RagRetrievalTestRequest,
     RagQuery,
     ReplayResult,
     SettingsPayload,
     Stats,
     Trace,
+    RetentionUpdateRequest,
+    WebhookCreateRequest,
 )
 
 
@@ -164,6 +172,42 @@ def deploy_prompt(prompt_id: str) -> PromptVersion:
     return PromptVersion.model_validate(save_record("prompts", prompt_id, prompt))
 
 
+@app.post("/api/prompts/{prompt_id}/traffic", response_model=PromptVersion)
+def update_prompt_traffic(prompt_id: str, request: PromptTrafficUpdate) -> PromptVersion:
+    prompt = get_record("prompts", prompt_id)
+    if prompt is None:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+    prompt["canaryPercent"] = request.canaryPercent
+    prompt["status"] = "Production" if request.canaryPercent == 100 else "Canary"
+    prompt["updatedAt"] = datetime.now().isoformat()
+    return PromptVersion.model_validate(save_record("prompts", prompt_id, prompt))
+
+
+@app.post("/api/prompts/{prompt_id}/rollback", response_model=PromptVersion)
+def rollback_prompt(prompt_id: str) -> PromptVersion:
+    prompt = get_record("prompts", prompt_id)
+    if prompt is None:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+    history = prompt.get("history", [])
+    if len(history) < 2:
+        raise HTTPException(status_code=409, detail="No previous prompt version recorded")
+    previous = history[1]
+    current = {
+        "version": prompt["version"],
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "owner": prompt.get("owner", "AI Platform"),
+        "score": prompt.get("evalScore", 0),
+        "status": "Archived",
+    }
+    prompt["version"] = previous["version"]
+    prompt["status"] = "Production"
+    prompt["canaryPercent"] = 0
+    prompt["evalScore"] = previous["score"]
+    prompt["updatedAt"] = datetime.now().isoformat()
+    prompt["history"] = [{**previous, "status": "Production"}, current, *history[2:]]
+    return PromptVersion.model_validate(save_record("prompts", prompt_id, prompt))
+
+
 @app.get("/api/evals", response_model=list[Evaluator])
 def evals() -> list[Evaluator]:
     return [Evaluator.model_validate(item) for item in list_records("evals")]
@@ -182,6 +226,25 @@ def run_evals() -> list[Evaluator]:
 @app.get("/api/rag", response_model=list[RagQuery])
 def rag() -> list[RagQuery]:
     return [RagQuery.model_validate(item) for item in list_records("rag")]
+
+
+@app.post("/api/rag/test", response_model=RagQuery)
+def test_rag_retrieval(request: RagRetrievalTestRequest) -> RagQuery:
+    query = get_record("rag", request.queryId)
+    if query is None:
+        raise HTTPException(status_code=404, detail="RAG query not found")
+
+    reranker_bonus = 0.03 if request.reranker != "none" else -0.02
+    chunk_penalty = abs(request.chunkSize - 512) / 4096
+    top_k_penalty = abs(request.topK - len(query.get("chunks", []))) / 50
+    model_bonus = 0.02 if "large" in request.embeddingModel else 0
+    adjustment = reranker_bonus + model_bonus - chunk_penalty - top_k_penalty
+
+    for metric in ("faithfulness", "relevance", "precision", "recall"):
+        query[metric] = max(0.0, min(0.99, round(float(query.get(metric, 0)) + adjustment, 2)))
+
+    save_record("rag", request.queryId, query)
+    return RagQuery.model_validate(query)
 
 
 @app.get("/api/costs")
@@ -209,6 +272,19 @@ def simulate_cost_anomaly() -> dict[str, Any]:
 @app.get("/api/policies", response_model=list[Policy])
 def policies() -> list[Policy]:
     return [Policy.model_validate(item) for item in list_records("policies")]
+
+
+@app.patch("/api/policies/{policy_id}", response_model=Policy)
+def patch_policy(policy_id: str, patch: PolicyPatch) -> Policy:
+    updated = update_record("policies", policy_id, patch.model_dump(exclude_unset=True))
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    return Policy.model_validate(updated)
+
+
+@app.get("/api/policy-violations", response_model=list[PolicyViolation])
+def policy_violations() -> list[PolicyViolation]:
+    return [PolicyViolation.model_validate(item) for item in list_records("policy_violations")]
 
 
 @app.post("/api/policies/test", response_model=PolicyTestResult)
@@ -336,3 +412,46 @@ def settings() -> SettingsPayload:
     if payload is None:
         raise HTTPException(status_code=404, detail="Settings not found")
     return SettingsPayload.model_validate(payload)
+
+
+@app.post("/api/settings/api-keys", response_model=SettingsPayload)
+def create_api_key(request: ApiKeyCreateRequest) -> SettingsPayload:
+    payload = get_record("settings", "current")
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Settings not found")
+    key_id = f"key_{token_hex(4)}"
+    payload.setdefault("apiKeys", []).insert(
+        0,
+        {
+            "id": key_id,
+            "name": request.name,
+            "role": request.role,
+            "created": datetime.now().strftime("%Y-%m-%d"),
+        },
+    )
+    return SettingsPayload.model_validate(save_record("settings", "current", payload))
+
+
+@app.post("/api/settings/webhooks", response_model=SettingsPayload)
+def create_webhook(request: WebhookCreateRequest) -> SettingsPayload:
+    payload = get_record("settings", "current")
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Settings not found")
+    payload.setdefault("webhooks", []).append(
+        {
+            "id": f"wh_{token_hex(4)}",
+            "name": request.name,
+            "url": request.url,
+            "status": "active",
+        }
+    )
+    return SettingsPayload.model_validate(save_record("settings", "current", payload))
+
+
+@app.patch("/api/settings/retention", response_model=SettingsPayload)
+def update_retention(request: RetentionUpdateRequest) -> SettingsPayload:
+    payload = get_record("settings", "current")
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Settings not found")
+    payload["retentionDays"] = request.retentionDays
+    return SettingsPayload.model_validate(save_record("settings", "current", payload))

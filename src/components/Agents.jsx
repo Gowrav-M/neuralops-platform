@@ -16,13 +16,7 @@ import {
 } from '../lib/api';
 
 export default function Agents({ addToast }) {
-  const fallbackAgentsList = [
-    { id: 'ag_01', name: 'customer_support_agent', status: 'Active', sessions: 14, memory: '1.4GB', sandbox: 'Isolated', health: 'Healthy' },
-    { id: 'ag_02', name: 'data_analytics_agent', status: 'Idle', sessions: 2, memory: '240MB', sandbox: 'Isolated', health: 'Healthy' },
-    { id: 'ag_03', name: 'dev_automation_bot', status: 'Active', sessions: 8, memory: '890MB', sandbox: 'Unsandboxed', health: 'Warning' }
-  ];
-
-  const [agentsList, setAgentsList] = useState(fallbackAgentsList);
+  const [agentsList, setAgentsList] = useState([]);
   const [dataSource, setDataSource] = useState('loading');
   const [agentDefinitions, setAgentDefinitions] = useState([]);
   const [providers, setProviders] = useState([]);
@@ -75,12 +69,12 @@ export default function Agents({ addToast }) {
     ])
       .then(([agents, definitions, providerItems, runs, jobs, summary]) => {
         if (cancelled) return;
-        setAgentsList(agents.map((agent, index) => ({
+        setAgentsList(agents.map((agent) => ({
           id: agent.id,
           name: agent.name,
           status: agent.status === 'healthy' ? 'Active' : agent.status === 'blocked' ? 'Blocked' : 'Degraded',
           sessions: agent.activeSessions,
-          memory: index === 0 ? '1.4GB' : index === 1 ? '890MB' : '240MB',
+          memory: 'not tracked',
           sandbox: agent.status === 'blocked' ? 'Unsandboxed' : 'Isolated',
           health: agent.status === 'healthy' ? 'Healthy' : 'Warning'
         })));
@@ -243,7 +237,7 @@ export default function Agents({ addToast }) {
           <h1 className="page-title">Agent Runtime Studio</h1>
           <p className="page-subtitle">
             Run AI agents, capture traces, score evals, inspect provider readiness, and approve risky tool calls.
-            {dataSource === 'api' ? ' Backend data loaded.' : dataSource === 'fallback' ? ' Offline fallback active.' : ' Loading backend data...'}
+            {dataSource === 'api' ? ' Backend data loaded.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
           </p>
         </div>
       </div>
@@ -253,8 +247,8 @@ export default function Agents({ addToast }) {
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
             <div>
               <span style={{ fontSize: '16px', fontWeight: 700 }}>Run A Real Agent Workflow</span>
-              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px', maxWidth: '620px' }}>
-                Local runtime works without API keys. Auto/live mode can use NVIDIA NIM or any OpenAI-compatible provider when environment keys are configured.
+          <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px', maxWidth: '620px' }}>
+                Local runtime is deterministic. Auto/live mode uses configured Groq, NVIDIA NIM, or OpenAI-compatible providers when keys are available.
               </p>
             </div>
             <button className="btn-secondary" onClick={handleIngestOtel} disabled={otelBusy}>
@@ -289,7 +283,7 @@ export default function Agents({ addToast }) {
 
           <textarea
             className="code-editor-panel"
-            style={{ minHeight: '118px', resize: 'vertical', color: 'var(--text-primary)', background: '#fff' }}
+            style={{ minHeight: '118px', resize: 'vertical', color: 'var(--text-primary)', background: 'var(--bg-card)' }}
             value={agentInput}
             onChange={(event) => setAgentInput(event.target.value)}
           />
@@ -350,6 +344,10 @@ export default function Agents({ addToast }) {
       </div>
 
       <div className="agent-provider-grid">
+        <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: '15px', fontWeight: 700 }}>Provider Gateway</span>
+          <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Readiness comes from backend environment configuration.</span>
+        </div>
         {providers.map((provider) => (
           <div key={provider.id} className="agent-provider-card">
             <span className="metric-label">{provider.label}</span>
@@ -444,7 +442,7 @@ export default function Agents({ addToast }) {
               <span style={{ fontSize: '15px', fontWeight: '600' }}>Configured AI Agents</span>
               <button className="btn-secondary" onClick={refreshRuns} style={{ padding: '6px 10px', fontSize: '10px' }}>Refresh Runs</button>
             </div>
-            
+
             <table className="dense-table" style={{ fontSize: '11.5px' }}>
               <thead>
                 <tr>
@@ -457,7 +455,7 @@ export default function Agents({ addToast }) {
                 </tr>
               </thead>
               <tbody>
-                {agentsList.map((ag) => (
+                {agentsList.length > 0 ? agentsList.map((ag) => (
                   <tr key={ag.id}>
                     <td style={{ fontWeight: 600 }}>{ag.name}</td>
                     <td>
@@ -478,7 +476,13 @@ export default function Agents({ addToast }) {
                       </span>
                     </td>
                   </tr>
-                ))}
+                )) : (
+                  <tr>
+                    <td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: '18px' }}>
+                      No backend agent records available.
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -486,7 +490,7 @@ export default function Agents({ addToast }) {
           {/* Active Sessions */}
           <div className="table-container" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
             <span style={{ fontSize: '14px', fontWeight: '600' }}>Active Runtime Sessions</span>
-            
+
             <table className="dense-table" style={{ fontSize: '11px' }}>
               <thead>
                 <tr>
@@ -509,8 +513,8 @@ export default function Agents({ addToast }) {
                       {sess.warnings}
                     </td>
                     <td>
-                      <span style={{ 
-                        fontWeight: 600, 
+                      <span style={{
+                        fontWeight: 600,
                         color: ['blocked', 'failed'].includes(sess.status) ? 'var(--color-error)' : 'var(--color-success)'
                       }}>
                         {sess.status}
@@ -590,15 +594,15 @@ export default function Agents({ addToast }) {
                   </div>
 
                   <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
-                    <button 
-                      className="btn-primary" 
+                    <button
+                      className="btn-primary"
                       style={{ flex: 1, background: 'var(--accent-gold)', color: 'var(--text-primary)', fontWeight: 600 }}
                       onClick={() => handleApproveTool(item.id, item.tool)}
                     >
                       Approve & Exec
                     </button>
-                    <button 
-                      className="btn-primary" 
+                    <button
+                      className="btn-primary"
                       style={{ background: 'var(--color-blocked)', color: '#FFF' }}
                       onClick={() => handleDenyTool(item.id, item.tool)}
                     >

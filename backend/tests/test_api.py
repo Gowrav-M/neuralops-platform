@@ -36,6 +36,47 @@ def test_policy_blocks_secret_exfiltration(client: TestClient) -> None:
     assert "api key" in payload["matchedPatterns"]
 
 
+def test_policy_patch_and_violation_log(client: TestClient) -> None:
+    patch = client.patch("/api/policies/pol_01", json={"mode": "monitor", "enabled": False})
+    assert patch.status_code == 200
+    payload = patch.json()
+    assert payload["mode"] == "monitor"
+    assert payload["enabled"] is False
+    restore = client.patch("/api/policies/pol_01", json={"mode": "block", "enabled": True})
+    assert restore.status_code == 200
+
+    violations = client.get("/api/policy-violations")
+    assert violations.status_code == 200
+    assert len(violations.json()) >= 1
+
+
+def test_prompt_traffic_and_rollback_are_backend_backed(client: TestClient) -> None:
+    traffic = client.post("/api/prompts/prompt_rag_v2/traffic", json={"canaryPercent": 42})
+    assert traffic.status_code == 200
+    assert traffic.json()["canaryPercent"] == 42
+
+    rollback = client.post("/api/prompts/prompt_rag_v2/rollback")
+    assert rollback.status_code == 200
+    assert rollback.json()["status"] == "Production"
+
+
+def test_rag_retrieval_test_updates_metrics(client: TestClient) -> None:
+    response = client.post(
+        "/api/rag/test",
+        json={
+            "queryId": "q_01",
+            "topK": 4,
+            "chunkSize": 512,
+            "embeddingModel": "text-embedding-3-large",
+            "reranker": "cohere-rerank-v3",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == "q_01"
+    assert 0 <= payload["precision"] <= 1
+
+
 def test_incident_patch_validates_status(client: TestClient) -> None:
     bad_response = client.patch("/api/incidents/inc_01", json={"status": "Unknown"})
     assert bad_response.status_code == 422

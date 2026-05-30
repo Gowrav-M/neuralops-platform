@@ -37,6 +37,17 @@ export function deployPrompt(promptId) {
   return request(`/api/prompts/${promptId}/deploy`, { method: 'POST' });
 }
 
+export function updatePromptTraffic(promptId, canaryPercent) {
+  return request(`/api/prompts/${promptId}/traffic`, {
+    method: 'POST',
+    body: JSON.stringify({ canaryPercent }),
+  });
+}
+
+export function rollbackPrompt(promptId) {
+  return request(`/api/prompts/${promptId}/rollback`, { method: 'POST' });
+}
+
 export function fetchEvals() {
   return request('/api/evals');
 }
@@ -49,12 +60,30 @@ export function fetchRagQuality() {
   return request('/api/rag');
 }
 
+export function testRagRetrieval(payload) {
+  return request('/api/rag/test', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export function fetchCosts() {
   return request('/api/costs');
 }
 
 export function fetchPolicies() {
   return request('/api/policies');
+}
+
+export function patchPolicy(policyId, patch) {
+  return request(`/api/policies/${policyId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function fetchPolicyViolations() {
+  return request('/api/policy-violations');
 }
 
 export function fetchAgents() {
@@ -121,6 +150,27 @@ export function replayTrace(traceId) {
 
 export function fetchSettings() {
   return request('/api/settings');
+}
+
+export function createApiKey(payload) {
+  return request('/api/settings/api-keys', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createWebhook(payload) {
+  return request('/api/settings/webhooks', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateRetention(retentionDays) {
+  return request('/api/settings/retention', {
+    method: 'PATCH',
+    body: JSON.stringify({ retentionDays }),
+  });
 }
 
 export function simulateTrace() {

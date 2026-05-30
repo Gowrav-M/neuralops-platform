@@ -68,6 +68,17 @@ class PromptVersion(BaseModel):
     canaryPercent: int = Field(ge=0, le=100)
     evalScore: float = Field(ge=0, le=1)
     updatedAt: str
+    owner: str = "AI Platform"
+    template: str = ""
+    history: list["PromptHistoryEntry"] = Field(default_factory=list)
+
+
+class PromptHistoryEntry(BaseModel):
+    version: str
+    date: str
+    owner: str
+    score: float = Field(ge=0, le=1)
+    status: str
 
 
 class Evaluator(BaseModel):
@@ -76,6 +87,9 @@ class Evaluator(BaseModel):
     status: Literal["passing", "warning", "failing"]
     passRate: float = Field(ge=0, le=1)
     lastRun: str
+    type: str = "Deterministic"
+    testCount: int = Field(default=0, ge=0)
+    dataset: str = "backend_trace_set"
 
 
 class RagQuery(BaseModel):
@@ -85,6 +99,16 @@ class RagQuery(BaseModel):
     actual: str
     faithfulness: float = Field(ge=0, le=1)
     relevance: float = Field(ge=0, le=1)
+    precision: float = Field(default=0, ge=0, le=1)
+    recall: float = Field(default=0, ge=0, le=1)
+    chunks: list["RagChunk"] = Field(default_factory=list)
+
+
+class RagChunk(BaseModel):
+    id: str
+    doc: str
+    score: float = Field(ge=0, le=1)
+    text: str
 
 
 class CostSummary(BaseModel):
@@ -101,6 +125,34 @@ class Policy(BaseModel):
     enabled: bool
     matches: int = Field(ge=0)
     severity: Severity
+
+
+class PolicyPatch(BaseModel):
+    mode: Literal["block", "review", "monitor"] | None = None
+    enabled: bool | None = None
+
+
+class PolicyViolation(BaseModel):
+    id: str
+    policyId: str
+    policyName: str
+    decision: Literal["blocked", "review", "warned"]
+    severity: Severity
+    subject: str
+    summary: str
+    time: str
+
+
+class PromptTrafficUpdate(BaseModel):
+    canaryPercent: int = Field(ge=0, le=100)
+
+
+class RagRetrievalTestRequest(BaseModel):
+    queryId: str
+    topK: int = Field(ge=1, le=10)
+    chunkSize: int = Field(ge=128, le=2048)
+    embeddingModel: str = Field(min_length=1)
+    reranker: str = Field(min_length=1)
 
 
 class AgentRuntime(BaseModel):
@@ -206,6 +258,23 @@ class SettingsPayload(BaseModel):
     apiKeys: list[dict[str, Any]]
     webhooks: list[dict[str, Any]]
     teamMembers: list[dict[str, Any]]
+    ssoStatus: str = "Not configured"
+    billingPlan: str = "Local development"
+    nextInvoice: str | None = None
+
+
+class ApiKeyCreateRequest(BaseModel):
+    name: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+
+
+class WebhookCreateRequest(BaseModel):
+    name: str = Field(min_length=1)
+    url: str = Field(min_length=1)
+
+
+class RetentionUpdateRequest(BaseModel):
+    retentionDays: int = Field(ge=1, le=365)
 
 
 class DashboardSnapshot(BaseModel):

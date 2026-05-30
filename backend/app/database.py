@@ -34,6 +34,7 @@ def init_db() -> None:
         )
         conn.commit()
     seed_if_empty()
+    backfill_seed_defaults()
 
 
 def seed_if_empty() -> None:
@@ -56,9 +57,52 @@ def seed_if_empty() -> None:
         insert(conn, "costs", "current", seed.COSTS)
         for policy in seed.POLICIES:
             insert(conn, "policies", policy["id"], policy)
+        for violation in seed.POLICY_VIOLATIONS:
+            insert(conn, "policy_violations", violation["id"], violation)
         for agent in seed.AGENTS:
             insert(conn, "agents", agent["id"], agent)
         insert(conn, "settings", "current", seed.SETTINGS)
+        conn.commit()
+
+
+def backfill_seed_defaults() -> None:
+    seed_records = {
+        "prompts": seed.PROMPTS,
+        "evals": seed.EVALS,
+        "rag": seed.RAG,
+        "policy_violations": seed.POLICY_VIOLATIONS,
+    }
+    with connect() as conn:
+        for domain, records in seed_records.items():
+            for seeded in records:
+                row = conn.execute(
+                    "SELECT payload FROM records WHERE domain = ? AND id = ?",
+                    (domain, seeded["id"]),
+                ).fetchone()
+                if row is None:
+                    insert(conn, domain, seeded["id"], seeded)
+                    continue
+                current = json.loads(row["payload"])
+                merged = {**seeded, **current}
+                for key, value in seeded.items():
+                    if key not in current or current[key] in (None, "", []):
+                        merged[key] = value
+                insert(conn, domain, seeded["id"], merged)
+
+        settings_row = conn.execute(
+            "SELECT payload FROM records WHERE domain = ? AND id = ?",
+            ("settings", "current"),
+        ).fetchone()
+        if settings_row is not None:
+            current_settings = json.loads(settings_row["payload"])
+            for key in ("ssoStatus", "billingPlan", "nextInvoice"):
+                if key not in current_settings:
+                    current_settings[key] = seed.SETTINGS.get(key)
+            for webhook in current_settings.get("webhooks", []):
+                if webhook.get("url") == "https://hooks.slack.com/services/demo":
+                    webhook["name"] = "Operations Alert Receiver"
+                    webhook["url"] = "https://hooks.example.invalid/neuralops"
+            insert(conn, "settings", "current", current_settings)
         conn.commit()
 
 

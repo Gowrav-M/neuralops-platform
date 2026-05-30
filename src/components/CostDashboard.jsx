@@ -1,47 +1,45 @@
 import { useEffect, useState } from 'react';
-import { fetchCosts, simulateCostAnomaly } from '../lib/api';
-
-const FALLBACK_COST_BY_MODEL = [
-  { model: 'claude-3.5-sonnet', spend: 1850 },
-  { model: 'gpt-4o', spend: 1100 },
-  { model: 'llama-3.1-70b', spend: 320 },
-  { model: 'gpt-4o-mini', spend: 180.40 }
-];
-
-const FALLBACK_COST_BY_FEATURE = [
-  { feature: 'customer_support_bot', spend: 1450 },
-  { feature: 'rag_data_ingest', spend: 950 },
-  { feature: 'internal_dev_copilot', spend: 650 },
-  { feature: 'pii_pre_filter', spend: 400.40 }
-];
+import { fetchCosts, fetchTraces, simulateCostAnomaly } from '../lib/api';
 
 export default function CostDashboard({ addToast }) {
   const [anomalyTriggered, setAnomalyTriggered] = useState(false);
   const [budgetLimit, setBudgetLimit] = useState(5000);
-  const [mtdSpend, setMtdSpend] = useState(3450.40);
+  const [mtdSpend, setMtdSpend] = useState(0);
+  const [projectedSpend, setProjectedSpend] = useState(0);
+  const [costPerThousand, setCostPerThousand] = useState(0);
   const [dataSource, setDataSource] = useState('loading');
 
-  const [costByModel, setCostByModel] = useState(FALLBACK_COST_BY_MODEL);
+  const [costByModel, setCostByModel] = useState([]);
 
-  const [costByFeature, setCostByFeature] = useState(FALLBACK_COST_BY_FEATURE);
+  const [costByFeature, setCostByFeature] = useState([]);
 
-  const topExpensiveTraces = [
-    { id: 'tr_expensive_01', model: 'claude-3.5-sonnet', tokens: 145000, cost: '$4.35', user: 'corp_client_intel', latency: '4.80s' },
-    { id: 'tr_expensive_02', model: 'gpt-4o', tokens: 92000, cost: '$2.76', user: 'marketing_copy_gen', latency: '3.12s' },
-    { id: 'tr_expensive_03', model: 'claude-3.5-sonnet', tokens: 81000, cost: '$2.43', user: 'legal_doc_parser', latency: '5.20s' },
-    { id: 'tr_expensive_04', model: 'nvidia-nim-qwen3-coder', tokens: 120000, cost: '$1.80', user: 'developer_sandbox', latency: '2.50s' }
-  ];
+  const [topExpensiveTraces, setTopExpensiveTraces] = useState([]);
 
   useEffect(() => {
     let cancelled = false;
 
-    fetchCosts()
-      .then((payload) => {
+    Promise.all([fetchCosts(), fetchTraces()])
+      .then(([payload, traces]) => {
         if (cancelled) return;
-        setMtdSpend(payload.summary?.mtdSpend ?? 3450.40);
+        setMtdSpend(payload.summary?.mtdSpend ?? 0);
         setBudgetLimit(payload.summary?.budgetLimit ?? 5000);
-        setCostByModel(payload.byModel ?? FALLBACK_COST_BY_MODEL);
-        setCostByFeature(payload.byFeature ?? FALLBACK_COST_BY_FEATURE);
+        setProjectedSpend(payload.summary?.projectedSpend ?? 0);
+        setCostPerThousand(payload.summary?.costPerThousand ?? 0);
+        setCostByModel(payload.byModel ?? []);
+        setCostByFeature(payload.byFeature ?? []);
+        setTopExpensiveTraces(
+          traces
+            .map((trace) => ({
+              id: trace.id,
+              model: trace.model,
+              tokens: trace.tokens,
+              cost: trace.cost,
+              user: trace.session,
+              latency: trace.latency
+            }))
+            .sort((a, b) => (Number.parseFloat(b.cost.replace('$', '')) || 0) - (Number.parseFloat(a.cost.replace('$', '')) || 0))
+            .slice(0, 6)
+        );
         setDataSource('api');
       })
       .catch(() => {
@@ -60,10 +58,11 @@ export default function CostDashboard({ addToast }) {
       const result = await simulateCostAnomaly();
       if (result.summary?.mtdSpend) {
         setMtdSpend(result.summary.mtdSpend);
+        setProjectedSpend(result.summary.projectedSpend ?? projectedSpend);
       }
       addToast('CRITICAL ALERT: Backend recorded cost spike in customer_support_bot ($120.40/min vs standard $2.50/min)!', 'error');
     } catch {
-      addToast('CRITICAL ALERT: Local fallback cost spike simulation triggered while backend is offline.', 'error');
+      addToast('Backend unavailable. Cost anomaly was not recorded.', 'error');
     }
   };
 
@@ -75,14 +74,14 @@ export default function CostDashboard({ addToast }) {
     <div className="main-panel">
       {/* Spend Anomaly Banner */}
       {anomalyTriggered && (
-        <div 
-          style={{ 
-            background: 'var(--color-error-light)', 
-            border: '1.5px solid rgba(220, 90, 69, 0.2)', 
-            padding: '16px 20px', 
-            borderRadius: 'var(--radius-md)', 
-            display: 'flex', 
-            alignItems: 'center', 
+        <div
+          style={{
+            background: 'var(--color-error-light)',
+            border: '1.5px solid rgba(220, 90, 69, 0.2)',
+            padding: '16px 20px',
+            borderRadius: 'var(--radius-md)',
+            display: 'flex',
+            alignItems: 'center',
             justifyContent: 'space-between',
           }}
         >
@@ -100,8 +99,8 @@ export default function CostDashboard({ addToast }) {
             </div>
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
-            <button 
-              className="btn-primary" 
+            <button
+              className="btn-primary"
               style={{ background: 'var(--color-blocked)', padding: '6px 12px', fontSize: '11px' }}
               onClick={() => {
                 setAnomalyTriggered(false);
@@ -120,7 +119,7 @@ export default function CostDashboard({ addToast }) {
           <h1 className="page-title">Cost & Budgets</h1>
           <p className="page-subtitle">
             Track month-to-date spending patterns, analyze costs per feature, and simulate anomaly limits.
-            {dataSource === 'api' ? ' Backend data loaded.' : dataSource === 'fallback' ? ' Offline fallback active.' : ' Loading backend data...'}
+            {dataSource === 'api' ? ' Backend data loaded.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
           </p>
         </div>
       </div>
@@ -129,7 +128,7 @@ export default function CostDashboard({ addToast }) {
       <div className="filter-bar">
         <div className="filter-inputs-group">
           <span style={{ fontSize: '12px', fontWeight: 600 }}>Configure Monthly Budget Limit:</span>
-          <select 
+          <select
             className="filter-select"
             value={budgetLimit}
             onChange={(e) => setBudgetLimit(parseInt(e.target.value))}
@@ -159,7 +158,7 @@ export default function CostDashboard({ addToast }) {
         </div>
         <div className="metric-card-square">
           <span className="metric-label">Projected Spend</span>
-          <span className="metric-value">${Math.round(mtdSpend * 1.15).toLocaleString()}</span>
+          <span className="metric-value">${Math.round(projectedSpend).toLocaleString()}</span>
           <span className="metric-trend up">
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
               <path d="M1 9L9 1M9 1H3M9 1V7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
@@ -174,7 +173,7 @@ export default function CostDashboard({ addToast }) {
         </div>
         <div className="metric-card-square">
           <span className="metric-label">Cost per 1k Interactions</span>
-          <span className="metric-value">$0.42</span>
+          <span className="metric-value">${costPerThousand.toFixed(2)}</span>
           <span className="metric-trend down">
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
               <path d="M1 1L9 9M9 9H3M9 9V3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
@@ -191,8 +190,8 @@ export default function CostDashboard({ addToast }) {
           <span>${mtdSpend.toLocaleString()} / ${budgetLimit.toLocaleString()}</span>
         </div>
         <div className="slider-metric-bar" style={{ width: '100%', height: '14px', borderRadius: '7px' }}>
-          <div 
-            className="slider-metric-fill yellow" 
+          <div
+            className="slider-metric-fill yellow"
             style={{ width: `${getPercentBudget()}%`, borderRadius: '7px', transition: 'width 0.4s ease' }}
           ></div>
         </div>
@@ -223,11 +222,11 @@ export default function CostDashboard({ addToast }) {
         {/* Cost by Model SVG bar chart */}
         <div className="card-container">
           <span className="card-title">Accumulated Spend by Model</span>
-          
+
           <div className="chart-container-inner" style={{ height: '160px', marginTop: '10px' }}>
             <svg className="chart-svg-box" viewBox="0 0 400 130">
               <line x1="20" y1="120" x2="380" y2="120" className="chart-axis-line" />
-              {costByModel.map((item, index) => {
+            {costByModel.length > 0 ? costByModel.map((item, index) => {
                 const barWidth = 45;
                 const gap = 38;
                 const x = 36 + index * (barWidth + gap);
@@ -237,17 +236,21 @@ export default function CostDashboard({ addToast }) {
                 return (
                   <g key={item.model}>
                     <rect x={x} y={y} width={barWidth} height={height} className="chart-bar yellow" />
-                    <text 
-                      x={x + barWidth/2} 
-                      y="132" 
-                      textAnchor="middle" 
+                    <text
+                      x={x + barWidth/2}
+                      y="132"
+                      textAnchor="middle"
                       style={{ fontSize: '8px', fill: 'var(--text-secondary)', fontFamily: 'var(--font-sans)' }}
                     >
                       {item.model.replace('claude-3.5-', '').replace('gpt-4o-', '')}
                     </text>
                   </g>
                 );
-              })}
+              }) : (
+                <text x="200" y="70" textAnchor="middle" style={{ fontSize: '11px', fill: 'var(--text-secondary)', fontFamily: 'var(--font-sans)' }}>
+                  No backend model spend records
+                </text>
+              )}
             </svg>
           </div>
         </div>
@@ -255,11 +258,11 @@ export default function CostDashboard({ addToast }) {
         {/* Cost by Feature SVG bar chart */}
         <div className="card-container">
           <span className="card-title">Accumulated Spend by Feature Operations</span>
-          
+
           <div className="chart-container-inner" style={{ height: '160px', marginTop: '10px' }}>
             <svg className="chart-svg-box" viewBox="0 0 400 130">
               <line x1="20" y1="120" x2="380" y2="120" className="chart-axis-line" />
-              {costByFeature.map((item, index) => {
+            {costByFeature.length > 0 ? costByFeature.map((item, index) => {
                 const barWidth = 45;
                 const gap = 38;
                 const x = 36 + index * (barWidth + gap);
@@ -269,17 +272,21 @@ export default function CostDashboard({ addToast }) {
                 return (
                   <g key={item.feature}>
                     <rect x={x} y={y} width={barWidth} height={height} className="chart-bar" />
-                    <text 
-                      x={x + barWidth/2} 
-                      y="132" 
-                      textAnchor="middle" 
+                    <text
+                      x={x + barWidth/2}
+                      y="132"
+                      textAnchor="middle"
                       style={{ fontSize: '8.5px', fill: 'var(--text-secondary)', fontFamily: 'var(--font-sans)' }}
                     >
                       {item.feature.substring(0, 10) + '...'}
                     </text>
                   </g>
                 );
-              })}
+              }) : (
+                <text x="200" y="70" textAnchor="middle" style={{ fontSize: '11px', fill: 'var(--text-secondary)', fontFamily: 'var(--font-sans)' }}>
+                  No backend feature spend records
+                </text>
+              )}
             </svg>
           </div>
         </div>
@@ -288,7 +295,7 @@ export default function CostDashboard({ addToast }) {
       {/* Top Expensive Traces Table */}
       <div className="table-container" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
         <span style={{ fontSize: '15px', fontWeight: '600' }}>Top Expensive Trace Invocations</span>
-        
+
         <table className="dense-table">
           <thead>
             <tr>
@@ -301,8 +308,8 @@ export default function CostDashboard({ addToast }) {
             </tr>
           </thead>
           <tbody>
-            {topExpensiveTraces.map((trace) => (
-              <tr key={trace.id}>
+            {topExpensiveTraces.length > 0 ? topExpensiveTraces.map((trace, index) => (
+              <tr key={`${trace.id}-${index}`}>
                 <td className="code-font">{trace.id}</td>
                 <td className="code-font" style={{ fontWeight: 500 }}>{trace.model}</td>
                 <td>{trace.tokens.toLocaleString()}</td>
@@ -310,7 +317,11 @@ export default function CostDashboard({ addToast }) {
                 <td>{trace.user}</td>
                 <td style={{ fontWeight: '600' }}>{trace.cost}</td>
               </tr>
-            ))}
+            )) : (
+              <tr>
+                <td colSpan="6" style={{ color: 'var(--text-secondary)' }}>No backend traces are available yet.</td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

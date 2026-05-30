@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import { fetchTraceDetail } from '../lib/api';
 
-export default function TraceExplorer({ 
-  traces, 
-  selectedTrace, 
-  setSelectedTrace, 
-  drawerOpen, 
-  setDrawerOpen 
+export default function TraceExplorer({
+  traces,
+  selectedTrace,
+  setSelectedTrace,
+  drawerOpen,
+  setDrawerOpen
 }) {
   const [modelFilter, setModelFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -14,12 +14,15 @@ export default function TraceExplorer({
   const [searchQuery, setSearchQuery] = useState('');
   const [drawerTab, setDrawerTab] = useState('spans');
   const [drawerLoading, setDrawerLoading] = useState(false);
+  const modelOptions = [...new Set(traces.map((trace) => trace.model).filter(Boolean))].sort();
+  const statusOptions = [...new Set(traces.map((trace) => trace.status).filter(Boolean))].sort();
+  const environmentOptions = [...new Set(traces.map((trace) => trace.environment).filter(Boolean))].sort();
 
   const filteredTraces = traces.filter(trace => {
     const matchesModel = modelFilter === 'all' || trace.model === modelFilter;
     const matchesStatus = statusFilter === 'all' || trace.status === statusFilter;
     const matchesEnv = envFilter === 'all' || trace.environment === envFilter;
-    const matchesSearch = searchQuery === '' || 
+    const matchesSearch = searchQuery === '' ||
       trace.session.toLowerCase().includes(searchQuery.toLowerCase()) ||
       trace.prompt.toLowerCase().includes(searchQuery.toLowerCase()) ||
       trace.output.toLowerCase().includes(searchQuery.toLowerCase());
@@ -54,52 +57,49 @@ export default function TraceExplorer({
       {/* Advanced Filter Bar */}
       <div className="filter-bar">
         <div className="filter-inputs-group">
-          <select 
+          <select
             className="filter-select"
             value={modelFilter}
             onChange={(e) => setModelFilter(e.target.value)}
           >
             <option value="all">All Models</option>
-            <option value="claude-3.5-sonnet">claude-3.5-sonnet</option>
-            <option value="gpt-4o">gpt-4o</option>
-            <option value="gpt-4o-mini">gpt-4o-mini</option>
-            <option value="llama-3.1-70b">llama-3.1-70b</option>
-            <option value="nvidia-nim-qwen3-coder">qwen3-coder</option>
+            {modelOptions.map((model) => (
+              <option key={model} value={model}>{model}</option>
+            ))}
           </select>
 
-          <select 
+          <select
             className="filter-select"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
           >
             <option value="all">All Statuses</option>
-            <option value="success">Success</option>
-            <option value="warning">Warning</option>
-            <option value="failed">Failed</option>
-            <option value="blocked">Blocked</option>
+            {statusOptions.map((status) => (
+              <option key={status} value={status}>{status}</option>
+            ))}
           </select>
 
-          <select 
+          <select
             className="filter-select"
             value={envFilter}
             onChange={(e) => setEnvFilter(e.target.value)}
           >
             <option value="all">All Environments</option>
-            <option value="prod">Production</option>
-            <option value="staging">Staging</option>
-            <option value="dev">Development</option>
+            {environmentOptions.map((environment) => (
+              <option key={environment} value={environment}>{environment}</option>
+            ))}
           </select>
 
-          <input 
-            type="text" 
-            placeholder="Search prompt, output, session..." 
+          <input
+            type="text"
+            placeholder="Search prompt, output, session..."
             className="filter-search-input"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
           />
         </div>
 
-        <button 
+        <button
           className="btn-secondary"
           onClick={() => {
             setModelFilter('all');
@@ -131,14 +131,14 @@ export default function TraceExplorer({
           </thead>
           <tbody>
             {filteredTraces.length > 0 ? (
-              filteredTraces.map((trace) => (
-                <tr key={trace.id} onClick={() => handleRowClick(trace)}>
+              filteredTraces.map((trace, index) => (
+                <tr key={`${trace.id}-${index}`} onClick={() => handleRowClick(trace)}>
                   <td style={{ whiteSpace: 'nowrap' }}>{trace.timestamp}</td>
                   <td className="code-font">{trace.session}</td>
                   <td>
-                    <span style={{ 
-                      fontSize: '11px', 
-                      fontWeight: 500, 
+                    <span style={{
+                      fontSize: '11px',
+                      fontWeight: 500,
                       color: trace.environment === 'prod' ? 'var(--text-primary)' : 'var(--text-secondary)'
                     }}>
                       {trace.environment}
@@ -151,7 +151,7 @@ export default function TraceExplorer({
                   <td>
                     <span className={`badge ${
                       trace.status === 'success' ? 'badge-success' :
-                      trace.status === 'warning' ? 'badge-warning' : 
+                      trace.status === 'warning' ? 'badge-warning' :
                       trace.status === 'blocked' ? 'badge-blocked' : 'badge-error'
                     }`}>{trace.status}</span>
                   </td>
@@ -195,8 +195,8 @@ export default function TraceExplorer({
                   <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Loading trace detail...</span>
                 )}
               </div>
-              <button 
-                className="drawer-close-btn" 
+              <button
+                className="drawer-close-btn"
                 onClick={() => setDrawerOpen(false)}
                 style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
               >
@@ -231,25 +231,25 @@ export default function TraceExplorer({
 
             {/* Navigation Tabs */}
             <div className="tab-container-row">
-              <button 
+              <button
                 className={`tab-btn ${drawerTab === 'spans' ? 'active' : ''}`}
                 onClick={() => setDrawerTab('spans')}
               >
                 Waterfall Spans
               </button>
-              <button 
+              <button
                 className={`tab-btn ${drawerTab === 'prompt' ? 'active' : ''}`}
                 onClick={() => setDrawerTab('prompt')}
               >
                 Prompt / Output
               </button>
-              <button 
+              <button
                 className={`tab-btn ${drawerTab === 'context' ? 'active' : ''}`}
                 onClick={() => setDrawerTab('context')}
               >
                 Retrieved Context
               </button>
-              <button 
+              <button
                 className={`tab-btn ${drawerTab === 'json' ? 'active' : ''}`}
                 onClick={() => setDrawerTab('json')}
               >
@@ -261,43 +261,28 @@ export default function TraceExplorer({
             {drawerTab === 'spans' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                 <span style={{ fontSize: '12px', fontWeight: '600' }}>Execution Timeline Spans</span>
-                
+
                 <div className="waterfall-container">
-                  {/* Span 1: Embedding */}
-                  <div className="waterfall-span-row">
-                    <span className="waterfall-label">embedding:create</span>
-                    <div className="waterfall-track">
-                      <div className="waterfall-bar embedding" style={{ left: '0%', width: '15%' }}></div>
+                  {selectedTrace.spans?.length ? selectedTrace.spans.map((span, index, spans) => {
+                    const total = spans.reduce((sum, item) => sum + item.durationMs, 0) || 1;
+                    const previous = spans.slice(0, index).reduce((sum, item) => sum + item.durationMs, 0);
+                    const left = (previous / total) * 100;
+                    const width = Math.max(6, (span.durationMs / total) * 100);
+                    return (
+                      <div className="waterfall-span-row" key={span.id}>
+                        <span className="waterfall-label">{span.name}</span>
+                        <div className="waterfall-track">
+                          <div className={`waterfall-bar ${span.operation === 'model' ? 'model-call' : span.operation === 'retrieval' ? 'retrieval' : 'embedding'}`} style={{ left: `${left}%`, width: `${width}%` }}></div>
+                        </div>
+                        <span className="waterfall-time">{Math.round(span.durationMs)}ms</span>
+                      </div>
+                    );
+                  }) : (
+                    <div className="state-container" style={{ padding: '18px', gap: '4px' }}>
+                      <span style={{ fontWeight: 600 }}>No span records on this trace</span>
+                      <span>Use OTEL ingest or agent runtime traces to capture detailed spans.</span>
                     </div>
-                    <span className="waterfall-time">142ms</span>
-                  </div>
-
-                  {/* Span 2: Vector DB */}
-                  <div className="waterfall-span-row">
-                    <span className="waterfall-label">vector_db:query</span>
-                    <div className="waterfall-track">
-                      <div className="waterfall-bar retrieval" style={{ left: '15%', width: '22%' }}></div>
-                    </div>
-                    <span className="waterfall-time">210ms</span>
-                  </div>
-
-                  {/* Span 3: Reranker */}
-                  <div className="waterfall-span-row">
-                    <span className="waterfall-label">cohere:rerank</span>
-                    <div className="waterfall-track">
-                      <div className="waterfall-bar rerank" style={{ left: '37%', width: '12%' }}></div>
-                    </div>
-                    <span className="waterfall-time">115ms</span>
-                  </div>
-
-                  {/* Span 4: LLM Generation */}
-                  <div className="waterfall-span-row">
-                    <span className="waterfall-label">llm_generation:call</span>
-                    <div className="waterfall-track">
-                      <div className="waterfall-bar model-call" style={{ left: '49%', width: '51%' }}></div>
-                    </div>
-                    <span className="waterfall-time">820ms</span>
-                  </div>
+                  )}
                 </div>
 
                 {/* Checks */}
@@ -352,28 +337,18 @@ export default function TraceExplorer({
 
             {drawerTab === 'context' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <span style={{ fontSize: '12px', fontWeight: '600' }}>Retrieved Context Chunks</span>
-                
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                  <div style={{ background: '#FFF', border: 'var(--border-card)', padding: '14px', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-secondary)' }}>
-                      <span>CHUNK_ID: doc_guide_2491.txt (Score: 0.94)</span>
-                      <span>cosine_similarity</span>
-                    </div>
-                    <p style={{ fontSize: '11.5px', lineHeight: '1.5' }}>
-                      "...API keys created in the Settings panel will have standard rate limit thresholds applied according to user tier. The default is 50 requests per minute for developer roles, and 2000 requests per minute for production keys..."
-                    </p>
-                  </div>
+                <span style={{ fontSize: '12px', fontWeight: '600' }}>Runtime Risk Flags & Tool Context</span>
 
-                  <div style={{ background: '#FFF', border: 'var(--border-card)', padding: '14px', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-secondary)' }}>
-                      <span>CHUNK_ID: rate_limits_internal.md (Score: 0.88)</span>
-                      <span>cosine_similarity</span>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  {(selectedTrace.riskFlags?.length ? selectedTrace.riskFlags : ['No risk flags recorded for this trace.']).map((flag) => (
+                    <div key={flag} style={{ background: 'var(--bg-card)', border: 'var(--border-card)', padding: '14px', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-secondary)' }}>
+                        <span>TRACE_CONTEXT: {selectedTrace.id}</span>
+                        <span>{selectedTrace.source || 'backend'}</span>
+                      </div>
+                      <p style={{ fontSize: '11.5px', lineHeight: '1.5' }}>{flag}</p>
                     </div>
-                    <p style={{ fontSize: '11.5px', lineHeight: '1.5' }}>
-                      "...In case of a billing spike or anomaly rate limit violations, triggers will instantly write alert events directly into the Incident Timeline and ping Slack webhooks..."
-                    </p>
-                  </div>
+                  ))}
                 </div>
               </div>
             )}
@@ -382,35 +357,7 @@ export default function TraceExplorer({
               <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                 <span style={{ fontSize: '12px', fontWeight: '600' }}>Raw OpenTelemetry Trace Object</span>
                 <pre className="code-editor-panel" style={{ height: '380px', overflowY: 'auto', fontSize: '11px' }}>
-                  {JSON.stringify({
-                    trace_id: selectedTrace.id,
-                    timestamp: selectedTrace.timestamp,
-                    session: selectedTrace.session,
-                    environment: selectedTrace.environment,
-                    model: selectedTrace.model,
-                    metrics: {
-                      tokens: selectedTrace.tokens,
-                      latency_ms: parseFloat(selectedTrace.latency) * 1000,
-                      total_cost_usd: parseFloat(selectedTrace.cost.replace('$', ''))
-                    },
-                    evaluations: {
-                      overall_score: selectedTrace.score,
-                      toxicity: 0.01,
-                      relevance: 0.96,
-                      groundedness: 0.89
-                    },
-                    guardrails: {
-                      pii_masked: true,
-                      prompt_injection_detected: selectedTrace.status === 'blocked',
-                      enforcement: selectedTrace.status === 'blocked' ? 'block' : 'monitor'
-                    },
-                    payload: {
-                      messages: [
-                        { role: 'user', content: selectedTrace.prompt },
-                        { role: 'assistant', content: selectedTrace.output }
-                      ]
-                    }
-                  }, null, 2)}
+                  {JSON.stringify(selectedTrace, null, 2)}
                 </pre>
               </div>
             )}

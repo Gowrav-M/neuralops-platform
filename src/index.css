@@ -45,6 +45,10 @@
   --bg-th: rgba(26, 26, 25, 0.015);
   --scrollbar-thumb: rgba(26, 26, 25, 0.15);
   --scrollbar-thumb-hover: rgba(26, 26, 25, 0.25);
+  --button-primary-bg: var(--text-primary);
+  --button-primary-text: var(--bg-card);
+  --toast-bg: var(--text-primary);
+  --toast-text: var(--bg-card);
 }
 
 [data-theme="dark"] {
@@ -84,6 +88,10 @@
   --bg-th: rgba(250, 248, 242, 0.02);
   --scrollbar-thumb: rgba(250, 248, 242, 0.18);
   --scrollbar-thumb-hover: rgba(250, 248, 242, 0.28);
+  --button-primary-bg: #FAF8F2;
+  --button-primary-text: #121211;
+  --toast-bg: #FAF8F2;
+  --toast-text: #121211;
 }
 
 * {
@@ -94,13 +102,13 @@
 
 body {
   font-family: var(--font-sans);
-  background: var(--bg-page);
+  background: var(--bg-dashboard);
   color: var(--text-primary);
   min-height: 100vh;
   display: flex;
-  justify-content: center;
-  align-items: flex-start;
-  padding: 24px;
+  justify-content: stretch;
+  align-items: stretch;
+  padding: 0;
   overflow-x: hidden;
 }
 
@@ -123,22 +131,24 @@ body {
 /* React Root Pass-through styling */
 #root {
   width: 100%;
-  max-width: 1560px;
+  max-width: none;
+  min-height: 100vh;
   display: flex;
-  justify-content: center;
+  justify-content: stretch;
 }
 
 /* Master Container - Flex Row for Sidebar layout */
 .dashboard-wrapper {
   width: 100%;
+  min-width: 0;
   background: var(--bg-dashboard);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-premium);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0;
+  box-shadow: none;
+  border: 0;
   display: flex;
   flex-direction: row;
-  min-height: 850px;
-  height: auto;
+  min-height: 100vh;
+  height: 100vh;
   overflow: hidden;
   animation: fadeInApp 0.8s cubic-bezier(0.16, 1, 0.3, 1);
   position: relative;
@@ -152,13 +162,16 @@ body {
 /* Modern Left Sidebar Panel */
 .sidebar-container {
   width: 270px;
-  background: var(--bg-card);
+  background: var(--bg-dashboard);
   border-right: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
   gap: 16px;
   padding: 24px;
   flex-shrink: 0;
+  height: 100vh;
+  overflow-y: auto;
+  overflow-x: hidden;
   transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -389,6 +402,9 @@ body {
 .main-content-panel {
   flex: 1;
   min-width: 0;
+  height: 100vh;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 32px;
   display: flex;
   flex-direction: column;
@@ -1538,10 +1554,16 @@ body {
   padding: 6px 12px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-primary);
   font-family: var(--font-sans);
   font-size: 12px;
   outline: none;
   min-width: 180px;
+}
+
+.filter-search-input::placeholder {
+  color: var(--text-tertiary);
 }
 
 .filter-search-input:focus {
@@ -1688,7 +1710,7 @@ body {
   backdrop-filter: blur(4px);
   z-index: 1000;
   display: flex;
-  justify-flex: flex-end;
+  justify-content: flex-end;
   animation: fadeInOverlay 0.25s ease-out;
 }
 
@@ -1982,11 +2004,17 @@ body {
   height: 80px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-primary);
   padding: 10px;
   font-family: var(--font-sans);
   font-size: 12px;
   outline: none;
   resize: none;
+}
+
+.sandbox-textarea::placeholder {
+  color: var(--text-tertiary);
 }
 
 .sandbox-textarea:focus {
@@ -1995,8 +2023,8 @@ body {
 
 .btn-primary {
   padding: 8px 16px;
-  background: var(--text-primary);
-  color: #FFF;
+  background: var(--button-primary-bg);
+  color: var(--button-primary-text);
   border: none;
   border-radius: var(--radius-lg);
   font-family: var(--font-sans);
@@ -2011,13 +2039,21 @@ body {
 }
 
 .btn-primary:hover {
-  background: #000;
+  background: var(--button-primary-bg);
   transform: translateY(-2px) scale(1.02);
   box-shadow: var(--shadow-md);
 }
 
 .btn-primary:active {
   transform: scale(0.97);
+}
+
+.btn-primary:disabled,
+.btn-secondary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
 }
 
 .btn-secondary {
@@ -2135,8 +2171,8 @@ body {
 }
 
 .toast-item {
-  background: var(--text-primary);
-  color: #FFF;
+  background: var(--toast-bg);
+  color: var(--toast-text);
   border-radius: var(--radius-md);
   padding: 14px 20px;
   font-size: 12px;
@@ -2195,7 +2231,7 @@ body {
 /* Responsive Overrides */
 @media (max-width: 1024px) {
   body {
-    padding: 16px 8px;
+    padding: 0;
   }
   .dashboard-wrapper {
     min-height: auto;
@@ -2217,19 +2253,23 @@ body {
 
 @media (max-width: 768px) {
   body {
-    padding: 12px 8px;
-    align-items: flex-start;
+    padding: 0;
+    align-items: stretch;
   }
   #root {
     max-width: 100%;
   }
   .dashboard-wrapper {
     flex-direction: column;
-    border-radius: 28px;
+    border-radius: 0;
+    min-height: 100vh;
+    height: auto;
     overflow: visible;
   }
   .sidebar-container {
     width: 100%;
+    height: auto;
+    overflow: visible;
     border-right: 0;
     border-bottom: 1px solid var(--border-color);
     padding: 16px;

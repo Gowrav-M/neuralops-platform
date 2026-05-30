@@ -1,11 +1,11 @@
 import { useState } from 'react';
 
-export default function Overview({ 
-  stats, 
-  traces, 
-  incidents, 
-  setActiveTab, 
-  setSelectedTrace, 
+export default function Overview({
+  stats,
+  traces,
+  incidents,
+  setActiveTab,
+  setSelectedTrace,
   setDrawerOpen,
   timerActive,
   setTimerActive,
@@ -15,27 +15,44 @@ export default function Overview({
   const [tooltipData, setTooltipData] = useState({ visible: false, x: 0, y: 0, text: '' });
   const [activePoint, setActivePoint] = useState(11); // snap to last point initially
 
-  const chartPoints = [
-    { x: 10, y: 85, val: '8.2k', time: '08:00 AM' },
-    { x: 35, y: 78, val: '12.4k', time: '09:00 AM' },
-    { x: 60, y: 82, val: '15.1k', time: '10:00 AM' },
-    { x: 85, y: 72, val: '19.8k', time: '11:00 AM' },
-    { x: 110, y: 58, val: '24.2k', time: '12:00 PM' },
-    { x: 135, y: 65, val: '28.9k', time: '01:00 PM' },
-    { x: 160, y: 50, val: '35.4k', time: '02:00 PM' },
-    { x: 185, y: 55, val: '42.1k', time: '03:00 PM' },
-    { x: 210, y: 38, val: '51.3k', time: '04:00 PM' },
-    { x: 235, y: 30, val: '64.8k', time: '05:00 PM' },
-    { x: 260, y: 35, val: '72.0k', time: '06:00 PM' },
-    { x: 290, y: 25, val: '85.2k', time: '07:00 PM' }
-  ];
+  const sortedTraces = [...traces].slice(0, 12).reverse();
+  const chartSource = sortedTraces.length > 0 ? sortedTraces : [{ timestamp: 'now', tokens: 0 }];
+  const maxTokens = Math.max(...chartSource.map((trace) => trace.tokens || 0), 1);
+  const chartPoints = chartSource.map((trace, index) => {
+    const x = chartSource.length === 1 ? 150 : 10 + (280 * index) / (chartSource.length - 1);
+    const y = 115 - ((trace.tokens || 0) / maxTokens) * 90;
+    return {
+      x,
+      y,
+      val: String(trace.tokens || 0),
+      time: trace.timestamp || 'now'
+    };
+  });
+  const safeActivePoint = Math.min(activePoint, chartPoints.length - 1);
+  const linePath = chartPoints.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ');
+  const areaPath = `${linePath} L ${chartPoints.at(-1).x} 120 L ${chartPoints[0].x} 120 Z`;
 
-  // Local workflow summary used by the overview chart area.
-  const expensiveWorkflows = [
-    { name: 'rag_qa_agent_chain', calls: 1420, avgCost: '$0.042', totalCost: '$59.64', latency: '1.82s' },
-    { name: 'code_generation_copilot', calls: 890, avgCost: '$0.058', totalCost: '$51.62', latency: '3.40s' },
-    { name: 'pii_anonymizer_preprocessor', calls: 3500, avgCost: '$0.004', totalCost: '$14.00', latency: '0.12s' },
-  ];
+  const workflowMap = traces.reduce((acc, trace) => {
+    const name = trace.toolCalls || trace.session || 'direct_model_call';
+    const cost = Number.parseFloat(String(trace.cost).replace('$', '')) || 0;
+    const latency = Number.parseFloat(String(trace.latency).replace('s', '')) || 0;
+    const current = acc.get(name) || { name, calls: 0, totalCost: 0, totalLatency: 0 };
+    current.calls += 1;
+    current.totalCost += cost;
+    current.totalLatency += latency;
+    acc.set(name, current);
+    return acc;
+  }, new Map());
+  const expensiveWorkflows = [...workflowMap.values()]
+    .sort((a, b) => b.totalCost - a.totalCost)
+    .slice(0, 5)
+    .map((flow) => ({
+      name: flow.name,
+      calls: flow.calls,
+      avgCost: `$${(flow.totalCost / Math.max(flow.calls, 1)).toFixed(3)}`,
+      totalCost: `$${flow.totalCost.toFixed(3)}`,
+      latency: `${(flow.totalLatency / Math.max(flow.calls, 1)).toFixed(2)}s`
+    }));
 
   const handleBarHover = (e, val, label) => {
     const rect = e.target.getBoundingClientRect();
@@ -51,13 +68,22 @@ export default function Overview({
     setTooltipData({ visible: false, x: 0, y: 0, text: '' });
   };
 
-  // Custom SVG Chart Data
-  const costByModel = [
-    { model: 'claude-3.5-sonnet', cost: 145 },
-    { model: 'gpt-4o', cost: 112 },
-    { model: 'llama-3.1-70b', cost: 34 },
-    { model: 'gpt-4o-mini', cost: 18 }
-  ];
+  const modelCostMap = traces.reduce((acc, trace) => {
+    const cost = Number.parseFloat(String(trace.cost).replace('$', '')) || 0;
+    acc.set(trace.model, (acc.get(trace.model) || 0) + cost);
+    return acc;
+  }, new Map());
+  const costByModel = [...modelCostMap.entries()]
+    .map(([model, cost]) => ({ model, cost }))
+    .sort((a, b) => b.cost - a.cost)
+    .slice(0, 4);
+  const todaySpend = costByModel.reduce((sum, item) => sum + item.cost, 0);
+  const maxModelCost = Math.max(...costByModel.map((item) => item.cost), 0.001);
+  const blockedCount = traces.filter((trace) => trace.status === 'blocked').length;
+  const healthyScore = traces.length === 0 ? 100 : Math.round(((traces.length - blockedCount) / traces.length) * 100);
+  const warningCount = traces.filter((trace) => trace.status === 'warning').length;
+  const failedCount = traces.filter((trace) => trace.status === 'failed').length;
+  const successfulCount = traces.filter((trace) => trace.status === 'success').length;
 
   return (
     <div className="main-panel">
@@ -75,19 +101,19 @@ export default function Overview({
           <div className="slider-metric-card">
             <span className="slider-metric-label">System Load</span>
             <div className="slider-metric-value-container">
-              <span className="slider-metric-pill">15%</span>
+              <span className="slider-metric-pill">{Math.min(100, traces.length * 5)}%</span>
               <div className="slider-metric-bar">
-                <div className="slider-metric-fill" style={{ width: '15%' }}></div>
+                <div className="slider-metric-fill" style={{ width: `${Math.min(100, traces.length * 5)}%` }}></div>
               </div>
             </div>
           </div>
-          
+
           <div className="slider-metric-card">
             <span className="slider-metric-label">Canary Traffic</span>
             <div className="slider-metric-value-container">
-              <span className="slider-metric-pill yellow">25%</span>
+              <span className="slider-metric-pill yellow">{Math.round(Number.parseFloat(stats.evalPassRate) || 0)}%</span>
               <div className="slider-metric-bar">
-                <div className="slider-metric-fill yellow" style={{ width: '25%' }}></div>
+                <div className="slider-metric-fill yellow" style={{ width: `${Math.round(Number.parseFloat(stats.evalPassRate) || 0)}%` }}></div>
               </div>
             </div>
           </div>
@@ -95,9 +121,9 @@ export default function Overview({
           <div className="slider-metric-card">
             <span className="slider-metric-label">Sandbox Safety</span>
             <div className="slider-metric-value-container">
-              <span className="slider-metric-pill">98%</span>
+              <span className="slider-metric-pill">{healthyScore}%</span>
               <div className="slider-metric-bar">
-                <div className="slider-metric-fill striped" style={{ width: '98%' }}></div>
+                <div className="slider-metric-fill striped" style={{ width: `${healthyScore}%` }}></div>
               </div>
             </div>
           </div>
@@ -105,15 +131,15 @@ export default function Overview({
 
         <div className="stat-piles">
           <div className="stat-pile-item">
-            <span className="stat-pile-val">78</span>
+            <span className="stat-pile-val">{new Set(traces.map((trace) => trace.session)).size}</span>
             <span className="stat-pile-lbl">Active<br />Sessions</span>
           </div>
           <div className="stat-pile-item">
-            <span className="stat-pile-val">56</span>
+            <span className="stat-pile-val">{traces.filter((trace) => trace.score > 0).length}</span>
             <span className="stat-pile-lbl">Evals<br />Completed</span>
           </div>
           <div className="stat-pile-item">
-            <span className="stat-pile-val">203</span>
+            <span className="stat-pile-val">{expensiveWorkflows.length}</span>
             <span className="stat-pile-lbl">Total<br />Workflows</span>
           </div>
         </div>
@@ -128,7 +154,7 @@ export default function Overview({
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
               <path d="M1 9L9 1M9 1H3M9 1V7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
-            +12.4%
+            {traces.length} backend traces
           </span>
         </div>
         <div className="metric-card-square" onClick={() => setActiveTab('Traces')}>
@@ -138,7 +164,7 @@ export default function Overview({
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
               <path d="M1 1L9 9M9 9H3M9 9V3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
-            -4.2%
+            live aggregate
           </span>
         </div>
         <div className="metric-card-square" onClick={() => setActiveTab('Traces')}>
@@ -148,7 +174,7 @@ export default function Overview({
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
               <path d="M1 1L9 9M9 9H3M9 9V3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
-            -2.1%
+            live aggregate
           </span>
         </div>
         <div className="metric-card-square" onClick={() => setActiveTab('Traces')}>
@@ -158,7 +184,7 @@ export default function Overview({
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
               <path d="M1 1L9 9M9 9H3M9 9V3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
-            -0.8%
+            {failedCount + blockedCount} failed/blocked
           </span>
         </div>
         <div className="metric-card-square" onClick={() => setActiveTab('Cost')}>
@@ -168,7 +194,7 @@ export default function Overview({
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
               <path d="M1 9L9 1M9 1H3M9 1V7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
-            +18.5%
+            from trace costs
           </span>
         </div>
         <div className="metric-card-square" onClick={() => setActiveTab('Evaluations')}>
@@ -178,7 +204,7 @@ export default function Overview({
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
               <path d="M1 9L9 1M9 1H3M9 1V7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
-            +0.5%
+            {successfulCount} passing traces
           </span>
         </div>
         <div className="metric-card-square alert-violation" onClick={() => setActiveTab('Policies')}>
@@ -188,7 +214,7 @@ export default function Overview({
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
               <path d="M1 9L9 1M9 1H3M9 1V7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
-            +4
+            {warningCount + blockedCount} risky traces
           </span>
         </div>
         <div className="metric-card-square alert-incident" onClick={() => setActiveTab('Incidents')}>
@@ -210,24 +236,24 @@ export default function Overview({
               </svg>
             </div>
           </div>
-          
+
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px' }}>
               <span style={{ fontSize: '24px', fontWeight: '600', transition: 'all 0.15s ease' }}>
-                {activePoint !== null ? chartPoints[activePoint].val : '85.2k'}
+                {safeActivePoint !== null ? chartPoints[safeActivePoint].val : '0'}
               </span>
               <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Total Calls</span>
             </div>
             {activePoint !== null && (
               <span style={{ fontSize: '11px', color: 'var(--accent-gold)', fontWeight: '600' }}>
-                {chartPoints[activePoint].time}
+                {chartPoints[safeActivePoint].time}
               </span>
             )}
           </div>
 
           <div className="chart-container-inner">
-            <svg 
-              className="chart-svg-box" 
+            <svg
+              className="chart-svg-box"
               viewBox="0 0 300 130"
               onMouseMove={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
@@ -258,52 +284,52 @@ export default function Overview({
               <line x1="10" y1="30" x2="290" y2="30" className="chart-grid-line" />
 
               {/* Area Under Curve */}
-              <path 
-                d="M 10 120 L 10 85 L 35 78 L 60 82 L 85 72 L 110 58 L 135 65 L 160 50 L 185 55 L 210 38 L 235 30 L 260 35 L 290 25 L 290 120 Z" 
-                className="chart-path-fill" 
+              <path
+                d={areaPath}
+                className="chart-path-fill"
               />
 
               {/* Main Line */}
-              <path 
-                d="M 10 85 L 35 78 L 60 82 L 85 72 L 110 58 L 135 65 L 160 50 L 185 55 L 210 38 L 235 30 L 260 35 L 290 25" 
-                className="chart-path-main" 
+              <path
+                d={linePath}
+                className="chart-path-main"
               />
-              
+
               {/* Interactive guidelines */}
               {activePoint !== null && (
                 <>
-                  <line 
-                    x1={chartPoints[activePoint].x} 
-                    y1="10" 
-                    x2={chartPoints[activePoint].x} 
-                    y2="120" 
-                    stroke="rgba(26, 26, 25, 0.15)" 
+                  <line
+                    x1={chartPoints[safeActivePoint].x}
+                    y1="10"
+                    x2={chartPoints[safeActivePoint].x}
+                    y2="120"
+                    stroke="rgba(26, 26, 25, 0.15)"
                     strokeDasharray="3 3"
                     strokeWidth="1.5"
                   />
-                  <line 
-                    x1="10" 
-                    y1={chartPoints[activePoint].y} 
-                    x2="290" 
-                    y2={chartPoints[activePoint].y} 
-                    stroke="rgba(26, 26, 25, 0.08)" 
+                  <line
+                    x1="10"
+                    y1={chartPoints[safeActivePoint].y}
+                    x2="290"
+                    y2={chartPoints[safeActivePoint].y}
+                    stroke="rgba(26, 26, 25, 0.08)"
                     strokeDasharray="3 3"
                   />
                   {/* Highlight Snapping Dot */}
-                  <circle 
-                    cx={chartPoints[activePoint].x} 
-                    cy={chartPoints[activePoint].y} 
-                    r="6" 
-                    fill="var(--text-primary)" 
-                    stroke="var(--accent-gold)" 
-                    strokeWidth="2.5" 
+                  <circle
+                    cx={chartPoints[safeActivePoint].x}
+                    cy={chartPoints[safeActivePoint].y}
+                    r="6"
+                    fill="var(--text-primary)"
+                    stroke="var(--accent-gold)"
+                    strokeWidth="2.5"
                     style={{ transition: 'cx 0.1s ease, cy 0.1s ease' }}
                   />
                 </>
               )}
             </svg>
           </div>
-          
+
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-secondary)' }}>
             <span>08:00 AM</span>
             <span>12:00 PM</span>
@@ -327,11 +353,11 @@ export default function Overview({
             <div className="circular-gauge-container">
               <svg className="circular-gauge-svg">
                 <circle cx="65" cy="65" r="54" className="gauge-bg" />
-                <circle 
-                  cx="65" 
-                  cy="65" 
-                  r="54" 
-                  className={`gauge-fill ${timerActive ? '' : 'success'}`} 
+                <circle
+                  cx="65"
+                  cy="65"
+                  r="54"
+                  className={`gauge-fill ${timerActive ? '' : 'success'}`}
                   style={{
                     strokeDasharray: '339.3',
                     strokeDashoffset: timerActive ? (339.3 - (339.3 * (timerSeconds % 60)) / 60).toString() : '90'
@@ -345,10 +371,10 @@ export default function Overview({
             </div>
 
             <div className="timer-controls">
-              <button 
+              <button
                 className={`timer-btn ${timerActive ? 'active' : ''}`}
                 onClick={() => setTimerActive(!timerActive)}
-                title={timerActive ? "Pause Dashboard Stream" : "Resume Dashboard Stream"}
+                title={timerActive ? "Pause Uptime Clock" : "Resume Uptime Clock"}
               >
                 {timerActive ? (
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
@@ -362,7 +388,7 @@ export default function Overview({
                 )}
               </button>
               <span style={{ fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 500 }}>
-                {timerActive ? 'Live streaming traces' : 'Dashboard paused'}
+                {timerActive ? 'Uptime clock running' : 'Uptime clock paused'}
               </span>
             </div>
           </div>
@@ -380,7 +406,7 @@ export default function Overview({
           </div>
 
           <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px' }}>
-            <span style={{ fontSize: '24px', fontWeight: '600' }}>$309.00</span>
+            <span style={{ fontSize: '24px', fontWeight: '600' }}>${todaySpend.toFixed(3)}</span>
             <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Today's Spend</span>
           </div>
 
@@ -391,24 +417,23 @@ export default function Overview({
                 const barWidth = 36;
                 const gap = 32;
                 const x = 32 + index * (barWidth + gap);
-                const maxCost = 150;
-                const height = (item.cost / maxCost) * 100;
+                const height = Math.max(4, (item.cost / maxModelCost) * 100);
                 const y = 120 - height;
                 return (
                   <g key={item.model}>
-                    <rect 
-                      x={x} 
-                      y={y} 
-                      width={barWidth} 
-                      height={height} 
+                    <rect
+                      x={x}
+                      y={y}
+                      width={barWidth}
+                      height={height}
                       className={`chart-bar ${index === 0 ? 'yellow' : ''}`}
-                      onMouseEnter={(e) => handleBarHover(e, `$${item.cost}`, item.model)}
+                      onMouseEnter={(e) => handleBarHover(e, `$${item.cost.toFixed(3)}`, item.model)}
                       onMouseLeave={handleBarLeave}
                     />
-                    <text 
-                      x={x + barWidth/2} 
-                      y="132" 
-                      textAnchor="middle" 
+                    <text
+                      x={x + barWidth/2}
+                      y="132"
+                      textAnchor="middle"
                       style={{ fontSize: '9px', fill: 'var(--text-secondary)', fontFamily: 'var(--font-sans)' }}
                     >
                       {item.model.split('-')[0]}
@@ -423,13 +448,13 @@ export default function Overview({
 
       {/* Floating Chart Tooltip */}
       {tooltipData.visible && (
-        <div 
-          className="chart-tooltip" 
-          style={{ 
-            display: 'block', 
-            left: `${tooltipData.x}px`, 
-            top: `${tooltipData.y}px`, 
-            transform: 'translateY(-100%)' 
+        <div
+          className="chart-tooltip"
+          style={{
+            display: 'block',
+            left: `${tooltipData.x}px`,
+            top: `${tooltipData.y}px`,
+            transform: 'translateY(-100%)'
           }}
         >
           {tooltipData.text}
@@ -459,8 +484,8 @@ export default function Overview({
                 </tr>
               </thead>
               <tbody>
-                {traces.slice(0, 5).map((trace) => (
-                  <tr key={trace.id} onClick={() => { setSelectedTrace(trace); setDrawerOpen(true); }}>
+                {traces.length > 0 ? traces.slice(0, 5).map((trace, index) => (
+                  <tr key={`${trace.id}-${index}`} onClick={() => { setSelectedTrace(trace); setDrawerOpen(true); }}>
                     <td>{trace.timestamp}</td>
                     <td className="code-font">{trace.model}</td>
                     <td>{trace.latency}</td>
@@ -472,7 +497,11 @@ export default function Overview({
                       }`}>{trace.status}</span>
                     </td>
                   </tr>
-                ))}
+                )) : (
+                  <tr>
+                    <td colSpan="5" style={{ color: 'var(--text-secondary)' }}>No backend traces available.</td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -486,7 +515,7 @@ export default function Overview({
           </div>
 
           <div className="dark-list">
-            {incidents.map((incident) => (
+            {incidents.length > 0 ? incidents.map((incident) => (
               <div key={incident.id} className="dark-list-item" onClick={() => setActiveTab('Incidents')}>
                 <div className="item-left">
                   <div className="item-icon-box" style={{ color: incident.severity === 'Critical' ? 'var(--color-error)' : 'var(--color-warning)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -507,7 +536,14 @@ export default function Overview({
                   </span>
                 </div>
               </div>
-            ))}
+            )) : (
+              <div className="dark-list-item">
+                <div className="item-meta">
+                  <span className="item-title">No active incidents</span>
+                  <span className="item-subtitle">Backend has no incident records.</span>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -515,7 +551,7 @@ export default function Overview({
       {/* Top Expensive Workflows Grid Card */}
       <div className="table-container" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
         <span style={{ fontSize: '15px', fontWeight: '600' }}>Top Expensive Workflow Operations</span>
-        
+
         <table className="dense-table">
           <thead>
             <tr>

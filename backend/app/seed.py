@@ -158,6 +158,12 @@ PROMPTS: list[dict[str, Any]] = [
         "canaryPercent": 60,
         "evalScore": 0.94,
         "updatedAt": "2026-05-30T09:20:00+05:30",
+        "owner": "AI Platform Oncall",
+        "template": "Classify this support ticket for {{user_name}}.\nTicket: {{query_text}}\nUse only approved context: {{context_chunk}}",
+        "history": [
+            {"version": "v4.2.1", "date": "2026-05-30", "owner": "AI Platform Oncall", "score": 0.94, "status": "Production"},
+            {"version": "v4.1.0", "date": "2026-05-24", "owner": "Trust Engineering", "score": 0.89, "status": "Archived"},
+        ],
     },
     {
         "id": "prompt_rag_v2",
@@ -167,13 +173,19 @@ PROMPTS: list[dict[str, Any]] = [
         "canaryPercent": 25,
         "evalScore": 0.91,
         "updatedAt": "2026-05-30T08:42:00+05:30",
+        "owner": "Knowledge Systems",
+        "template": "Answer {{query_text}} using retrieved context only.\nContext: {{context_chunk}}\nIf context is insufficient, say what is missing.",
+        "history": [
+            {"version": "v2.8.0", "date": "2026-05-30", "owner": "Knowledge Systems", "score": 0.91, "status": "Canary"},
+            {"version": "v2.7.0", "date": "2026-05-20", "owner": "Knowledge Systems", "score": 0.88, "status": "Production"},
+        ],
     },
 ]
 
 EVALS: list[dict[str, Any]] = [
-    {"id": "eval_pii", "name": "PII Disclosure Guard", "status": "passing", "passRate": 0.98, "lastRun": "7 mins ago"},
-    {"id": "eval_rag", "name": "RAG Faithfulness", "status": "warning", "passRate": 0.86, "lastRun": "12 mins ago"},
-    {"id": "eval_jailbreak", "name": "Jailbreak Resistance", "status": "passing", "passRate": 0.94, "lastRun": "19 mins ago"},
+    {"id": "eval_pii", "name": "PII Disclosure Guard", "status": "passing", "passRate": 0.98, "lastRun": "7 mins ago", "type": "Heuristic", "testCount": 7, "dataset": "backend_traces"},
+    {"id": "eval_rag", "name": "RAG Faithfulness", "status": "warning", "passRate": 0.86, "lastRun": "12 mins ago", "type": "Deterministic", "testCount": 2, "dataset": "rag_queries"},
+    {"id": "eval_jailbreak", "name": "Jailbreak Resistance", "status": "passing", "passRate": 0.94, "lastRun": "19 mins ago", "type": "Pattern Guard", "testCount": 7, "dataset": "backend_traces"},
 ]
 
 RAG: list[dict[str, Any]] = [
@@ -184,6 +196,12 @@ RAG: list[dict[str, Any]] = [
         "actual": "Enterprise API keys are billed on a monthly tier and include retention controls plus workspace-level usage limits.",
         "faithfulness": 0.92,
         "relevance": 0.89,
+        "precision": 0.87,
+        "recall": 0.84,
+        "chunks": [
+            {"id": "chunk_billing_01", "doc": "billing-policy.seed.md", "score": 0.89, "text": "Enterprise API keys are billed monthly and include workspace usage limits."},
+            {"id": "chunk_retention_01", "doc": "retention-policy.seed.md", "score": 0.81, "text": "Retention settings control how long prompts, traces, and generated outputs remain available."},
+        ],
     },
     {
         "id": "q_02",
@@ -192,6 +210,12 @@ RAG: list[dict[str, Any]] = [
         "actual": "Support agents need policy-scoped tools and approval to access billing data.",
         "faithfulness": 0.88,
         "relevance": 0.91,
+        "precision": 0.9,
+        "recall": 0.82,
+        "chunks": [
+            {"id": "chunk_access_01", "doc": "rbac-policy.seed.md", "score": 0.91, "text": "Support agents can only use scoped billing tools after policy approval."},
+            {"id": "chunk_tools_01", "doc": "tool-approval.seed.md", "score": 0.78, "text": "Risky tool calls require manual approval before execution."},
+        ],
     },
 ]
 
@@ -217,6 +241,29 @@ POLICIES: list[dict[str, Any]] = [
     {"id": "pol_03", "name": "External Tool Approval", "mode": "review", "enabled": True, "matches": 14, "severity": "Major"},
 ]
 
+POLICY_VIOLATIONS: list[dict[str, Any]] = [
+    {
+        "id": "vio_01",
+        "policyId": "pol_01",
+        "policyName": "Jailbreak Injection Shield",
+        "decision": "blocked",
+        "severity": "Critical",
+        "subject": "tr_06",
+        "summary": "Prompt matched jailbreak and credential exfiltration phrases.",
+        "time": "10 mins ago",
+    },
+    {
+        "id": "vio_02",
+        "policyId": "pol_03",
+        "policyName": "External Tool Approval",
+        "decision": "review",
+        "severity": "Major",
+        "subject": "tr_05",
+        "summary": "Trace requested external tool use and was routed for approval.",
+        "time": "1 hour ago",
+    },
+]
+
 AGENTS: list[dict[str, Any]] = [
     {"id": "agent_support", "name": "Production Support Agent", "status": "healthy", "model": "claude-3.5-sonnet", "activeSessions": 78, "risk": "Minor"},
     {"id": "agent_code", "name": "Developer Copilot Agent", "status": "degraded", "model": "nvidia-nim-qwen3-coder", "activeSessions": 21, "risk": "Major"},
@@ -230,11 +277,14 @@ SETTINGS: dict[str, Any] = {
         {"id": "key_02", "name": "Staging Ingest Key", "role": "Developer", "created": "2026-05-29"},
     ],
     "webhooks": [
-        {"id": "wh_01", "name": "Slack Alerts Integration", "url": "https://hooks.slack.com/services/demo", "status": "active"},
+        {"id": "wh_01", "name": "Operations Alert Receiver", "url": "https://hooks.example.invalid/neuralops", "status": "active"},
     ],
     "teamMembers": [
         {"name": "AI Platform Oncall", "email": "oncall@neuralops.local", "role": "Admin"},
         {"name": "Trust Engineering", "email": "trust@neuralops.local", "role": "Security"},
         {"name": "FinOps", "email": "finops@neuralops.local", "role": "Viewer"},
     ],
+    "ssoStatus": "Not configured",
+    "billingPlan": "Local seeded workspace",
+    "nextInvoice": None,
 }
