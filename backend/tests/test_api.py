@@ -115,6 +115,54 @@ def test_agent_runtime_local_run_creates_trace(client: TestClient) -> None:
     assert trace_detail.status_code == 200
 
 
+def test_api_key_creation_returns_one_time_token_and_ingests_trace(client: TestClient) -> None:
+    created = client.post("/api/settings/api-keys", json={"name": "pytest ingest", "role": "Developer"})
+    assert created.status_code == 200
+    created_payload = created.json()
+    token = created_payload["token"]
+    assert token.startswith("nop_sk_")
+    assert "tokenHash" not in created_payload["settings"]["apiKeys"][0]
+
+    unauthorized = client.post(
+        "/api/traces/ingest",
+        json={
+            "session": "pytest_session",
+            "model": "pytest-model",
+            "tokens": 12,
+            "latencyMs": 240,
+            "prompt": "hello",
+            "output": "world",
+        },
+    )
+    assert unauthorized.status_code == 401
+
+    ingested = client.post(
+        "/api/traces/ingest",
+        headers={"x-neuralops-key": token},
+        json={
+            "session": "pytest_session",
+            "environment": "staging",
+            "model": "pytest-model",
+            "tokens": 12,
+            "latencyMs": 240,
+            "costUsd": 0.001,
+            "status": "success",
+            "score": 0.91,
+            "prompt": "hello",
+            "output": "world",
+            "riskFlags": ["pytest verified ingest"],
+        },
+    )
+    assert ingested.status_code == 200
+    trace = ingested.json()["trace"]
+    assert trace["source"] == "api"
+    assert trace["latency"] == "0.24s"
+
+    audit = client.get("/api/audit")
+    assert audit.status_code == 200
+    assert any(event["subject"] == trace["id"] for event in audit.json())
+
+
 def test_provider_status_includes_groq(client: TestClient) -> None:
     response = client.get("/api/agent-runtime/providers")
     assert response.status_code == 200

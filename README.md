@@ -73,6 +73,18 @@ Example stored evidence shape:
 
 Secrets are read from local `.env` and are intentionally excluded from Git.
 
+## What Is Real Locally
+
+NeuralOps is not deployed as a hosted SaaS yet. In this repo, "working" means local end-to-end behavior through the FastAPI backend and SQLite evidence store:
+
+- dashboard, traces, incidents, prompts, evals, RAG, costs, policies, agents, and settings are loaded from backend APIs
+- generated API keys are stored as hashes; the full token is shown once
+- `/api/traces/ingest` requires a NeuralOps API key and writes a trace plus an audit event
+- prompt traffic, prompt rollback, policy mode changes, RAG recalculation, retention, webhooks, and settings all call backend endpoints
+- no frontend-only fallback records are created when the backend is offline
+
+Seeded SQLite records still exist so the product opens with useful local evidence. For production SaaS, this should move to Postgres with auth, tenant isolation, migrations, and real customer workspaces.
+
 ## Run Locally
 
 Install frontend dependencies:
@@ -124,23 +136,42 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/agent-runtime/run `
   -Body '{"agentId":"support_triage","input":"Triage this enterprise outage and produce next actions.","providerMode":"live"}'
 ```
 
+Create a local ingest key and send a real trace:
+
+```powershell
+$created = Invoke-RestMethod -Method Post http://localhost:8000/api/settings/api-keys `
+  -ContentType "application/json" `
+  -Body '{"name":"local sdk ingest","role":"Developer"}'
+
+Invoke-RestMethod -Method Post http://localhost:8000/api/traces/ingest `
+  -Headers @{"x-neuralops-key" = $created.token} `
+  -ContentType "application/json" `
+  -Body '{"session":"demo_session","environment":"staging","model":"local-test-model","tokens":128,"latencyMs":420,"costUsd":0.002,"status":"success","score":0.93,"prompt":"Classify checkout outage","output":"Incident likely belongs to payments platform."}'
+```
+
 ## API Surface
 
 - `GET /health`
 - `GET /api/dashboard`
 - `GET /api/traces`
 - `GET /api/traces/{trace_id}`
+- `POST /api/traces/ingest`
 - `POST /api/traces/simulate`
 - `GET /api/incidents`
 - `PATCH /api/incidents/{incident_id}`
 - `GET /api/prompts`
 - `POST /api/prompts/{prompt_id}/deploy`
+- `POST /api/prompts/{prompt_id}/traffic`
+- `POST /api/prompts/{prompt_id}/rollback`
 - `GET /api/evals`
 - `POST /api/evals/run`
 - `GET /api/rag`
+- `POST /api/rag/test`
 - `GET /api/costs`
 - `POST /api/costs/simulate-anomaly`
 - `GET /api/policies`
+- `PATCH /api/policies/{policy_id}`
+- `GET /api/policy-violations`
 - `POST /api/policies/test`
 - `GET /api/agents`
 - `GET /api/agent-runtime/definitions`
@@ -160,6 +191,10 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/agent-runtime/run `
 - `POST /api/traces/otel/sample`
 - `POST /api/traces/{trace_id}/replay`
 - `GET /api/settings`
+- `POST /api/settings/api-keys`
+- `POST /api/settings/webhooks`
+- `PATCH /api/settings/retention`
+- `GET /api/audit`
 
 ## Verification
 

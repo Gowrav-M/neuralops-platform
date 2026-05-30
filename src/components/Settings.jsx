@@ -6,6 +6,7 @@ export default function Settings({ addToast }) {
   const [apiKeys, setApiKeys] = useState([]);
   const [newKeyName, setNewKeyName] = useState('');
   const [newKeyRole, setNewKeyRole] = useState('Developer');
+  const [oneTimeToken, setOneTimeToken] = useState('');
 
   const [webhooks, setWebhooks] = useState([]);
   const [newWebhookName, setNewWebhookName] = useState('');
@@ -27,7 +28,7 @@ export default function Settings({ addToast }) {
         setApiKeys(payload.apiKeys.map((key) => ({
           id: key.id,
           name: key.name,
-          val: `stored_server_side_...${key.id.slice(-4)}`,
+          val: `${key.prefix || 'stored'}...${key.id.slice(-4)}`,
           role: key.role,
           created: key.created
         })));
@@ -60,7 +61,7 @@ export default function Settings({ addToast }) {
     setApiKeys(payload.apiKeys.map((key) => ({
       id: key.id,
       name: key.name,
-      val: `stored_server_side_...${key.id.slice(-4)}`,
+      val: `${key.prefix || 'stored'}...${key.id.slice(-4)}`,
       role: key.role,
       created: key.created
     })));
@@ -88,8 +89,9 @@ export default function Settings({ addToast }) {
       return;
     }
     try {
-      const payload = await createApiKey({ name: newKeyName, role: newKeyRole });
-      applySettingsPayload(payload);
+      const response = await createApiKey({ name: newKeyName, role: newKeyRole });
+      applySettingsPayload(response.settings);
+      setOneTimeToken(response.token);
       setNewKeyName('');
       addToast(`Backend created API key record: "${newKeyName}".`, 'success');
     } catch {
@@ -202,6 +204,14 @@ export default function Settings({ addToast }) {
                 Create Token
               </button>
             </form>
+
+            {oneTimeToken && (
+              <div style={{ marginTop: '10px', padding: '12px', border: '1px solid var(--border-color)', borderRadius: '8px', background: 'var(--bg-hover)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <span style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>One-time token</span>
+                <code className="code-font" style={{ fontSize: '11px', wordBreak: 'break-all' }}>{oneTimeToken}</code>
+                <span style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>Stored as a hash in SQLite. It will not be shown again after refresh.</span>
+              </div>
+            )}
           </div>
 
           {/* Webhooks Config Card */}

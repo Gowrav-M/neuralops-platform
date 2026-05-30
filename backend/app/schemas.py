@@ -268,6 +268,11 @@ class ApiKeyCreateRequest(BaseModel):
     role: str = Field(min_length=1)
 
 
+class ApiKeyCreateResponse(BaseModel):
+    settings: SettingsPayload
+    token: str
+
+
 class WebhookCreateRequest(BaseModel):
     name: str = Field(min_length=1)
     url: str = Field(min_length=1)
@@ -324,6 +329,37 @@ class ReplayResult(BaseModel):
     score: float = Field(ge=0, le=1)
     checks: list[ReplayCheck]
     recommendation: str
+
+
+class TraceIngestRequest(BaseModel):
+    session: str = Field(min_length=1)
+    environment: Literal["prod", "staging", "dev"] = "prod"
+    model: str = Field(min_length=1)
+    tokens: int = Field(ge=0)
+    latencyMs: int = Field(ge=0)
+    costUsd: float = Field(default=0, ge=0)
+    status: DecisionStatus = "success"
+    score: float = Field(default=1, ge=0, le=1)
+    prompt: str = Field(min_length=1)
+    output: str = Field(min_length=1)
+    toolCalls: str | None = None
+    riskFlags: list[str] = Field(default_factory=list)
+
+
+class TraceIngestResponse(BaseModel):
+    trace: Trace
+    auditId: str
+    accepted: bool = True
+
+
+class AuditEvent(BaseModel):
+    id: str
+    type: str
+    actor: str
+    subject: str
+    decision: Literal["allow", "review", "block"]
+    summary: str
+    createdAt: str
 
 
 class ApiEnvelope(BaseModel):

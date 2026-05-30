@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 from typing import Any
 
 
@@ -273,8 +274,15 @@ AGENTS: list[dict[str, Any]] = [
 SETTINGS: dict[str, Any] = {
     "retentionDays": 30,
     "apiKeys": [
-        {"id": "key_01", "name": "Production SDK Key", "role": "Admin", "created": "2026-05-30"},
-        {"id": "key_02", "name": "Staging Ingest Key", "role": "Developer", "created": "2026-05-29"},
+        {
+            "id": "key_01",
+            "name": "Local Ingest Key",
+            "role": "Developer",
+            "created": "2026-05-30",
+            "prefix": "nop_dev",
+            "tokenHash": sha256("nop_dev_local_ingest_key".encode("utf-8")).hexdigest(),
+        },
+        {"id": "key_02", "name": "Staging Ingest Key", "role": "Developer", "created": "2026-05-29", "prefix": "stored"},
     ],
     "webhooks": [
         {"id": "wh_01", "name": "Operations Alert Receiver", "url": "https://hooks.example.invalid/neuralops", "status": "active"},

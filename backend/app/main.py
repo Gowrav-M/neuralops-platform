@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime
+from hashlib import sha256
 from random import choice, randint, random
-from secrets import token_hex
+from secrets import compare_digest, token_hex
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import get_record, init_db, list_records, save_record, update_record
@@ -21,6 +22,8 @@ from .schemas import (
     AgentJobSubmitResponse,
     AgentRuntime,
     ApiKeyCreateRequest,
+    ApiKeyCreateResponse,
+    AuditEvent,
     AgentDefinition,
     AgentRunRecord,
     AgentRunRequest,
@@ -46,6 +49,8 @@ from .schemas import (
     SettingsPayload,
     Stats,
     Trace,
+    TraceIngestRequest,
+    TraceIngestResponse,
     RetentionUpdateRequest,
     WebhookCreateRequest,
 )
@@ -66,6 +71,59 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def hash_token(token: str) -> str:
+    return sha256(token.encode("utf-8")).hexdigest()
+
+
+def settings_payload_or_404() -> dict[str, Any]:
+    payload = get_record("settings", "current")
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Settings not found")
+    return payload
+
+
+def public_settings_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    public_payload = {**payload}
+    public_payload["apiKeys"] = [
+        {key: value for key, value in api_key.items() if key != "tokenHash"}
+        for api_key in payload.get("apiKeys", [])
+    ]
+    return public_payload
+
+
+def token_from_headers(authorization: str | None, neuralops_key: str | None) -> str:
+    if neuralops_key:
+        return neuralops_key.strip()
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    raise HTTPException(status_code=401, detail="Missing NeuralOps API key")
+
+
+def authenticate_api_key(authorization: str | None, neuralops_key: str | None) -> dict[str, Any]:
+    token = token_from_headers(authorization, neuralops_key)
+    token_hash = hash_token(token)
+    settings_payload = settings_payload_or_404()
+    for api_key in settings_payload.get("apiKeys", []):
+        stored_hash = api_key.get("tokenHash")
+        if stored_hash and compare_digest(stored_hash, token_hash):
+            return api_key
+    raise HTTPException(status_code=401, detail="Invalid NeuralOps API key")
+
+
+def save_audit_event(event_type: str, actor: str, subject: str, decision: str, summary: str) -> AuditEvent:
+    event = AuditEvent(
+        id=f"aud_{token_hex(6)}",
+        type=event_type,
+        actor=actor,
+        subject=subject,
+        decision=decision,
+        summary=summary,
+        createdAt=datetime.now().isoformat(),
+    )
+    save_record("audit", event.id, event.model_dump())
+    return event
 
 
 @app.get("/health")
@@ -110,6 +168,43 @@ def ingest_sample_otel_trace() -> OtelIngestResult:
     trace, findings = normalize_otel_payload(SAMPLE_OTEL_PAYLOAD, "prod")
     save_record("traces", trace.id, trace.model_dump())
     return OtelIngestResult(decision="block", trace=trace, spanCount=trace.spanCount, findings=findings)
+
+
+@app.post("/api/traces/ingest", response_model=TraceIngestResponse)
+def ingest_trace(
+    request: TraceIngestRequest,
+    authorization: str | None = Header(default=None),
+    neuralops_key: str | None = Header(default=None, alias="x-neuralops-key"),
+) -> TraceIngestResponse:
+    api_key = authenticate_api_key(authorization, neuralops_key)
+    now = datetime.now()
+    trace = Trace(
+        id=f"tr_ing_{token_hex(6)}",
+        timestamp=now.strftime("%H:%M:%S"),
+        session=request.session,
+        environment=request.environment,
+        model=request.model,
+        tokens=request.tokens,
+        latency=f"{request.latencyMs / 1000:.2f}s",
+        cost=f"${request.costUsd:.3f}",
+        status=request.status,
+        score=request.score,
+        prompt=request.prompt,
+        output=request.output,
+        toolCalls=request.toolCalls,
+        source="api",
+        riskFlags=request.riskFlags,
+    )
+    save_record("traces", trace.id, trace.model_dump())
+    decision = "block" if trace.status == "blocked" else "review" if trace.status in {"warning", "failed"} else "allow"
+    audit = save_audit_event(
+        "trace.ingest",
+        api_key.get("name", api_key.get("id", "api-key")),
+        trace.id,
+        decision,
+        f"Ingested {trace.model} trace for session {trace.session}.",
+    )
+    return TraceIngestResponse(trace=trace, auditId=audit.id)
 
 
 @app.post("/api/traces/{trace_id}/replay", response_model=ReplayResult)
@@ -408,18 +503,14 @@ def cancel_agent_job(job_id: str) -> AgentJob:
 
 @app.get("/api/settings", response_model=SettingsPayload)
 def settings() -> SettingsPayload:
-    payload = get_record("settings", "current")
-    if payload is None:
-        raise HTTPException(status_code=404, detail="Settings not found")
-    return SettingsPayload.model_validate(payload)
+    return SettingsPayload.model_validate(public_settings_payload(settings_payload_or_404()))
 
 
-@app.post("/api/settings/api-keys", response_model=SettingsPayload)
-def create_api_key(request: ApiKeyCreateRequest) -> SettingsPayload:
-    payload = get_record("settings", "current")
-    if payload is None:
-        raise HTTPException(status_code=404, detail="Settings not found")
+@app.post("/api/settings/api-keys", response_model=ApiKeyCreateResponse)
+def create_api_key(request: ApiKeyCreateRequest) -> ApiKeyCreateResponse:
+    payload = settings_payload_or_404()
     key_id = f"key_{token_hex(4)}"
+    token = f"nop_sk_{token_hex(18)}"
     payload.setdefault("apiKeys", []).insert(
         0,
         {
@@ -427,16 +518,19 @@ def create_api_key(request: ApiKeyCreateRequest) -> SettingsPayload:
             "name": request.name,
             "role": request.role,
             "created": datetime.now().strftime("%Y-%m-%d"),
+            "prefix": token[:10],
+            "tokenHash": hash_token(token),
         },
     )
-    return SettingsPayload.model_validate(save_record("settings", "current", payload))
+    saved_payload = save_record("settings", "current", payload)
+    settings_payload = SettingsPayload.model_validate(public_settings_payload(saved_payload))
+    save_audit_event("api_key.create", request.role, key_id, "allow", f"Created API key record {request.name}.")
+    return ApiKeyCreateResponse(settings=settings_payload, token=token)
 
 
 @app.post("/api/settings/webhooks", response_model=SettingsPayload)
 def create_webhook(request: WebhookCreateRequest) -> SettingsPayload:
-    payload = get_record("settings", "current")
-    if payload is None:
-        raise HTTPException(status_code=404, detail="Settings not found")
+    payload = settings_payload_or_404()
     payload.setdefault("webhooks", []).append(
         {
             "id": f"wh_{token_hex(4)}",
@@ -445,13 +539,16 @@ def create_webhook(request: WebhookCreateRequest) -> SettingsPayload:
             "status": "active",
         }
     )
-    return SettingsPayload.model_validate(save_record("settings", "current", payload))
+    return SettingsPayload.model_validate(public_settings_payload(save_record("settings", "current", payload)))
 
 
 @app.patch("/api/settings/retention", response_model=SettingsPayload)
 def update_retention(request: RetentionUpdateRequest) -> SettingsPayload:
-    payload = get_record("settings", "current")
-    if payload is None:
-        raise HTTPException(status_code=404, detail="Settings not found")
+    payload = settings_payload_or_404()
     payload["retentionDays"] = request.retentionDays
-    return SettingsPayload.model_validate(save_record("settings", "current", payload))
+    return SettingsPayload.model_validate(public_settings_payload(save_record("settings", "current", payload)))
+
+
+@app.get("/api/audit", response_model=list[AuditEvent])
+def audit_events() -> list[AuditEvent]:
+    return [AuditEvent.model_validate(item) for item in list_records("audit")]

@@ -102,6 +102,17 @@ def backfill_seed_defaults() -> None:
                 if webhook.get("url") == "https://hooks.slack.com/services/demo":
                     webhook["name"] = "Operations Alert Receiver"
                     webhook["url"] = "https://hooks.example.invalid/neuralops"
+            for seeded_key in seed.SETTINGS.get("apiKeys", []):
+                current_key = next(
+                    (key for key in current_settings.get("apiKeys", []) if key.get("id") == seeded_key.get("id")),
+                    None,
+                )
+                if current_key is None:
+                    current_settings.setdefault("apiKeys", []).append(seeded_key)
+                    continue
+                for key in ("prefix", "tokenHash"):
+                    if key not in current_key and key in seeded_key:
+                        current_key[key] = seeded_key[key]
             insert(conn, "settings", "current", current_settings)
         conn.commit()
 
