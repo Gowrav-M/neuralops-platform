@@ -149,7 +149,7 @@ class AgentRunRecord(BaseModel):
     id: str
     agentId: str
     agentName: str
-    provider: Literal["local", "nvidia", "openai", "custom"]
+    provider: Literal["local", "groq", "nvidia", "openai", "custom"]
     model: str
     input: str
     output: str

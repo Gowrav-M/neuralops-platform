@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from .config import load_local_env
 from .schemas import (
     AgentDefinition,
     AgentEvalCheck,
@@ -18,6 +19,7 @@ from .schemas import (
     TraceSpan,
 )
 
+load_local_env()
 
 AGENT_DEFINITIONS: list[AgentDefinition] = [
     AgentDefinition(
@@ -75,6 +77,13 @@ def list_providers() -> list[ProviderStatus]:
             configured=True,
             baseUrl=None,
             defaultModel="local-neuralops-agent",
+        ),
+        ProviderStatus(
+            id="groq",
+            label="Groq OpenAI-Compatible",
+            configured=bool(os.getenv("GROQ_API_KEY")),
+            baseUrl=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+            defaultModel=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
         ),
         ProviderStatus(
             id="nvidia",
@@ -207,10 +216,10 @@ def _execute(agent: AgentDefinition, request: AgentRunRequest) -> tuple[str, str
 
 def _try_live_provider(agent: AgentDefinition, request: AgentRunRequest) -> tuple[str, str, str] | None:
     providers = list_providers()
-    live_order = [provider for provider in providers if provider.id in ("nvidia", "openai") and provider.configured]
+    live_order = [provider for provider in providers if provider.id in ("groq", "nvidia", "openai") and provider.configured]
     for provider in live_order:
         model = request.model or provider.defaultModel
-        api_key = os.getenv("NVIDIA_API_KEY") if provider.id == "nvidia" else os.getenv("OPENAI_API_KEY") or os.getenv("NEURALOPS_API_KEY")
+        api_key = _api_key_for(provider.id)
         if not api_key or not provider.baseUrl:
             continue
         try:
@@ -219,6 +228,14 @@ def _try_live_provider(agent: AgentDefinition, request: AgentRunRequest) -> tupl
         except httpx.HTTPError:
             continue
     return None
+
+
+def _api_key_for(provider_id: str) -> str | None:
+    if provider_id == "groq":
+        return os.getenv("GROQ_API_KEY")
+    if provider_id == "nvidia":
+        return os.getenv("NVIDIA_API_KEY")
+    return os.getenv("OPENAI_API_KEY") or os.getenv("NEURALOPS_API_KEY")
 
 
 def _call_openai_compatible(base_url: str, api_key: str, model: str, agent: AgentDefinition, user_input: str) -> str:

@@ -3,6 +3,7 @@ from collections.abc import Generator
 import pytest
 from fastapi.testclient import TestClient
 
+from app.config import load_local_env
 from app.main import app
 
 
@@ -71,6 +72,26 @@ def test_agent_runtime_local_run_creates_trace(client: TestClient) -> None:
 
     trace_detail = client.get(f"/api/traces/{payload['trace']['id']}")
     assert trace_detail.status_code == 200
+
+
+def test_provider_status_includes_groq(client: TestClient) -> None:
+    response = client.get("/api/agent-runtime/providers")
+    assert response.status_code == 200
+    providers = response.json()
+    provider_ids = {provider["id"] for provider in providers}
+    assert {"local", "groq", "nvidia", "openai"}.issubset(provider_ids)
+    assert next(provider for provider in providers if provider["id"] == "groq")["defaultModel"]
+
+
+def test_local_env_loader_does_not_override_existing_env(tmp_path, monkeypatch) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("GROQ_API_KEY=from-file\nEXAMPLE_VALUE=loaded\n", encoding="utf-8")
+    monkeypatch.setenv("GROQ_API_KEY", "from-process")
+
+    load_local_env(env_file)
+
+    assert __import__("os").environ["GROQ_API_KEY"] == "from-process"
+    assert __import__("os").environ["EXAMPLE_VALUE"] == "loaded"
 
 
 def test_agent_runtime_rejects_unknown_agent(client: TestClient) -> None:
