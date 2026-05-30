@@ -136,7 +136,7 @@ export default function PromptRegistry({ addToast }) {
             <h1 className="page-title">Prompt Registry</h1>
             <p className="page-subtitle">
               Manage prompt templates, compare versions, and rollout changes via staging/production canaries.
-              {dataSource === 'fallback' ? ' Backend offline; no local prompt samples are shown.' : ' Loading backend data...'}
+              {dataSource === 'api' ? ' Backend connected with no prompt records.' : dataSource === 'fallback' ? ' Backend offline; no local prompt samples are shown.' : ' Loading backend data...'}
             </p>
           </div>
         </div>
@@ -156,7 +156,7 @@ export default function PromptRegistry({ addToast }) {
           <h1 className="page-title">Prompt Registry</h1>
           <p className="page-subtitle">
             Manage prompt templates, compare versions, and rollout changes via staging/production canaries.
-            {dataSource === 'api' ? ' Backend data loaded.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
+            {dataSource === 'api' ? ' Backend connected.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
           </p>
         </div>
       </div>

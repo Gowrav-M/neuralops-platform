@@ -83,7 +83,9 @@ NeuralOps is not deployed as a hosted SaaS yet. In this repo, "working" means lo
 - prompt traffic, prompt rollback, policy mode changes, RAG recalculation, retention, webhooks, and settings all call backend endpoints
 - no frontend-only fallback records are created when the backend is offline
 
-Seeded SQLite records still exist so the product opens with useful local evidence. For production SaaS, this should move to Postgres with auth, tenant isolation, migrations, and real customer workspaces.
+Operational screens start empty until real local traces, agent runs, OTEL payloads, API keys, webhooks, prompts, RAG records, eval records, or incidents are created. The only default records are guardrail policy definitions and workspace settings required for the product to function. Random trace and cost simulation endpoints are disabled in real-data mode.
+
+For production SaaS, this should move to Postgres with auth, tenant isolation, migrations, and real customer workspaces.
 
 ## Run Locally
 
@@ -146,7 +148,7 @@ $created = Invoke-RestMethod -Method Post http://localhost:8000/api/settings/api
 Invoke-RestMethod -Method Post http://localhost:8000/api/traces/ingest `
   -Headers @{"x-neuralops-key" = $created.token} `
   -ContentType "application/json" `
-  -Body '{"session":"demo_session","environment":"staging","model":"local-test-model","tokens":128,"latencyMs":420,"costUsd":0.002,"status":"success","score":0.93,"prompt":"Classify checkout outage","output":"Incident likely belongs to payments platform."}'
+  -Body '{"session":"local_trace_001","environment":"staging","model":"local-test-model","tokens":128,"latencyMs":420,"costUsd":0.002,"status":"success","score":0.93,"prompt":"Classify checkout outage","output":"Incident likely belongs to payments platform."}'
 ```
 
 ## API Surface
@@ -156,7 +158,6 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/traces/ingest `
 - `GET /api/traces`
 - `GET /api/traces/{trace_id}`
 - `POST /api/traces/ingest`
-- `POST /api/traces/simulate`
 - `GET /api/incidents`
 - `PATCH /api/incidents/{incident_id}`
 - `GET /api/prompts`
@@ -168,7 +169,6 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/traces/ingest `
 - `GET /api/rag`
 - `POST /api/rag/test`
 - `GET /api/costs`
-- `POST /api/costs/simulate-anomaly`
 - `GET /api/policies`
 - `PATCH /api/policies/{policy_id}`
 - `GET /api/policy-violations`
@@ -188,7 +188,6 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/traces/ingest `
 - `POST /api/agent-runtime/jobs/{job_id}/retry`
 - `POST /api/agent-runtime/jobs/{job_id}/cancel`
 - `POST /api/traces/otel`
-- `POST /api/traces/otel/sample`
 - `POST /api/traces/{trace_id}/replay`
 - `GET /api/settings`
 - `POST /api/settings/api-keys`
@@ -205,9 +204,16 @@ python -m pytest backend
 cmd /c npm audit --audit-level=moderate
 ```
 
+## Disabled Demo Endpoints
+
+These compatibility routes return `410 Gone` because they create fake operational evidence and are not used by the UI:
+
+- `POST /api/traces/simulate`
+- `POST /api/costs/simulate-anomaly`
+- `POST /api/traces/otel/sample`
+
 ## Product Roadmap
 
-- Replace seed data with authenticated workspace data.
 - Add Postgres migrations for production deployment.
 - Add OpenTelemetry trace ingestion.
 - Add prompt/eval release workflow.

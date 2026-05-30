@@ -125,14 +125,6 @@ export default function EvalCenter({ addToast }) {
             </p>
           </div>
         </div>
-        <button
-          className="btn-primary"
-          style={{ background: 'var(--color-blocked)', padding: '6px 12px', fontSize: '11px' }}
-          disabled
-          title="Prompt rollback is handled in the Prompt Registry. Evaluation rollback orchestration is not connected yet."
-        >
-          Rollback Not Connected
-        </button>
       </div>
       )}
 
@@ -142,7 +134,7 @@ export default function EvalCenter({ addToast }) {
           <h1 className="page-title">Evaluation Center</h1>
           <p className="page-subtitle">
             Configure automated test benches, LLM-as-a-judge criteria, and compare multi-model outputs.
-            {dataSource === 'api' ? ' Backend data loaded.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
+            {dataSource === 'api' ? ' Backend connected.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
           </p>
         </div>
       </div>
@@ -200,6 +192,14 @@ export default function EvalCenter({ addToast }) {
             </div>
           </div>
         ))}
+        {evaluators.length === 0 && (
+          <div className="metric-card-square" style={{ padding: '20px', gridColumn: '1 / -1' }}>
+            <span className="metric-label">No Evaluators</span>
+            <span style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>
+              Add evaluator records through the backend before running a test suite.
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Main comparative grid */}
@@ -283,7 +283,7 @@ export default function EvalCenter({ addToast }) {
               <div className="dark-list-item">
                 <div className="item-meta">
                   <span className="item-title">No failed evaluations</span>
-                  <span className="item-subtitle">Backend traces are currently passing configured checks.</span>
+                  <span className="item-subtitle">No failing backend trace records are available.</span>
                 </div>
               </div>
             )}

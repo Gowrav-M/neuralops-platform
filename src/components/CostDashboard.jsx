@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react';
-import { fetchCosts, fetchTraces, simulateCostAnomaly } from '../lib/api';
+import { fetchCosts, fetchTraces } from '../lib/api';
 
-export default function CostDashboard({ addToast }) {
-  const [anomalyTriggered, setAnomalyTriggered] = useState(false);
+export default function CostDashboard() {
   const [budgetLimit, setBudgetLimit] = useState(5000);
   const [mtdSpend, setMtdSpend] = useState(0);
   const [projectedSpend, setProjectedSpend] = useState(0);
@@ -21,12 +20,26 @@ export default function CostDashboard({ addToast }) {
     Promise.all([fetchCosts(), fetchTraces()])
       .then(([payload, traces]) => {
         if (cancelled) return;
-        setMtdSpend(payload.summary?.mtdSpend ?? 0);
+        const traceSpend = traces.reduce((sum, trace) => sum + (Number.parseFloat(String(trace.cost).replace('$', '')) || 0), 0);
+        const traceTokens = traces.reduce((sum, trace) => sum + (trace.tokens || 0), 0);
+        const byModel = [...traces.reduce((acc, trace) => {
+          const cost = Number.parseFloat(String(trace.cost).replace('$', '')) || 0;
+          acc.set(trace.model, (acc.get(trace.model) || 0) + cost);
+          return acc;
+        }, new Map()).entries()].map(([model, spend]) => ({ model, spend }));
+        const byFeature = [...traces.reduce((acc, trace) => {
+          const feature = trace.toolCalls || trace.session || 'direct_model_call';
+          const cost = Number.parseFloat(String(trace.cost).replace('$', '')) || 0;
+          acc.set(feature, (acc.get(feature) || 0) + cost);
+          return acc;
+        }, new Map()).entries()].map(([feature, spend]) => ({ feature, spend }));
+
+        setMtdSpend(payload.summary?.mtdSpend ?? traceSpend);
         setBudgetLimit(payload.summary?.budgetLimit ?? 5000);
-        setProjectedSpend(payload.summary?.projectedSpend ?? 0);
-        setCostPerThousand(payload.summary?.costPerThousand ?? 0);
-        setCostByModel(payload.byModel ?? []);
-        setCostByFeature(payload.byFeature ?? []);
+        setProjectedSpend(payload.summary?.projectedSpend ?? traceSpend);
+        setCostPerThousand(payload.summary?.costPerThousand ?? (traceTokens > 0 ? (traceSpend / traceTokens) * 1000 : 0));
+        setCostByModel(payload.byModel ?? byModel);
+        setCostByFeature(payload.byFeature ?? byFeature);
         setTopExpensiveTraces(
           traces
             .map((trace) => ({
@@ -52,74 +65,21 @@ export default function CostDashboard({ addToast }) {
     };
   }, []);
 
-  const handleSimulateAnomaly = async () => {
-    setAnomalyTriggered(true);
-    try {
-      const result = await simulateCostAnomaly();
-      if (result.summary?.mtdSpend) {
-        setMtdSpend(result.summary.mtdSpend);
-        setProjectedSpend(result.summary.projectedSpend ?? projectedSpend);
-      }
-      addToast('CRITICAL ALERT: Backend recorded cost spike in customer_support_bot ($120.40/min vs standard $2.50/min)!', 'error');
-    } catch {
-      addToast('Backend unavailable. Cost anomaly was not recorded.', 'error');
-    }
-  };
-
   const getPercentBudget = () => {
     return Math.min(100, Math.round((mtdSpend / budgetLimit) * 100));
   };
+  const maxModelSpend = Math.max(...costByModel.map((item) => item.spend), 0.001);
+  const maxFeatureSpend = Math.max(...costByFeature.map((item) => item.spend), 0.001);
 
   return (
     <div className="main-panel">
-      {/* Spend Anomaly Banner */}
-      {anomalyTriggered && (
-        <div
-          style={{
-            background: 'var(--color-error-light)',
-            border: '1.5px solid rgba(220, 90, 69, 0.2)',
-            padding: '16px 20px',
-            borderRadius: 'var(--radius-md)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ width: '22px', height: '22px', color: 'var(--color-error)', flexShrink: 0 }}>
-              <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
-              <line x1="12" y1="9" x2="12" y2="13" />
-              <line x1="12" y1="17" x2="12.01" y2="17" />
-            </svg>
-            <div>
-              <h4 style={{ color: 'var(--color-blocked)', fontSize: '13.5px', fontWeight: '600' }}>Cost Anomaly Alert Triggered</h4>
-              <p style={{ color: 'var(--text-primary)', fontSize: '12px', marginTop: '2px' }}>
-                Operational spending spiked +450% over the last 15 minutes in <strong>prod_rag_qa</strong> workspace.
-              </p>
-            </div>
-          </div>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <button
-              className="btn-primary"
-              style={{ background: 'var(--color-blocked)', padding: '6px 12px', fontSize: '11px' }}
-              onClick={() => {
-                setAnomalyTriggered(false);
-                addToast('Spend anomaly resolved. Active rate limit applied to offending workspace.', 'success');
-              }}
-            >
-              Acknowledge & Restrict Rate
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* Page Header */}
       <div className="page-header">
         <div>
           <h1 className="page-title">Cost & Budgets</h1>
           <p className="page-subtitle">
-            Track month-to-date spending patterns, analyze costs per feature, and simulate anomaly limits.
-            {dataSource === 'api' ? ' Backend data loaded.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
+            Track spending from real ingested traces and persisted backend cost records.
+            {dataSource === 'api' ? ' Backend connected.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
           </p>
         </div>
       </div>
@@ -138,10 +98,6 @@ export default function CostDashboard({ addToast }) {
             <option value="8000">$8,000 / month</option>
           </select>
         </div>
-
-        <button className="btn-secondary" style={{ color: 'var(--color-error)' }} onClick={handleSimulateAnomaly}>
-          Simulate Spend Spike Anomaly
-        </button>
       </div>
 
       {/* Metrics Row */}
@@ -153,7 +109,7 @@ export default function CostDashboard({ addToast }) {
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
               <path d="M1 9L9 1M9 1H3M9 1V7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
-            +18.5%
+            from backend records
           </span>
         </div>
         <div className="metric-card-square">
@@ -163,7 +119,7 @@ export default function CostDashboard({ addToast }) {
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
               <path d="M1 9L9 1M9 1H3M9 1V7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
-            +12.0%
+            current projection
           </span>
         </div>
         <div className="metric-card-square">
@@ -178,7 +134,7 @@ export default function CostDashboard({ addToast }) {
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
               <path d="M1 1L9 9M9 9H3M9 9V3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
-            -8.4%
+            from backend records
           </span>
         </div>
       </div>
@@ -230,8 +186,7 @@ export default function CostDashboard({ addToast }) {
                 const barWidth = 45;
                 const gap = 38;
                 const x = 36 + index * (barWidth + gap);
-                const maxSpend = 2000;
-                const height = (item.spend / maxSpend) * 100;
+                const height = Math.max(4, (item.spend / maxModelSpend) * 100);
                 const y = 120 - height;
                 return (
                   <g key={item.model}>
@@ -266,8 +221,7 @@ export default function CostDashboard({ addToast }) {
                 const barWidth = 45;
                 const gap = 38;
                 const x = 36 + index * (barWidth + gap);
-                const maxSpend = 1600;
-                const height = (item.spend / maxSpend) * 100;
+                const height = Math.max(4, (item.spend / maxFeatureSpend) * 100);
                 const y = 120 - height;
                 return (
                   <g key={item.feature}>

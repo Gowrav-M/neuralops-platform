@@ -35,7 +35,7 @@ class Trace(BaseModel):
     prompt: str
     output: str
     toolCalls: str | None = None
-    source: Literal["seed", "api", "otel", "local"] = "seed"
+    source: Literal["api", "otel", "local"] = "api"
     spanCount: int = Field(default=0, ge=0)
     riskFlags: list[str] = Field(default_factory=list)
     spans: list["TraceSpan"] = Field(default_factory=list)

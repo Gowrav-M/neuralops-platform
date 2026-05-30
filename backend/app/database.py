@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ from . import seed
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
-DB_PATH = DATA_DIR / "neuralops.sqlite3"
+DB_PATH = Path(os.getenv("NEURALOPS_DB_PATH", DATA_DIR / "neuralops.sqlite3"))
 
 
 def connect() -> sqlite3.Connection:
@@ -34,7 +35,7 @@ def init_db() -> None:
         )
         conn.commit()
     seed_if_empty()
-    backfill_seed_defaults()
+    cleanup_legacy_demo_records()
 
 
 def seed_if_empty() -> None:
@@ -43,52 +44,16 @@ def seed_if_empty() -> None:
         if count:
             return
 
-        insert(conn, "stats", "current", seed.STATS)
-        for trace in seed.TRACES:
-            insert(conn, "traces", trace["id"], trace)
-        for incident in seed.INCIDENTS:
-            insert(conn, "incidents", incident["id"], incident)
-        for prompt in seed.PROMPTS:
-            insert(conn, "prompts", prompt["id"], prompt)
-        for evaluator in seed.EVALS:
-            insert(conn, "evals", evaluator["id"], evaluator)
-        for rag_query in seed.RAG:
-            insert(conn, "rag", rag_query["id"], rag_query)
-        insert(conn, "costs", "current", seed.COSTS)
         for policy in seed.POLICIES:
             insert(conn, "policies", policy["id"], policy)
-        for violation in seed.POLICY_VIOLATIONS:
-            insert(conn, "policy_violations", violation["id"], violation)
-        for agent in seed.AGENTS:
-            insert(conn, "agents", agent["id"], agent)
         insert(conn, "settings", "current", seed.SETTINGS)
         conn.commit()
 
 
-def backfill_seed_defaults() -> None:
-    seed_records = {
-        "prompts": seed.PROMPTS,
-        "evals": seed.EVALS,
-        "rag": seed.RAG,
-        "policy_violations": seed.POLICY_VIOLATIONS,
-    }
+def cleanup_legacy_demo_records() -> None:
     with connect() as conn:
-        for domain, records in seed_records.items():
-            for seeded in records:
-                row = conn.execute(
-                    "SELECT payload FROM records WHERE domain = ? AND id = ?",
-                    (domain, seeded["id"]),
-                ).fetchone()
-                if row is None:
-                    insert(conn, domain, seeded["id"], seeded)
-                    continue
-                current = json.loads(row["payload"])
-                merged = {**seeded, **current}
-                for key, value in seeded.items():
-                    if key not in current or current[key] in (None, "", []):
-                        merged[key] = value
-                insert(conn, domain, seeded["id"], merged)
-
+        remove_known_fake_records(conn)
+        clean_settings_artifacts(conn)
         settings_row = conn.execute(
             "SELECT payload FROM records WHERE domain = ? AND id = ?",
             ("settings", "current"),
@@ -102,19 +67,105 @@ def backfill_seed_defaults() -> None:
                 if webhook.get("url") == "https://hooks.slack.com/services/demo":
                     webhook["name"] = "Operations Alert Receiver"
                     webhook["url"] = "https://hooks.example.invalid/neuralops"
-            for seeded_key in seed.SETTINGS.get("apiKeys", []):
-                current_key = next(
-                    (key for key in current_settings.get("apiKeys", []) if key.get("id") == seeded_key.get("id")),
-                    None,
-                )
-                if current_key is None:
-                    current_settings.setdefault("apiKeys", []).append(seeded_key)
-                    continue
-                for key in ("prefix", "tokenHash"):
-                    if key not in current_key and key in seeded_key:
-                        current_key[key] = seeded_key[key]
             insert(conn, "settings", "current", current_settings)
         conn.commit()
+
+
+def remove_known_fake_records(conn: sqlite3.Connection) -> None:
+    fake_domains = (
+        "stats",
+        "traces",
+        "incidents",
+        "prompts",
+        "evals",
+        "rag",
+        "policy_violations",
+        "agents",
+        "agent_runs",
+        "audit",
+        "costs",
+    )
+    for domain in fake_domains:
+        rows = conn.execute("SELECT id, payload FROM records WHERE domain = ?", (domain,)).fetchall()
+        for row in rows:
+            payload = json.loads(row["payload"])
+            if is_fake_record(domain, row["id"], payload):
+                conn.execute("DELETE FROM records WHERE domain = ? AND id = ?", (domain, row["id"]))
+
+
+def is_fake_record(domain: str, record_id: str, payload: dict[str, Any]) -> bool:
+    if domain in {"stats", "costs"}:
+        return True
+    if domain in {"prompts", "evals", "rag", "policy_violations", "agents"}:
+        return record_id.startswith(("prompt_", "eval_", "q_", "vio_", "agent_"))
+    if domain == "incidents":
+        return record_id.startswith("inc_")
+    if domain == "traces":
+        text = json.dumps(payload).lower()
+        fake_markers = (
+            "quantum computing",
+            "capital of turkey",
+            "simulated api client",
+            "pytest",
+            "shell_verified",
+            "browser_ingest",
+            "sess_",
+            "web_search_connector",
+            "otel_a0fd88bad001",
+        )
+        if payload.get("source") == "seed":
+            return True
+        return any(marker in text for marker in fake_markers)
+    if domain == "agent_runs":
+        text = json.dumps(payload).lower()
+        fake_markers = (
+            "pytest",
+            "shell_verified",
+            "browser_ingest",
+        )
+        return any(marker in text for marker in fake_markers)
+    if domain == "audit":
+        text = json.dumps(payload).lower()
+        fake_markers = ("pytest", "shell_ingest", "browser_ingest", "shell_verified")
+        return any(marker in text for marker in fake_markers)
+    return False
+
+
+def clean_settings_artifacts(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT payload FROM records WHERE domain = ? AND id = ?",
+        ("settings", "current"),
+    ).fetchone()
+    if row is None:
+        return
+    payload = json.loads(row["payload"])
+    blocked_labels = (
+        "pytest",
+        "shell_ingest",
+        "browser_ingest",
+        "browser_audit",
+        "audit_backend",
+        "production sdk",
+        "staging ingest",
+        "demo",
+        "key_01",
+        "key_02",
+    )
+    payload["apiKeys"] = [
+        key for key in payload.get("apiKeys", [])
+        if not any(label in json.dumps(key).lower() for label in blocked_labels)
+    ]
+    payload["webhooks"] = [
+        webhook for webhook in payload.get("webhooks", [])
+        if not any(label in json.dumps(webhook).lower() for label in (*blocked_labels, "example.invalid"))
+    ]
+    payload["teamMembers"] = [
+        member for member in payload.get("teamMembers", [])
+        if "neuralops.local" not in json.dumps(member).lower()
+    ]
+    if payload.get("billingPlan") == "Local seeded workspace":
+        payload["billingPlan"] = seed.SETTINGS["billingPlan"]
+    insert(conn, "settings", "current", payload)
 
 
 def insert(conn: sqlite3.Connection, domain: str, record_id: str, payload: dict[str, Any]) -> None:

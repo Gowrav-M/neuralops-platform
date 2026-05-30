@@ -140,10 +140,6 @@ export function runAgent(payload) {
   });
 }
 
-export function ingestSampleOtelTrace() {
-  return request('/api/traces/otel/sample', { method: 'POST' });
-}
-
 export function replayTrace(traceId) {
   return request(`/api/traces/${traceId}/replay`, { method: 'POST' });
 }
@@ -173,10 +169,6 @@ export function updateRetention(retentionDays) {
   });
 }
 
-export function simulateTrace() {
-  return request('/api/traces/simulate', { method: 'POST' });
-}
-
 export function patchIncident(incidentId, patch) {
   return request(`/api/incidents/${incidentId}`, {
     method: 'PATCH',
@@ -189,10 +181,6 @@ export function testPolicy(input, policyId) {
     method: 'POST',
     body: JSON.stringify({ input, policyId }),
   });
-}
-
-export function simulateCostAnomaly() {
-  return request('/api/costs/simulate-anomaly', { method: 'POST' });
 }
 
 export { API_BASE_URL };

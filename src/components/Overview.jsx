@@ -91,7 +91,7 @@ export default function Overview({
       <div className="page-header">
         <div>
           <h1 className="page-title">NeuralOps Control Plane</h1>
-          <p className="page-subtitle">Real-time enterprise AI observability and operational guardrails.</p>
+          <p className="page-subtitle">Observe locally ingested AI traces, cost signals, eval outcomes, and guardrail decisions.</p>
         </div>
       </div>
 
@@ -563,7 +563,7 @@ export default function Overview({
             </tr>
           </thead>
           <tbody>
-            {expensiveWorkflows.map((flow) => (
+            {expensiveWorkflows.length > 0 ? expensiveWorkflows.map((flow) => (
               <tr key={flow.name}>
                 <td className="code-font">{flow.name}</td>
                 <td>{flow.calls.toLocaleString()}</td>
@@ -571,7 +571,11 @@ export default function Overview({
                 <td>{flow.avgCost}</td>
                 <td style={{ fontWeight: '600' }}>{flow.totalCost}</td>
               </tr>
-            ))}
+            )) : (
+              <tr>
+                <td colSpan="5" style={{ color: 'var(--text-secondary)' }}>No workflow cost records are available yet.</td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

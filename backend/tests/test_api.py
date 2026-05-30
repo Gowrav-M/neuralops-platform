@@ -1,14 +1,19 @@
 from collections.abc import Generator
+import os
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.config import load_local_env
+from app import database
 from app.main import app
 
 
 @pytest.fixture()
-def client() -> Generator[TestClient]:
+def client(tmp_path: Path) -> Generator[TestClient]:
+    database.DB_PATH = tmp_path / "neuralops-test.sqlite3"
+    os.environ["NEURALOPS_DB_PATH"] = str(database.DB_PATH)
     with TestClient(app) as test_client:
         yield test_client
 
@@ -19,13 +24,14 @@ def test_health(client: TestClient) -> None:
     assert response.json()["ok"] is True
 
 
-def test_dashboard_has_seeded_data(client: TestClient) -> None:
+def test_dashboard_starts_without_seeded_operational_data(client: TestClient) -> None:
     response = client.get("/api/dashboard")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["stats"]["totalRequests"] >= len(payload["traces"])
-    assert len(payload["traces"]) >= 3
-    assert len(payload["incidents"]) >= 1
+    assert payload["stats"]["totalRequests"] == 0
+    assert payload["stats"]["activeIncidents"] == 0
+    assert payload["traces"] == []
+    assert payload["incidents"] == []
 
 
 def test_policy_blocks_secret_exfiltration(client: TestClient) -> None:
@@ -47,20 +53,18 @@ def test_policy_patch_and_violation_log(client: TestClient) -> None:
 
     violations = client.get("/api/policy-violations")
     assert violations.status_code == 200
-    assert len(violations.json()) >= 1
+    assert violations.json() == []
 
 
-def test_prompt_traffic_and_rollback_are_backend_backed(client: TestClient) -> None:
+def test_prompt_actions_do_not_create_fake_prompt_records(client: TestClient) -> None:
     traffic = client.post("/api/prompts/prompt_rag_v2/traffic", json={"canaryPercent": 42})
-    assert traffic.status_code == 200
-    assert traffic.json()["canaryPercent"] == 42
+    assert traffic.status_code == 404
 
     rollback = client.post("/api/prompts/prompt_rag_v2/rollback")
-    assert rollback.status_code == 200
-    assert rollback.json()["status"] == "Production"
+    assert rollback.status_code == 404
 
 
-def test_rag_retrieval_test_updates_metrics(client: TestClient) -> None:
+def test_rag_retrieval_does_not_create_fake_query_records(client: TestClient) -> None:
     response = client.post(
         "/api/rag/test",
         json={
@@ -71,10 +75,7 @@ def test_rag_retrieval_test_updates_metrics(client: TestClient) -> None:
             "reranker": "cohere-rerank-v3",
         },
     )
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["id"] == "q_01"
-    assert 0 <= payload["precision"] <= 1
+    assert response.status_code == 404
 
 
 def test_incident_patch_validates_status(client: TestClient) -> None:
@@ -82,18 +83,12 @@ def test_incident_patch_validates_status(client: TestClient) -> None:
     assert bad_response.status_code == 422
 
     response = client.patch("/api/incidents/inc_01", json={"status": "Resolved"})
-    assert response.status_code == 200
-    assert response.json()["status"] == "Resolved"
+    assert response.status_code == 404
 
 
-def test_simulate_trace_persists(client: TestClient) -> None:
+def test_random_trace_simulation_is_disabled(client: TestClient) -> None:
     response = client.post("/api/traces/simulate")
-    assert response.status_code == 200
-    trace_id = response.json()["id"]
-
-    detail = client.get(f"/api/traces/{trace_id}")
-    assert detail.status_code == 200
-    assert detail.json()["id"] == trace_id
+    assert response.status_code == 410
 
 
 def test_agent_runtime_local_run_creates_trace(client: TestClient) -> None:
@@ -188,16 +183,49 @@ def test_agent_runtime_rejects_unknown_agent(client: TestClient) -> None:
     assert response.status_code == 404
 
 
-def test_sample_otel_ingest_and_replay(client: TestClient) -> None:
-    response = client.post("/api/traces/otel/sample")
+def test_otel_ingest_and_replay_real_payload(client: TestClient) -> None:
+    response = client.post(
+        "/api/traces/otel",
+        json={
+            "environment": "prod",
+            "payload": {
+                "resourceSpans": [
+                    {
+                        "scopeSpans": [
+                            {
+                                "spans": [
+                                    {
+                                        "traceId": "abc123",
+                                        "spanId": "span-1",
+                                        "name": "chat.completion",
+                                        "startTimeUnixNano": "1000000000",
+                                        "endTimeUnixNano": "1600000000",
+                                        "attributes": [
+                                            {"key": "session.id", "value": {"stringValue": "real_ingest_session"}},
+                                            {"key": "gen_ai.request.model", "value": {"stringValue": "qwen3-coder"}},
+                                            {"key": "gen_ai.usage.input_tokens", "value": {"intValue": "100"}},
+                                            {"key": "gen_ai.usage.output_tokens", "value": {"intValue": "40"}},
+                                            {"key": "gen_ai.prompt.0.content", "value": {"stringValue": "Summarize the deployment notes."}},
+                                            {"key": "gen_ai.completion.0.content", "value": {"stringValue": "Deployment notes summarized for the operator."}},
+                                        ],
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            },
+        },
+    )
     assert response.status_code == 200
     payload = response.json()
-    assert payload["spanCount"] >= 3
-    assert "prompt-injection" in payload["findings"]
+    assert payload["spanCount"] == 1
+    assert payload["findings"] == []
+    assert payload["trace"]["source"] == "otel"
 
     replay = client.post(f"/api/traces/{payload['trace']['id']}/replay")
     assert replay.status_code == 200
-    assert replay.json()["decision"] in {"review", "block"}
+    assert replay.json()["decision"] == "allow"
 
 
 def test_agent_job_queue_lifecycle(client: TestClient) -> None:

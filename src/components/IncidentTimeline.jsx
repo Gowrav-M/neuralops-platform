@@ -35,6 +35,7 @@ export default function IncidentTimeline({ incidents, setIncidents, addToast }) 
   };
 
   const activeIncident = incidents.find(i => i.id === selectedIncidentId) || incidents[0];
+  const ownerOptions = [...new Set(incidents.map((incident) => incident.owner).filter(Boolean))];
 
   // Grouping incidents by severity
   const criticalIncidents = incidents.filter(i => i.severity === 'Critical');
@@ -169,6 +170,12 @@ export default function IncidentTimeline({ incidents, setIncidents, addToast }) 
                 </div>
               </div>
             )}
+            {incidents.length === 0 && (
+              <div className="state-container" style={{ padding: '24px' }}>
+                <span style={{ fontWeight: 600 }}>No incident records available</span>
+                <span>Backend is connected, but no incidents have been created from real trace or policy events.</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -196,9 +203,11 @@ export default function IncidentTimeline({ incidents, setIncidents, addToast }) 
                   value={activeIncident.owner}
                   onChange={(e) => handleOwnerChange(activeIncident.id, e.target.value)}
                 >
-                  <option value="AI Platform Oncall">AI Platform Oncall</option>
-                  <option value="Trust Engineering">Trust Engineering</option>
-                  <option value="FinOps">FinOps</option>
+                  {ownerOptions.length > 0 ? ownerOptions.map((owner) => (
+                    <option key={owner} value={owner}>{owner}</option>
+                  )) : (
+                    <option value="Unassigned">Unassigned</option>
+                  )}
                 </select>
               </div>
 

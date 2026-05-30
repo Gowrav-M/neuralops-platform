@@ -817,16 +817,19 @@ body {
 
 .slider-metric-pill {
   padding: 4px 10px;
-  background: var(--text-primary);
-  color: #FFF;
+  background: var(--button-primary-bg);
+  color: var(--button-primary-text);
   font-size: 11px;
   border-radius: 10px;
   font-weight: 600;
+  min-width: 48px;
+  text-align: center;
+  line-height: 1.25;
 }
 
 .slider-metric-pill.yellow {
   background: var(--accent-gold);
-  color: var(--text-primary);
+  color: #1A1A19;
 }
 
 .slider-metric-bar {
@@ -851,6 +854,11 @@ body {
 
 .slider-metric-fill.striped {
   background: linear-gradient(45deg, rgba(26, 26, 25, 0.1) 25%, transparent 25%, transparent 50%, rgba(26, 26, 25, 0.1) 50%, rgba(26, 26, 25, 0.1) 75%, transparent 75%, transparent);
+  background-size: 10px 10px;
+}
+
+[data-theme="dark"] .slider-metric-fill.striped {
+  background: linear-gradient(45deg, rgba(250, 248, 242, 0.42) 25%, transparent 25%, transparent 50%, rgba(250, 248, 242, 0.42) 50%, rgba(250, 248, 242, 0.42) 75%, transparent 75%, transparent);
   background-size: 10px 10px;
 }
 
@@ -959,7 +967,7 @@ body {
 /* Main Cards Grid */
 .dashboard-cards-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
   gap: 24px;
 }
 
@@ -1132,26 +1140,41 @@ body {
   left: 50%;
   transform: translate(-50%, -50%);
   text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 92px;
+  pointer-events: none;
 }
 
 .gauge-value {
+  display: block;
   font-size: 24px;
   font-weight: 600;
   letter-spacing: -0.5px;
   color: var(--text-primary);
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .gauge-subtext {
+  display: block;
   font-size: 9px;
   color: var(--text-secondary);
   text-transform: uppercase;
-  margin-top: 1px;
+  line-height: 1.1;
+  white-space: nowrap;
 }
 
 .timer-controls {
   display: flex;
   align-items: center;
   gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+  text-align: center;
 }
 
 .timer-btn {

@@ -95,7 +95,7 @@ export default function RAGQuality({ addToast }) {
             <h1 className="page-title">RAG Quality Inspector</h1>
             <p className="page-subtitle">
               Analyze document retrieval quality, context relevance, precision, and answer groundedness.
-              {dataSource === 'fallback' ? ' Backend offline; no local RAG samples are shown.' : ' Loading backend data...'}
+              {dataSource === 'api' ? ' Backend connected with no RAG records.' : dataSource === 'fallback' ? ' Backend offline; no local RAG samples are shown.' : ' Loading backend data...'}
             </p>
           </div>
         </div>
@@ -115,7 +115,7 @@ export default function RAGQuality({ addToast }) {
           <h1 className="page-title">RAG Quality Inspector</h1>
           <p className="page-subtitle">
             Analyze document retrieval quality, context relevance, precision, and answer groundedness.
-            {dataSource === 'api' ? ' Backend data loaded.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
+            {dataSource === 'api' ? ' Backend connected.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
           </p>
         </div>
       </div>

@@ -44,6 +44,9 @@ export default function Settings({ addToast }) {
           role: member.role,
           access: member.role === 'Viewer' ? 'Read Only' : 'All Workspace'
         })));
+        setSsoStatus(payload.ssoStatus || 'Not configured');
+        setBillingPlan(payload.billingPlan || 'Local development');
+        setNextInvoice(payload.nextInvoice || null);
         setDataSource('api');
       })
       .catch(() => {
@@ -137,7 +140,7 @@ export default function Settings({ addToast }) {
           <h1 className="page-title">Settings</h1>
           <p className="page-subtitle">
             Configure developer API credentials, webhooks, workspace role access, and platform retention parameters.
-            {dataSource === 'api' ? ' Backend data loaded.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
+            {dataSource === 'api' ? ' Backend connected.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
           </p>
         </div>
       </div>
@@ -171,6 +174,11 @@ export default function Settings({ addToast }) {
                     <td>{k.created}</td>
                   </tr>
                 ))}
+                {apiKeys.length === 0 && (
+                  <tr>
+                    <td colSpan="4" style={{ color: 'var(--text-secondary)' }}>No API keys have been created yet.</td>
+                  </tr>
+                )}
               </tbody>
             </table>
 
@@ -242,6 +250,11 @@ export default function Settings({ addToast }) {
                     </td>
                   </tr>
                 ))}
+                {webhooks.length === 0 && (
+                  <tr>
+                    <td colSpan="3" style={{ color: 'var(--text-secondary)' }}>No webhook endpoints have been registered yet.</td>
+                  </tr>
+                )}
               </tbody>
             </table>
 
@@ -329,6 +342,11 @@ export default function Settings({ addToast }) {
                     <td className="code-font">{tm.access}</td>
                   </tr>
                 ))}
+                {teamMembers.length === 0 && (
+                  <tr>
+                    <td colSpan="3" style={{ color: 'var(--text-secondary)' }}>No team member records are configured yet.</td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
