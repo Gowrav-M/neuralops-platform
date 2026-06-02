@@ -69,7 +69,7 @@ export default function PromptRegistry({ addToast }) {
       return;
     }
     if (env !== 'prod') {
-      addToast(`Successfully queued deploy of ${selectedPrompt.name} ${selectedPrompt.activeVersion} to ${env}!`, 'success');
+      addToast(`${env} deploy is not connected in this backend yet. Production deploy is the only persisted action.`, 'warning');
       return;
     }
 
@@ -142,7 +142,7 @@ export default function PromptRegistry({ addToast }) {
         </div>
         <div className="state-container">
           <span style={{ fontWeight: 600 }}>No prompt records available</span>
-          <span>Start the backend or add prompt records to SQLite.</span>
+          <span>Start the backend or add prompt records to the configured data store.</span>
         </div>
       </div>
     );
@@ -306,8 +306,8 @@ export default function PromptRegistry({ addToast }) {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span className="card-title">Prompt Template View</span>
               <div style={{ display: 'flex', gap: '8px' }}>
-                <button className="btn-secondary" style={{ padding: '4px 10px', fontSize: '11px' }} onClick={() => triggerDeploy('dev')}>Dev</button>
-                <button className="btn-secondary" style={{ padding: '4px 10px', fontSize: '11px' }} onClick={() => triggerDeploy('staging')}>Staging</button>
+                <button className="btn-secondary" style={{ padding: '4px 10px', fontSize: '11px' }} onClick={() => triggerDeploy('dev')} title="This backend currently persists production deploys only.">Dev</button>
+                <button className="btn-secondary" style={{ padding: '4px 10px', fontSize: '11px' }} onClick={() => triggerDeploy('staging')} title="This backend currently persists production deploys only.">Staging</button>
                 <button className="btn-primary" style={{ padding: '4px 10px', fontSize: '11px' }} onClick={() => triggerDeploy('prod')}>Deploy Prod</button>
               </div>
             </div>

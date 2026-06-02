@@ -96,6 +96,16 @@ def test_random_trace_simulation_is_disabled(client: TestClient) -> None:
     assert response.status_code == 410
 
 
+def test_cost_budget_update_persists(client: TestClient) -> None:
+    response = client.patch("/api/costs/budget", json={"budgetLimit": 8000})
+    assert response.status_code == 200
+    assert response.json()["summary"]["budgetLimit"] == 8000
+
+    stored = client.get("/api/costs")
+    assert stored.status_code == 200
+    assert stored.json()["summary"]["budgetLimit"] == 8000
+
+
 def test_agent_runtime_local_run_creates_trace(client: TestClient) -> None:
     response = client.post(
         "/api/agent-runtime/run",

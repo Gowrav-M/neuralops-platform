@@ -151,7 +151,7 @@ export default function App() {
         setStats(snapshot.stats);
         setTraces(snapshot.traces);
         setIncidents(snapshot.incidents);
-        setApiStatus({ state: 'connected', message: 'Live FastAPI + SQLite data connected' });
+        setApiStatus({ state: 'connected', message: 'Live backend data store connected' });
       })
       .catch(() => {
         if (cancelled) return;
@@ -222,7 +222,7 @@ export default function App() {
     }, 4000);
   }, [playAudioCue]);
 
-  // Chaos Mode Platform Anomaly Simulator
+  // Local visual anomaly marker for operator drills; it never mutates backend records.
   const [chaosActive, setChaosActive] = useState(false);
 
   const refreshDashboard = () => {
@@ -231,7 +231,7 @@ export default function App() {
         setStats(snapshot.stats);
         setTraces(snapshot.traces);
         setIncidents(snapshot.incidents);
-        setApiStatus({ state: 'connected', message: 'Live FastAPI + SQLite data connected' });
+        setApiStatus({ state: 'connected', message: 'Live backend data store connected' });
       })
       .catch(() => {
         setApiStatus({ state: 'offline', message: 'Backend offline - no local sample data is being shown' });
@@ -256,7 +256,7 @@ export default function App() {
     return `${mins.toString().padStart(2, '0')}:${remainingSecs.toString().padStart(2, '0')}`;
   };
 
-  // Ticking logic for real-time simulation
+  // Uptime clock ticking logic
   useEffect(() => {
     let interval = null;
     if (timerActive) {
@@ -508,7 +508,7 @@ export default function App() {
                 borderColor: chaosActive ? 'var(--color-error)' : 'var(--border-color)',
                 animation: chaosActive ? 'pulse 1s infinite alternate' : 'none'
               }}
-              title={chaosActive ? "Disable Chaos Anomaly Simulator" : "Enable Chaos Anomaly Simulator"}
+              title={chaosActive ? "Disable local anomaly marker" : "Enable local anomaly marker"}
               onClick={toggleChaosMode}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: '16px', height: '16px', fill: chaosActive ? 'currentColor' : 'none' }}>

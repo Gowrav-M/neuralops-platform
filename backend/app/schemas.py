@@ -155,6 +155,10 @@ class RagRetrievalTestRequest(BaseModel):
     reranker: str = Field(min_length=1)
 
 
+class CostBudgetUpdateRequest(BaseModel):
+    budgetLimit: int = Field(ge=1, le=1_000_000)
+
+
 class AgentRuntime(BaseModel):
     id: str
     name: str

@@ -217,7 +217,7 @@ export default function Settings({ addToast }) {
               <div style={{ marginTop: '10px', padding: '12px', border: '1px solid var(--border-color)', borderRadius: '8px', background: 'var(--bg-hover)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
                 <span style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>One-time token</span>
                 <code className="code-font" style={{ fontSize: '11px', wordBreak: 'break-all' }}>{oneTimeToken}</code>
-                <span style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>Stored as a hash in SQLite. It will not be shown again after refresh.</span>
+                <span style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>Stored as a backend hash. It will not be shown again after refresh.</span>
               </div>
             )}
           </div>

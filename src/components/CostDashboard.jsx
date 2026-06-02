@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { fetchCosts, fetchTraces } from '../lib/api';
+import { fetchCosts, fetchTraces, updateCostBudget } from '../lib/api';
 
 export default function CostDashboard() {
   const [budgetLimit, setBudgetLimit] = useState(5000);
@@ -9,6 +9,7 @@ export default function CostDashboard() {
   const [dataSource, setDataSource] = useState('loading');
 
   const [costByModel, setCostByModel] = useState([]);
+  const [budgetBusy, setBudgetBusy] = useState(false);
 
   const [costByFeature, setCostByFeature] = useState([]);
 
@@ -68,6 +69,22 @@ export default function CostDashboard() {
   const getPercentBudget = () => {
     return Math.min(100, Math.round((mtdSpend / budgetLimit) * 100));
   };
+
+  const handleBudgetChange = async (value) => {
+    const nextBudget = parseInt(value);
+    const previousBudget = budgetLimit;
+    setBudgetLimit(nextBudget);
+    setBudgetBusy(true);
+    try {
+      const payload = await updateCostBudget(nextBudget);
+      setBudgetLimit(payload.summary?.budgetLimit ?? nextBudget);
+    } catch {
+      setBudgetLimit(previousBudget);
+    } finally {
+      setBudgetBusy(false);
+    }
+  };
+
   const maxModelSpend = Math.max(...costByModel.map((item) => item.spend), 0.001);
   const maxFeatureSpend = Math.max(...costByFeature.map((item) => item.spend), 0.001);
 
@@ -91,13 +108,15 @@ export default function CostDashboard() {
           <select
             className="filter-select"
             value={budgetLimit}
-            onChange={(e) => setBudgetLimit(parseInt(e.target.value))}
+            onChange={(e) => handleBudgetChange(e.target.value)}
+            disabled={budgetBusy}
           >
             <option value="4000">$4,000 / month</option>
             <option value="5000">$5,000 / month</option>
             <option value="8000">$8,000 / month</option>
           </select>
         </div>
+        {budgetBusy && <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Saving budget...</span>}
       </div>
 
       {/* Metrics Row */}

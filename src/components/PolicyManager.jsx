@@ -115,7 +115,7 @@ export default function PolicyManager({ addToast }) {
         </div>
         <div className="state-container">
           <span style={{ fontWeight: 600 }}>No policy records available</span>
-          <span>Start the backend or add policy records to SQLite.</span>
+          <span>Start the backend or add policy records to the configured data store.</span>
         </div>
       </div>
     );
@@ -293,13 +293,10 @@ export default function PolicyManager({ addToast }) {
               }, null, 2)}
             </pre>
 
-            <button
-              className="btn-primary"
-              disabled
-              title="Policy schema editing is not implemented in this local API yet."
-            >
-              Schema Editing Not Connected
-            </button>
+            <div className="state-container" style={{ padding: '12px', alignItems: 'flex-start', textAlign: 'left' }}>
+              <span style={{ fontWeight: 600 }}>Read-only policy schema</span>
+              <span>Use the Mode and Status controls in the policy table to persist backend changes.</span>
+            </div>
           </div>
 
           {/* Violation log card */}

@@ -42,6 +42,7 @@ from .schemas import (
     PolicyTestRequest,
     PolicyTestResult,
     PolicyViolation,
+    CostBudgetUpdateRequest,
     PromptTrafficUpdate,
     ProviderStatus,
     PromptVersion,
@@ -327,6 +328,24 @@ def test_rag_retrieval(request: RagRetrievalTestRequest) -> RagQuery:
 @app.get("/api/costs")
 def costs() -> dict[str, Any]:
     return get_record("costs", "current") or {}
+
+
+@app.patch("/api/costs/budget")
+def update_cost_budget(request: CostBudgetUpdateRequest) -> dict[str, Any]:
+    payload = get_record("costs", "current") or {}
+    summary = payload.setdefault("summary", {})
+    summary["budgetLimit"] = request.budgetLimit
+    summary.setdefault("mtdSpend", 0)
+    summary.setdefault("projectedSpend", summary["mtdSpend"])
+    saved = save_record("costs", "current", payload)
+    save_audit_event(
+        "cost.budget_update",
+        "local-workspace",
+        "costs.current",
+        "allow",
+        f"Updated monthly budget limit to {request.budgetLimit}.",
+    )
+    return saved
 
 
 @app.post("/api/costs/simulate-anomaly")

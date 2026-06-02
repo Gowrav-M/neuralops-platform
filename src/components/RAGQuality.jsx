@@ -101,7 +101,7 @@ export default function RAGQuality({ addToast }) {
         </div>
         <div className="state-container">
           <span style={{ fontWeight: 600 }}>No RAG evaluation records available</span>
-          <span>Start the backend or add RAG records to SQLite.</span>
+          <span>Start the backend or add RAG records to the configured data store.</span>
         </div>
       </div>
     );

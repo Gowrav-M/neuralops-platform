@@ -5,32 +5,32 @@ export default function IncidentTimeline({ incidents, setIncidents, addToast }) 
   const [selectedIncidentId, setSelectedIncidentId] = useState(incidents[0]?.id || 'inc_01');
 
   const handleStatusChange = async (id, newStatus) => {
-    setIncidents(prev => prev.map(inc => {
-      if (inc.id === id) {
-        return { ...inc, status: newStatus };
-      }
-      return inc;
-    }));
     try {
-      await patchIncident(id, { status: newStatus });
+      const updated = await patchIncident(id, { status: newStatus });
+      setIncidents(prev => prev.map(inc => {
+        if (inc.id === id) {
+          return { ...inc, ...updated };
+        }
+        return inc;
+      }));
       addToast(`Incident status synced to backend: ${newStatus}`, 'success');
     } catch {
-      addToast(`Incident status updated locally: ${newStatus}`, 'warning');
+      addToast(`Backend rejected incident status update: ${newStatus}`, 'error');
     }
   };
 
   const handleOwnerChange = async (id, newOwner) => {
-    setIncidents(prev => prev.map(inc => {
-      if (inc.id === id) {
-        return { ...inc, owner: newOwner };
-      }
-      return inc;
-    }));
     try {
-      await patchIncident(id, { owner: newOwner });
+      const updated = await patchIncident(id, { owner: newOwner });
+      setIncidents(prev => prev.map(inc => {
+        if (inc.id === id) {
+          return { ...inc, ...updated };
+        }
+        return inc;
+      }));
       addToast(`Incident assignment synced to backend: ${newOwner}`, 'success');
     } catch {
-      addToast(`Incident assigned locally: ${newOwner}`, 'warning');
+      addToast(`Backend rejected incident assignment: ${newOwner}`, 'error');
     }
   };
 
@@ -257,8 +257,8 @@ export default function IncidentTimeline({ incidents, setIncidents, addToast }) 
               </div>
             </div>
 
-            <button className="btn-primary" style={{ marginTop: '8px' }} onClick={() => addToast('Incident updates broadcasted to connected notification channels.', 'success')}>
-              Sync Updates
+            <button className="btn-primary" style={{ marginTop: '8px' }} onClick={() => addToast('Incident status and owner changes are persisted by the controls above. Notification connectors are not configured yet.', 'warning')}>
+              Verify Persistence
             </button>
           </div>
         )}

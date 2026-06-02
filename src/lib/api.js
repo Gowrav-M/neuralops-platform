@@ -71,6 +71,13 @@ export function fetchCosts() {
   return request('/api/costs');
 }
 
+export function updateCostBudget(budgetLimit) {
+  return request('/api/costs/budget', {
+    method: 'PATCH',
+    body: JSON.stringify({ budgetLimit }),
+  });
+}
+
 export function fetchPolicies() {
   return request('/api/policies');
 }
