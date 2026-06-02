@@ -32,10 +32,12 @@ This schema is not granted to Supabase `anon` or `authenticated` Data API roles.
 Backend-only:
 
 ```env
-NEURALOPS_DATABASE_URL=postgresql://...
+NEURALOPS_DATABASE_URL=postgresql://postgres.cjcsinixideeqiwzdvna:<password>@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?sslmode=require
 NEURALOPS_POSTGRES_SCHEMA=neuralops_private
 NEURALOPS_POSTGRES_TABLE=records
 ```
+
+Use the Supabase **Shared Pooler / Transaction pooler** URI for local and deployed FastAPI services on IPv4 networks. The direct host `db.cjcsinixideeqiwzdvna.supabase.co:5432` is IPv6-only for this project and may time out on IPv4 networks.
 
 Frontend/client-only:
 

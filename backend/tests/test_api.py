@@ -13,7 +13,11 @@ from app.main import app
 @pytest.fixture()
 def client(tmp_path: Path) -> Generator[TestClient]:
     database.DB_PATH = tmp_path / "neuralops-test.sqlite3"
+    database.POSTGRES_URL = None
     os.environ["NEURALOPS_DB_PATH"] = str(database.DB_PATH)
+    os.environ.pop("NEURALOPS_DATABASE_URL", None)
+    os.environ.pop("SUPABASE_DB_URL", None)
+    os.environ.pop("DATABASE_URL", None)
     with TestClient(app) as test_client:
         yield test_client
 
