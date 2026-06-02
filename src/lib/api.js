@@ -140,6 +140,17 @@ export function runAgent(payload) {
   });
 }
 
+export function fetchLabExperiments() {
+  return request('/api/labs/experiments');
+}
+
+export function runLabExperiment(payload) {
+  return request('/api/labs/run', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export function replayTrace(traceId) {
   return request(`/api/traces/${traceId}/replay`, { method: 'POST' });
 }

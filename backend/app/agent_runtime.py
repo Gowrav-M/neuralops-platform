@@ -113,7 +113,7 @@ def run_agent(request: AgentRunRequest) -> tuple[AgentRunRecord, Trace]:
 
     started = time.perf_counter()
     provider, model, output = _execute(agent, request)
-    latency_ms = int((time.perf_counter() - started) * 1000)
+    latency_ms = max(1, int((time.perf_counter() - started) * 1000))
     policy_findings = detect_policy_findings(request.input, output)
     evals = evaluate_agent_output(agent.id, request.input, output, policy_findings)
     decision = _decision(policy_findings, evals)
@@ -266,11 +266,12 @@ def _call_openai_compatible(base_url: str, api_key: str, model: str, agent: Agen
 
 def _run_local_agent(agent_id: str, user_input: str) -> str:
     text = user_input.lower()
+    local_decision = _input_risk_decision(text)
     if agent_id == "support_triage":
         priority = "P1 Critical" if any(word in text for word in ("down", "breach", "leak", "payment failed", "urgent")) else "P2 Review"
         owner = "Trust Engineering" if any(word in text for word in ("password", "secret", "api key", "ignore previous")) else "Customer Operations"
         return (
-            f"Decision: review\nPriority: {priority}\nOwner: {owner}\n"
+            f"Decision: {local_decision if local_decision != 'allow' else 'review'}\nPriority: {priority}\nOwner: {owner}\n"
             "Evidence: ticket language was classified for urgency, security keywords, and routing risk.\n"
             "Next actions: open incident if customer impact is active, block credential exposure, and attach trace replay evidence."
         )
@@ -282,9 +283,14 @@ def _run_local_agent(agent_id: str, user_input: str) -> str:
                 "Evidence: no matching knowledge-pack source was retrieved.\nNext actions: add source material or route to a human reviewer."
             )
         return (
-            "Decision: allow\nAnswer: "
+            f"Decision: {local_decision}\nAnswer: "
             + " ".join(matches[:2])
-            + "\nEvidence: response is grounded in the local controlled knowledge pack.\nNext actions: cite the retrieved source in the customer response."
+            + (
+                "\nEvidence: response is grounded in the local controlled knowledge pack, but the input contains safety-sensitive language.\n"
+                "Next actions: route through guardrails before sending to a customer."
+                if local_decision != "allow"
+                else "\nEvidence: response is grounded in the local controlled knowledge pack.\nNext actions: cite the retrieved source in the customer response."
+            )
         )
     if agent_id == "cost_anomaly":
         spike = any(word in text for word in ("spike", "increase", "budget", "cost", "$", "expensive"))
@@ -303,6 +309,18 @@ def _run_local_agent(agent_id: str, user_input: str) -> str:
             "Next actions: add regression tests, isolate command execution in a sandbox, and require review before merge."
         )
     return "Decision: review\nEvidence: unknown agent workflow.\nNext actions: configure an agent definition."
+
+
+def _input_risk_decision(text: str) -> str:
+    has_credential = any(pattern in text for pattern in ("api key", "password", "secret", "token", "credential"))
+    has_external_sink = any(pattern in text for pattern in ("webhook", "external url", "post to", "send to slack", "email"))
+    has_prompt_injection = any(pattern in text for pattern in ("ignore previous", "ignore standard", "system prompt", "developer message"))
+    has_dangerous_command = any(pattern in text for pattern in ("rm -rf", "curl | sh", "invoke-webrequest", "powershell", "shell exec"))
+    if has_dangerous_command or (has_credential and has_external_sink):
+        return "block"
+    if has_credential or has_external_sink or has_prompt_injection:
+        return "review"
+    return "allow"
 
 
 def _decision(findings: list[str], evals: list[AgentEvalCheck]) -> str:

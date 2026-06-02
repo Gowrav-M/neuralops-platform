@@ -183,6 +183,59 @@ def test_agent_runtime_rejects_unknown_agent(client: TestClient) -> None:
     assert response.status_code == 404
 
 
+def test_labs_start_empty(client: TestClient) -> None:
+    response = client.get("/api/labs/experiments")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_lab_experiment_runs_variants_and_writes_traces(client: TestClient) -> None:
+    response = client.post(
+        "/api/labs/run",
+        json={
+            "name": "pytest lab",
+            "input": "Compare how agents handle a checkout support incident without exposing credentials.",
+            "agentIds": ["support_triage", "cost_anomaly"],
+            "providerMode": "local",
+            "environment": "staging",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    experiment = payload["experiment"]
+    assert experiment["name"] == "pytest lab"
+    assert experiment["summary"]["variantCount"] == 2
+    assert experiment["decision"] in {"allow", "review", "block"}
+    assert len(payload["traces"]) == 2
+    assert all(variant["traceId"] for variant in experiment["variants"])
+
+    list_response = client.get("/api/labs/experiments")
+    assert list_response.status_code == 200
+    assert list_response.json()[0]["id"] == experiment["id"]
+
+    detail_response = client.get(f"/api/labs/experiments/{experiment['id']}")
+    assert detail_response.status_code == 200
+    assert detail_response.json()["winnerRunId"] == experiment["winnerRunId"]
+
+    dashboard = client.get("/api/dashboard")
+    assert dashboard.status_code == 200
+    assert dashboard.json()["stats"]["totalRequests"] == 2
+
+
+def test_lab_experiment_rejects_all_unknown_agents(client: TestClient) -> None:
+    response = client.post(
+        "/api/labs/run",
+        json={
+            "name": "bad lab",
+            "input": "hello",
+            "agentIds": ["unknown"],
+            "providerMode": "local",
+        },
+    )
+    assert response.status_code == 422
+    assert "Unknown agent" in response.json()["detail"]
+
+
 def test_otel_ingest_and_replay_real_payload(client: TestClient) -> None:
     response = client.post(
         "/api/traces/otel",

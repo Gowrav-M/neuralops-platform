@@ -31,6 +31,10 @@ from .schemas import (
     Evaluator,
     Incident,
     IncidentPatch,
+    LabExperiment,
+    LabRunRequest,
+    LabRunResponse,
+    LabVariantResult,
     OtelIngestRequest,
     OtelIngestResult,
     Policy,
@@ -410,6 +414,114 @@ def execute_agent(request: AgentRunRequest) -> AgentRunResponse:
     save_record("agent_runs", run.id, run.model_dump())
     save_record("traces", trace.id, trace.model_dump())
     return AgentRunResponse(run=run, trace=trace)
+
+
+@app.get("/api/labs/experiments", response_model=list[LabExperiment])
+def lab_experiments() -> list[LabExperiment]:
+    experiments = [LabExperiment.model_validate(item) for item in list_records("lab_experiments")]
+    return sorted(experiments, key=lambda item: item.createdAt, reverse=True)
+
+
+@app.get("/api/labs/experiments/{experiment_id}", response_model=LabExperiment)
+def lab_experiment_detail(experiment_id: str) -> LabExperiment:
+    experiment = get_record("lab_experiments", experiment_id)
+    if experiment is None:
+        raise HTTPException(status_code=404, detail="Lab experiment not found")
+    return LabExperiment.model_validate(experiment)
+
+
+@app.post("/api/labs/run", response_model=LabRunResponse)
+def run_lab_experiment(request: LabRunRequest) -> LabRunResponse:
+    variants: list[LabVariantResult] = []
+    traces: list[Trace] = []
+    failures: list[dict[str, str]] = []
+
+    for agent_id in dict.fromkeys(request.agentIds):
+        try:
+            run, trace = run_agent(
+                AgentRunRequest(
+                    agentId=agent_id,
+                    input=request.input,
+                    providerMode=request.providerMode,
+                    model=request.model,
+                    environment=request.environment,
+                )
+            )
+        except ValueError as exc:
+            failures.append({"agentId": agent_id, "error": str(exc)})
+            continue
+        except RuntimeError as exc:
+            failures.append({"agentId": agent_id, "error": str(exc)})
+            continue
+
+        save_record("agent_runs", run.id, run.model_dump())
+        save_record("traces", trace.id, trace.model_dump())
+        variants.append(
+            LabVariantResult(
+                agentId=run.agentId,
+                agentName=run.agentName,
+                runId=run.id,
+                traceId=run.traceId,
+                provider=run.provider,
+                model=run.model,
+                decision=run.decision,
+                score=run.score,
+                latencyMs=run.latencyMs,
+                tokens=run.tokens,
+                costUsd=run.costUsd,
+                output=run.output,
+                policyFindings=run.policyFindings,
+            )
+        )
+        traces.append(trace)
+
+    if not variants:
+        detail = failures[0]["error"] if failures else "No lab variants could be executed"
+        raise HTTPException(status_code=422, detail=detail)
+
+    ordered = sorted(
+        variants,
+        key=lambda item: (
+            {"allow": 3, "review": 2, "block": 1}[item.decision],
+            item.score,
+            -item.latencyMs,
+            -item.costUsd,
+        ),
+        reverse=True,
+    )
+    winner = ordered[0]
+    decision = "block" if any(item.decision == "block" for item in variants) else "review" if any(item.decision == "review" for item in variants) else "allow"
+    created_at = datetime.now().isoformat()
+    experiment = LabExperiment(
+        id=f"lab_{token_hex(6)}",
+        name=request.name.strip() or "Untitled experiment",
+        input=request.input,
+        providerMode=request.providerMode,
+        environment=request.environment,
+        createdAt=created_at,
+        decision=decision,
+        winnerRunId=winner.runId,
+        variants=variants,
+        summary={
+            "variantCount": len(variants),
+            "blockedCount": sum(1 for item in variants if item.decision == "block"),
+            "reviewCount": sum(1 for item in variants if item.decision == "review"),
+            "allowCount": sum(1 for item in variants if item.decision == "allow"),
+            "bestScore": winner.score,
+            "winnerAgent": winner.agentName,
+            "totalCostUsd": round(sum(item.costUsd for item in variants), 5),
+            "failures": failures,
+        },
+    )
+    save_record("lab_experiments", experiment.id, experiment.model_dump())
+    save_audit_event(
+        "lab.experiment",
+        "local-workspace",
+        experiment.id,
+        decision,
+        f"Ran {len(variants)} lab variant(s); winner: {winner.agentName}.",
+    )
+    return LabRunResponse(experiment=experiment, traces=traces)
 
 
 @app.get("/api/agent-runtime/jobs", response_model=list[AgentJob])

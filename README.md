@@ -8,6 +8,8 @@ The frontend keeps the premium warm enterprise dashboard direction from the orig
 
 ![NeuralOps agent runtime](docs/assets/agent-runtime-studio.png)
 
+![Neural Labs experiment workbench](docs/assets/neural-labs-experiment-proof.png)
+
 ## What It Solves
 
 AI teams ship many models, prompts, RAG flows, and agents, but production failures usually appear across multiple layers: latency, cost spikes, bad evals, tool misuse, policy violations, and incident response. NeuralOps puts those signals into one operational cockpit and can run real agent workflows locally or through an OpenAI-compatible provider.
@@ -16,9 +18,10 @@ AI teams ship many models, prompts, RAG flows, and agents, but production failur
 flowchart LR
   A["Agent Runtime"] --> F["NeuralOps API"]
   B["OpenAI-compatible Providers"] --> F
-  C["GenAI / OTEL Traces"] --> F
-  D["Evaluations + Policy"] --> F
-  E["Cost + Incidents"] --> F
+  C["Neural Labs Experiments"] --> F
+  D["GenAI / OTEL Traces"] --> F
+  E["Evaluations + Policy"] --> F
+  I["Cost + Incidents"] --> F
   F --> G["Premium React Dashboard"]
   F --> H["SQLite Local Evidence Store"]
 ```
@@ -54,6 +57,27 @@ NeuralOps also includes a local worker queue for production-style agent executio
 - store run and trace evidence when the job completes
 
 This makes the project closer to how real AI platforms run asynchronous agent workloads instead of only direct button-triggered calls.
+
+## Neural Labs
+
+Neural Labs is the experiment workbench inside the product. It lets a developer paste a real support ticket, prompt, RAG question, code review task, or incident note, run it across multiple agent workflows, and compare:
+
+- output quality
+- policy decision
+- latency
+- token and cost estimate
+- generated trace IDs
+- winning agent variant
+
+Every lab run writes real backend records: one experiment packet, one agent run per variant, trace evidence, and an audit event. The page starts empty until you run or ingest real local work.
+
+Run a lab experiment through the API:
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8000/api/labs/run `
+  -ContentType "application/json" `
+  -Body '{"name":"local prompt release check","input":"Compare this customer support answer for safety and usefulness.","agentIds":["support_triage","rag_answer"],"providerMode":"local","environment":"staging"}'
+```
 
 ## Live Provider Proof
 
@@ -187,6 +211,9 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/traces/ingest `
 - `POST /api/agent-runtime/jobs/{job_id}/process`
 - `POST /api/agent-runtime/jobs/{job_id}/retry`
 - `POST /api/agent-runtime/jobs/{job_id}/cancel`
+- `GET /api/labs/experiments`
+- `GET /api/labs/experiments/{experiment_id}`
+- `POST /api/labs/run`
 - `POST /api/traces/otel`
 - `POST /api/traces/{trace_id}/replay`
 - `GET /api/settings`
@@ -215,6 +242,6 @@ These compatibility routes return `410 Gone` because they create fake operationa
 ## Product Roadmap
 
 - Add Postgres migrations for production deployment.
-- Add OpenTelemetry trace ingestion.
-- Add prompt/eval release workflow.
+- Add first-class OpenTelemetry export.
+- Add prompt/eval release approval gates.
 - Add CI gate for policy and eval regression checks.

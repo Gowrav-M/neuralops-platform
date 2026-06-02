@@ -253,6 +253,49 @@ class AgentRunResponse(BaseModel):
     trace: Trace
 
 
+class LabRunRequest(BaseModel):
+    name: str = Field(default="Untitled experiment", min_length=1)
+    input: str = Field(min_length=1)
+    agentIds: list[str] = Field(default_factory=lambda: ["support_triage"], min_length=1)
+    providerMode: Literal["local", "auto", "live"] = "auto"
+    environment: Literal["prod", "staging", "dev"] = "staging"
+    model: str | None = None
+
+
+class LabVariantResult(BaseModel):
+    agentId: str
+    agentName: str
+    runId: str
+    traceId: str
+    provider: Literal["local", "groq", "nvidia", "openai", "custom"]
+    model: str
+    decision: Literal["allow", "review", "block"]
+    score: float = Field(ge=0, le=1)
+    latencyMs: int = Field(ge=0)
+    tokens: int = Field(ge=0)
+    costUsd: float = Field(ge=0)
+    output: str
+    policyFindings: list[str]
+
+
+class LabExperiment(BaseModel):
+    id: str
+    name: str
+    input: str
+    providerMode: Literal["local", "auto", "live"]
+    environment: Literal["prod", "staging", "dev"]
+    createdAt: str
+    decision: Literal["allow", "review", "block"]
+    winnerRunId: str | None = None
+    variants: list[LabVariantResult]
+    summary: dict[str, Any]
+
+
+class LabRunResponse(BaseModel):
+    experiment: LabExperiment
+    traces: list[Trace]
+
+
 class SettingsPayload(BaseModel):
     retentionDays: int = Field(ge=1)
     apiKeys: list[dict[str, Any]]
