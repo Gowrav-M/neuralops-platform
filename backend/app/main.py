@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .database import get_record, init_db, list_records, save_record, update_record
+from .database import get_record, init_db, list_records, save_record, storage_backend, update_record
 from .agent_runtime import AGENT_DEFINITIONS, list_providers, run_agent
 from .job_queue import cancel_job, get_job, list_jobs, process_job, process_next_job, queue_summary, retry_job, submit_job
 from .metrics import build_stats
@@ -130,7 +130,7 @@ def save_audit_event(event_type: str, actor: str, subject: str, decision: str, s
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"ok": True, "service": "neuralops-api", "version": app.version}
+    return {"ok": True, "service": "neuralops-api", "version": app.version, "storage": storage_backend()}
 
 
 @app.get("/api/dashboard", response_model=DashboardSnapshot)

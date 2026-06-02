@@ -22,6 +22,7 @@ def test_health(client: TestClient) -> None:
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["ok"] is True
+    assert response.json()["storage"] == "sqlite"
 
 
 def test_dashboard_starts_without_seeded_operational_data(client: TestClient) -> None:

@@ -111,6 +111,27 @@ Operational screens start empty until real local traces, agent runs, OTEL payloa
 
 For production SaaS, this should move to Postgres with auth, tenant isolation, migrations, and real customer workspaces.
 
+## Supabase Production Mode
+
+The backend now supports Supabase/Postgres storage through a server-side connection string while keeping SQLite as the default local mode.
+
+```env
+NEURALOPS_DATABASE_URL=postgresql://...
+NEURALOPS_POSTGRES_SCHEMA=neuralops_private
+NEURALOPS_POSTGRES_TABLE=records
+```
+
+`/health` reports the active storage backend:
+
+```json
+{
+  "ok": true,
+  "storage": "postgres"
+}
+```
+
+The Supabase migration lives at `supabase/migrations/001_neuralops_records.sql` and creates a private RLS-enabled evidence table. Full setup notes are in [docs/supabase-production.md](docs/supabase-production.md).
+
 ## Run Locally
 
 Install frontend dependencies:
