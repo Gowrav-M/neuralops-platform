@@ -8,6 +8,7 @@
     "dev:api": "python -m uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 8000",
     "test:api": "python -m pytest backend",
     "test:e2e": "playwright test",
+    "test:e2e:deployed": "playwright test --config playwright.deployed.config.js",
     "db:verify-rls": "python backend/scripts/verify_supabase_rls.py",
     "deploy:verify": "node scripts/verify-deployment.mjs",
     "release:gate": "node sdk/javascript/bin/neuralops.mjs release-gate run",

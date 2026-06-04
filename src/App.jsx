@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import './index.css';
-import { fetchDashboard, fetchSystemStatus, setApiAuthToken } from './lib/api';
+import { fetchDashboard, fetchSystemStatus, setApiAuthToken, setQaAuthToken } from './lib/api';
 import { AUTH_ENABLED, supabase } from './lib/supabase';
 
 // Import Screens
@@ -187,10 +187,12 @@ export default function App() {
       if (!mounted) return;
       setSession(data.session);
       setApiAuthToken(data.session?.access_token || null);
+      setQaAuthToken(null);
     });
     const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
       setApiAuthToken(nextSession?.access_token || null);
+      setQaAuthToken(null);
     });
     return () => {
       mounted = false;
@@ -457,6 +459,7 @@ export default function App() {
     return <AuthGate onSession={(nextSession) => {
       setSession(nextSession);
       setApiAuthToken(nextSession?.access_token || null);
+      setQaAuthToken(nextSession?.qa_token || null);
     }} />;
   }
 

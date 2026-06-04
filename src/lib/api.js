@@ -1,8 +1,13 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 let authToken = null;
+let qaAuthToken = null;
 
 export function setApiAuthToken(token) {
   authToken = token;
+}
+
+export function setQaAuthToken(token) {
+  qaAuthToken = token;
 }
 
 async function request(path, options = {}) {
@@ -11,6 +16,7 @@ async function request(path, options = {}) {
     headers: {
       'Content-Type': 'application/json',
       ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      ...(qaAuthToken ? { 'x-neuralops-qa-token': qaAuthToken } : {}),
       ...(options.headers || {}),
     },
   });

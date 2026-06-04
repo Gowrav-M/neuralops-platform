@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 
 from .database import delete_record, get_record, init_db, list_records, save_record, storage_backend, update_record
 from .agent_runtime import AGENT_DEFINITIONS, list_providers, run_agent
-from .auth import auth_required, current_claims, public_auth_paths, reset_current_claims, set_current_claims, verify_supabase_token, workspace_id_from_claims
+from .auth import auth_required, current_claims, public_auth_paths, reset_current_claims, set_current_claims, verify_request_claims, workspace_id_from_claims
 from . import seed
 from .job_queue import cancel_job, get_job, list_jobs, process_job, process_next_job, queue_summary, retry_job, submit_job
 from .metrics import build_stats
@@ -134,7 +134,10 @@ async def auth_gate(request: Request, call_next):
         return await call_next(request)
     token = None
     try:
-        claims = verify_supabase_token(request.headers.get("authorization"))
+        claims = verify_request_claims(
+            request.headers.get("authorization"),
+            request.headers.get("x-neuralops-qa-token"),
+        )
         request.state.user_claims = claims
         token = set_current_claims(claims)
         return await call_next(request)

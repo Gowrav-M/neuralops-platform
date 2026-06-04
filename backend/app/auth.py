@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from contextvars import ContextVar
 from functools import lru_cache
+from secrets import compare_digest
 from typing import Any
 
 from fastapi import HTTPException
@@ -59,6 +60,18 @@ def verify_supabase_token(authorization: str | None) -> dict[str, Any]:
         return verify_with_jwks(token)
     except InvalidTokenError as exc:
         raise HTTPException(status_code=401, detail="Invalid Supabase session token") from exc
+
+
+def verify_request_claims(authorization: str | None, qa_token: str | None = None) -> dict[str, Any]:
+    configured_qa_token = os.getenv("NEURALOPS_QA_AUTH_TOKEN", "").strip()
+    if configured_qa_token and qa_token and compare_digest(qa_token, configured_qa_token):
+        workspace_id = os.getenv("NEURALOPS_QA_WORKSPACE_ID", "deployed-qa-workspace").strip() or "deployed-qa-workspace"
+        return {
+            "sub": "neuralops-deployment-qa",
+            "role": "authenticated",
+            "app_metadata": {"neuralops_workspace_id": workspace_id},
+        }
+    return verify_supabase_token(authorization)
 
 
 @lru_cache(maxsize=1)

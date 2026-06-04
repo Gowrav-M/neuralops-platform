@@ -1,9 +1,12 @@
 import { useState } from 'react';
 import { supabase } from '../lib/supabase';
 
+const qaAuthEnabled = import.meta.env.VITE_QA_AUTH_ENABLED === 'true';
+
 export default function AuthGate({ onSession }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [qaToken, setQaToken] = useState('');
   const [message, setMessage] = useState('Production mode requires Supabase login.');
   const [loading, setLoading] = useState(false);
 
@@ -21,6 +24,15 @@ export default function AuthGate({ onSession }) {
       return;
     }
     onSession(data.session);
+  };
+
+  const handleQaLogin = (event) => {
+    event.preventDefault();
+    if (!qaToken.trim()) {
+      setMessage('Enter the deployment QA token.');
+      return;
+    }
+    onSession({ access_token: null, qa_token: qaToken.trim(), user: { email: 'deployment-qa@neuralops.local' } });
   };
 
   return (
@@ -51,6 +63,26 @@ export default function AuthGate({ onSession }) {
           {loading ? 'Signing in...' : 'Sign in'}
         </button>
       </form>
+      {qaAuthEnabled && (
+        <form className="auth-card qa-auth-card" onSubmit={handleQaLogin}>
+          <div>
+            <span className="badge badge-info">DEPLOYMENT QA</span>
+            <h2 className="dark-panel-title" style={{ marginTop: '12px' }}>Automated verification access</h2>
+            <p className="page-subtitle">{message}</p>
+          </div>
+          <input
+            className="filter-search-input"
+            type="password"
+            value={qaToken}
+            placeholder="Deployment QA token"
+            onChange={(event) => setQaToken(event.target.value)}
+            required
+          />
+          <button className="btn-secondary" type="submit">
+            Continue with QA token
+          </button>
+        </form>
+      )}
     </div>
   );
 }

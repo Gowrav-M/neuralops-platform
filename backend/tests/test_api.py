@@ -27,6 +27,8 @@ def client(tmp_path: Path) -> Generator[TestClient]:
     os.environ.pop("NEURALOPS_DELIVERY_SEND_ENABLED", None)
     os.environ.pop("NEURALOPS_GITHUB_SEND_ENABLED", None)
     os.environ.pop("GITHUB_TOKEN", None)
+    os.environ.pop("NEURALOPS_QA_AUTH_TOKEN", None)
+    os.environ.pop("NEURALOPS_QA_WORKSPACE_ID", None)
     with TestClient(app) as test_client:
         yield test_client
 
@@ -68,6 +70,32 @@ def test_system_status_exposes_truth_contract(client: TestClient) -> None:
     assert feature_states["agent_runtime"] == "local_drill"
     assert feature_states["automation_engine"] == "not_configured"
     assert payload["readinessScore"] < 100
+
+
+def test_auth_required_allows_scoped_qa_token(tmp_path: Path) -> None:
+    database.DB_PATH = tmp_path / "neuralops-auth-test.sqlite3"
+    database.POSTGRES_URL = None
+    os.environ["NEURALOPS_DB_PATH"] = str(database.DB_PATH)
+    os.environ["NEURALOPS_AUTH_REQUIRED"] = "true"
+    os.environ["NEURALOPS_QA_AUTH_TOKEN"] = "qa-token-secret"
+    os.environ["NEURALOPS_QA_WORKSPACE_ID"] = "deployed-qa-workspace"
+    try:
+        with TestClient(app) as test_client:
+            unauthenticated = test_client.get("/api/system/status")
+            assert unauthenticated.status_code == 401
+
+            wrong = test_client.get("/api/system/status", headers={"x-neuralops-qa-token": "wrong"})
+            assert wrong.status_code == 401
+
+            response = test_client.get("/api/system/status", headers={"x-neuralops-qa-token": "qa-token-secret"})
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["authRequired"] is True
+            assert payload["workspaceId"] == "deployed-qa-workspace"
+    finally:
+        os.environ.pop("NEURALOPS_AUTH_REQUIRED", None)
+        os.environ.pop("NEURALOPS_QA_AUTH_TOKEN", None)
+        os.environ.pop("NEURALOPS_QA_WORKSPACE_ID", None)
 
 
 def test_automation_rule_creates_incident_from_blocked_release_gate(client: TestClient) -> None:
