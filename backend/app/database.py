@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 from pathlib import Path
@@ -16,6 +17,7 @@ DB_PATH = Path(os.getenv("NEURALOPS_DB_PATH", DATA_DIR / "neuralops.sqlite3"))
 POSTGRES_URL = os.getenv("NEURALOPS_DATABASE_URL") or os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL")
 POSTGRES_SCHEMA = os.getenv("NEURALOPS_POSTGRES_SCHEMA", "neuralops_private")
 POSTGRES_TABLE = os.getenv("NEURALOPS_POSTGRES_TABLE", "records")
+LOGGER = logging.getLogger(__name__)
 
 
 def storage_backend() -> str:
@@ -72,8 +74,29 @@ def init_postgres() -> None:
             )
             cursor.execute(f"CREATE INDEX IF NOT EXISTS records_domain_updated_at_idx ON {pg_table()} (domain, updated_at DESC)")
             cursor.execute(f"CREATE INDEX IF NOT EXISTS records_payload_gin_idx ON {pg_table()} USING gin (payload)")
-            cursor.execute(f"ALTER TABLE {pg_table()} ENABLE ROW LEVEL SECURITY")
         conn.commit()
+    maybe_enable_postgres_rls()
+
+
+def maybe_enable_postgres_rls() -> None:
+    """Optional safety migration for self-hosted installs.
+
+    Production Supabase RLS is managed by versioned SQL migrations. Running
+    ALTER TABLE during every web-service boot can block behind active sessions
+    and make Render fail health checks, so startup only attempts this when
+    explicitly requested.
+    """
+    if os.getenv("NEURALOPS_ENABLE_POSTGRES_RLS_ON_STARTUP", "").lower() not in {"1", "true", "yes"}:
+        return
+    try:
+        with postgres_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SET LOCAL lock_timeout = '3s'")
+                cursor.execute("SET LOCAL statement_timeout = '8s'")
+                cursor.execute(f"ALTER TABLE {pg_table()} ENABLE ROW LEVEL SECURITY")
+            conn.commit()
+    except Exception as exc:  # pragma: no cover - defensive production guard
+        LOGGER.warning("Skipped startup RLS enablement for %s: %s", pg_table(), exc)
 
 
 def seed_if_empty() -> None:

@@ -59,7 +59,7 @@ test('all product tabs render without console errors and Evidence gate runs', as
   await expect(page.getByText(/Saved gate Playwright Release Gate/i)).toBeVisible();
 
   await sidebar.getByRole('button', { name: 'Autopilot', exact: true }).click();
-  await expect(page.getByText('Release Autopilot')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Release Autopilot' })).toBeVisible();
   const autopilotResponse = page.waitForResponse((response) => response.url().includes('/api/release-autopilot/run'));
   await page.getByRole('button', { name: 'Run Autopilot' }).click();
   expect((await autopilotResponse).ok()).toBe(true);
