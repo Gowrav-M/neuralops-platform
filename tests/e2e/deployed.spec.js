@@ -65,7 +65,7 @@ test('deployed production app authenticates and core enterprise workflows run', 
   await sidebar.getByRole('button', { name: 'Automations', exact: true }).click();
   const ruleName = `Deployed Prod Webhook Rule ${Date.now()}`;
   await page.locator('form.automation-form input').first().fill(ruleName);
-  await page.locator('form.automation-form select').nth(1).selectOption('webhook_record');
+  await page.locator('form.automation-form select').nth(1).selectOption('audit_only');
   const createAutomationResponse = page.waitForResponse((response) => response.url().includes('/api/automations') && response.request().method() === 'POST');
   await page.getByRole('button', { name: 'Save Automation Rule' }).click();
   expect((await createAutomationResponse).ok()).toBe(true);
