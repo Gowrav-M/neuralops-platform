@@ -71,6 +71,7 @@ export default function AutomationCenter({ addToast }) {
     try {
       const rule = await createAutomation({ ...form, enabled: true });
       setRules((current) => [rule, ...current]);
+      setLoading(false);
       setForm((current) => ({ ...current, name: '', description: '' }));
       addToast(`Automation rule saved: ${rule.name}.`, 'success');
     } catch {
@@ -224,7 +225,7 @@ export default function AutomationCenter({ addToast }) {
               <p className="page-subtitle">Each rule is persisted and counted in the system truth contract.</p>
             </div>
           </div>
-          {loading ? (
+          {loading && !rules.length ? (
             <div className="state-container">Loading automation rules...</div>
           ) : rules.length ? rules.map((rule) => (
             <div className="automation-rule-row" key={rule.id}>

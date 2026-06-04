@@ -53,7 +53,7 @@ test('deployed production app authenticates and core enterprise workflows run', 
   const gateResponse = page.waitForResponse((response) => response.url().includes('/api/release-gate/run'));
   await page.getByRole('button', { name: /Run Current Config/i }).click();
   expect((await gateResponse).ok()).toBe(true);
-  await expect(page.getByText(/Release gate completed|Deployment Blockers/i)).toBeVisible();
+  await expect(page.getByText(/Release gate completed|Deployment Blockers/i).first()).toBeVisible();
 
   await sidebar.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByPlaceholder('Webhook receiver name').fill(`Deployed Prod Webhook ${Date.now()}`);
@@ -63,13 +63,23 @@ test('deployed production app authenticates and core enterprise workflows run', 
   expect((await webhookResponse).ok()).toBe(true);
 
   await sidebar.getByRole('button', { name: 'Automations', exact: true }).click();
-  await page.locator('form.automation-form input').first().fill(`Deployed Prod Webhook Rule ${Date.now()}`);
+  const ruleName = `Deployed Prod Webhook Rule ${Date.now()}`;
+  await page.locator('form.automation-form input').first().fill(ruleName);
   await page.locator('form.automation-form select').nth(1).selectOption('webhook_record');
+  const createAutomationResponse = page.waitForResponse((response) => response.url().includes('/api/automations') && response.request().method() === 'POST');
   await page.getByRole('button', { name: 'Save Automation Rule' }).click();
+  expect((await createAutomationResponse).ok()).toBe(true);
   await expect(page.getByText(/Automation rule saved/i)).toBeVisible();
-  await page.locator('.automation-rule-row').first().getByRole('button', { name: 'Test' }).click();
-  await expect(page.getByText(/Automation test recorded/i)).toBeVisible();
+  const ruleRow = page.locator('.automation-rule-row', { hasText: ruleName }).first();
+  await expect(ruleRow).toBeVisible();
+  const testAutomationResponse = page.waitForResponse((response) => response.url().includes('/run-test') && response.request().method() === 'POST');
+  await ruleRow.getByRole('button', { name: 'Test' }).click();
+  const testAutomationResult = await testAutomationResponse;
+  expect(testAutomationResult.ok()).toBe(true);
+  expect((await testAutomationResult.json()).ruleName).toBe(ruleName);
+  const dryRunResponse = page.waitForResponse((response) => response.url().includes('/api/connector-deliveries/process'));
   await page.getByRole('button', { name: 'Dry Run Worker' }).click();
+  expect((await dryRunResponse).ok()).toBe(true);
   await expect(page.getByText(/Dry run found/i)).toBeVisible();
 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
