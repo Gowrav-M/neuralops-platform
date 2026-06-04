@@ -218,6 +218,8 @@ export default function App() {
   const [incidents, setIncidents] = useState([]);
   const [traces, setTraces] = useState([]);
 
+  const signedInEmail = session?.user?.email || 'Authenticated operator';
+
   useEffect(() => {
     if (AUTH_ENABLED && !session) return undefined;
     let cancelled = false;
@@ -299,6 +301,33 @@ export default function App() {
       setToasts(prev => prev.filter(t => t.id !== id));
     }, 4000);
   }, [playAudioCue]);
+
+  const handleSignOut = async () => {
+    playAudioCue('click');
+    if (supabase) {
+      const { error } = await supabase.auth.signOut();
+      if (error) {
+        addToast(`Sign out failed: ${error.message}`, 'error');
+        return;
+      }
+    }
+    setSession(null);
+    setApiAuthToken(null);
+    setQaAuthToken(null);
+    setSystemStatus(null);
+    setTraces([]);
+    setIncidents([]);
+    setStats({
+      totalRequests: 0,
+      avgLatency: '0.00s',
+      p95Latency: '0.00s',
+      errorRate: '0.0%',
+      totalCost: '$0.000',
+      evalPassRate: '0.0%',
+      policyViolations: 0,
+      activeIncidents: 0
+    });
+  };
 
   // Local visual anomaly marker for operator drills; it never mutates backend records.
   const [chaosActive, setChaosActive] = useState(false);
@@ -553,15 +582,17 @@ export default function App() {
         </div>
 
         {/* Operator profile card bottom */}
-        <div className="sidebar-profile" onClick={() => handleNavClick('Settings')}>
+        <div className="sidebar-profile">
           <div className="avatar-circle" style={{ width: '36px', height: '36px' }}>
             <div className="avatar-initials" aria-label="NeuralOps operator avatar">NO</div>
           </div>
-          <div className="sidebar-profile-info">
-            <span className="sidebar-profile-name">Local Workspace</span>
+          <button className="sidebar-profile-info sidebar-profile-button" onClick={() => handleNavClick('Settings')}>
+            <span className="sidebar-profile-name">{signedInEmail}</span>
             <span className="sidebar-profile-role">{apiStatus.state === 'connected' ? 'Backend connected' : 'Backend unavailable'}</span>
-          </div>
-          <span className="sidebar-profile-badge">{traces.length} traces</span>
+          </button>
+          <button className="sidebar-profile-badge sidebar-signout-button" onClick={handleSignOut}>
+            Sign out
+          </button>
         </div>
       </aside>
 
@@ -651,12 +682,26 @@ export default function App() {
               className="action-btn-circle"
               style={{ background: 'var(--bg-card)', color: 'var(--text-primary)', borderColor: 'var(--border-color)' }}
               onClick={() => addToast('No unread system alerts in queue.', 'success')}
+              aria-label="Notifications"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: '15px', height: '15px' }}>
                 <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
                 <path d="M13.73 21a2 2 0 0 1-3.46 0" />
               </svg>
               <span className="notification-badge"></span>
+            </button>
+            <button
+              className="action-btn-circle"
+              style={{ background: 'var(--bg-card)', color: 'var(--text-primary)', borderColor: 'var(--border-color)' }}
+              title="Sign out"
+              aria-label="Sign out"
+              onClick={handleSignOut}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: '16px', height: '16px' }}>
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
             </button>
           </div>
         </div>

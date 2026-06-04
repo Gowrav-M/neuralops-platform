@@ -85,4 +85,7 @@ test('deployed production app authenticates and core enterprise workflows run', 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
   expect(overflow).toBe(false);
   expect(errors).toEqual([]);
+
+  await page.getByRole('button', { name: 'Sign out' }).first().click();
+  await expect(page.getByText('AUTH REQUIRED')).toBeVisible();
 });
