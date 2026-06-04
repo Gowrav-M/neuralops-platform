@@ -489,6 +489,78 @@ def test_workspace_member_invalid_role_rejected(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+def test_onboarding_bootstrap_creates_auth_workspace_owner(client: TestClient) -> None:
+    os.environ["NEURALOPS_AUTH_REQUIRED"] = "true"
+    os.environ["SUPABASE_JWT_SECRET"] = "pytest-secret-with-at-least-thirty-two-bytes"
+    try:
+        token = jwt.encode(
+            {
+                "sub": "user_owner",
+                "role": "authenticated",
+                "email": "owner@example.com",
+                "app_metadata": {"neuralops_workspace_id": "workspace-onboarding"},
+            },
+            os.environ["SUPABASE_JWT_SECRET"],
+            algorithm="HS256",
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+
+        response = client.post("/api/onboarding/bootstrap", headers=headers)
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["workspace"]["id"] == "workspace-onboarding"
+        assert payload["workspace"]["authRequired"] is True
+        assert payload["steps"][0]["id"] == "auth"
+        assert payload["steps"][0]["state"] == "complete"
+        assert payload["steps"][1]["id"] == "workspace"
+        assert payload["steps"][1]["state"] == "complete"
+        assert payload["progress"] >= 40
+
+        members = client.get("/api/workspace/members", headers=headers)
+        assert members.status_code == 200
+        assert members.json()[0]["email"] == "owner@example.com"
+        assert members.json()[0]["role"] == "Owner"
+    finally:
+        os.environ.pop("NEURALOPS_AUTH_REQUIRED", None)
+        os.environ.pop("SUPABASE_JWT_SECRET", None)
+
+
+def test_onboarding_progress_after_ingest_key_and_trace(client: TestClient) -> None:
+    initial = client.get("/api/onboarding")
+    assert initial.status_code == 200
+    initial_steps = {step["id"]: step["state"] for step in initial.json()["steps"]}
+    assert initial_steps["ingest_key"] == "action_required"
+    assert initial_steps["first_trace"] == "action_required"
+
+    key_response = client.post(
+        "/api/settings/api-keys",
+        json={
+            "name": "pytest-service ingest",
+            "role": "Developer",
+            "environment": "staging",
+            "scopes": ["trace:ingest"],
+        },
+    )
+    assert key_response.status_code == 200
+    token = key_response.json()["token"]
+    verify = client.post(
+        "/api/connect/verify",
+        headers={"x-neuralops-key": token},
+        json={"serviceName": "pytest-service", "environment": "staging", "sdk": "python"},
+    )
+    assert verify.status_code == 200
+
+    final = client.get("/api/onboarding")
+    assert final.status_code == 200
+    payload = final.json()
+    steps = {step["id"]: step for step in payload["steps"]}
+    assert steps["ingest_key"]["state"] == "complete"
+    assert steps["first_trace"]["state"] == "complete"
+    assert payload["progress"] >= initial.json()["progress"] + 40
+    assert payload["nextAction"] in {"Run a release gate evidence check.", "Review production readiness evidence."}
+
+
 def test_auth_gate_requires_valid_supabase_jwt_when_enabled(client: TestClient) -> None:
     os.environ["NEURALOPS_AUTH_REQUIRED"] = "true"
     os.environ["SUPABASE_JWT_SECRET"] = "pytest-secret-with-at-least-thirty-two-bytes"

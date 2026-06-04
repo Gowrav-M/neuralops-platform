@@ -707,6 +707,21 @@ class WorkspaceProfile(BaseModel):
     updatedAt: str
 
 
+class OnboardingStep(BaseModel):
+    id: str
+    label: str
+    state: Literal["complete", "action_required", "not_configured"]
+    detail: str
+
+
+class OnboardingStatus(BaseModel):
+    workspace: WorkspaceProfile
+    progress: int = Field(ge=0, le=100)
+    nextAction: str
+    steps: list[OnboardingStep]
+    generatedAt: str
+
+
 class ApiKeyCreateRequest(BaseModel):
     name: str = Field(min_length=1)
     role: str = Field(min_length=1)

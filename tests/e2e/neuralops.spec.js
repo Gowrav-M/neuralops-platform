@@ -114,16 +114,20 @@ test('Connect page creates a key and stores a verification trace', async ({ page
   const sidebar = page.locator('.sidebar-container');
   await sidebar.getByRole('button', { name: 'Connect', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Connect Your AI App' })).toBeVisible();
+  await expect(page.getByText('Production Connect Checklist')).toBeVisible();
+  await expect(page.locator('.onboarding-score')).toContainText('%');
 
   await page.getByPlaceholder('service name').fill('playwright-service');
   await page.getByRole('button', { name: 'Create Ingest Key' }).click();
   await expect(page.getByPlaceholder(/Paste NEURALOPS_API_KEY/i)).toHaveValue(/nop_sk_/);
+  await expect(page.locator('.onboarding-step', { hasText: 'Ingest key created' })).toContainText('complete');
 
   const verifyResponse = page.waitForResponse((response) => response.url().includes('/api/connect/verify'));
   await page.getByRole('button', { name: /Verify Connection/i }).click();
   expect((await verifyResponse).ok()).toBe(true);
   await expect(page.getByText('verified', { exact: true })).toBeVisible();
   await expect(page.getByText(/trace: tr_conn_/i)).toBeVisible();
+  await expect(page.locator('.onboarding-step', { hasText: 'First trace received' })).toContainText('complete');
 
   await sidebar.getByRole('button', { name: 'Traces', exact: true }).click();
   await expect(page.getByRole('cell', { name: 'neuralops-connect-javascript' }).first()).toBeVisible();

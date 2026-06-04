@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { createApiKey, fetchConnectGuide, verifyConnectIngest } from '../lib/api';
+import { bootstrapOnboarding, createApiKey, fetchConnectGuide, fetchOnboarding, verifyConnectIngest } from '../lib/api';
 
 export default function ConnectCenter({ addToast, refreshDashboard }) {
   const [guide, setGuide] = useState(null);
+  const [onboarding, setOnboarding] = useState(null);
   const [activeSnippet, setActiveSnippet] = useState('javascript');
   const [serviceName, setServiceName] = useState('checkout-agent-service');
   const [environment, setEnvironment] = useState('staging');
@@ -13,11 +14,12 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
 
   useEffect(() => {
     let cancelled = false;
-    fetchConnectGuide()
-      .then((payload) => {
+    Promise.all([fetchConnectGuide(), fetchOnboarding()])
+      .then(([guidePayload, onboardingPayload]) => {
         if (cancelled) return;
-        setGuide(payload);
-        setActiveSnippet(payload.snippets[0]?.id || 'javascript');
+        setGuide(guidePayload);
+        setOnboarding(onboardingPayload);
+        setActiveSnippet(guidePayload.snippets[0]?.id || 'javascript');
         setDataSource('api');
       })
       .catch(() => {
@@ -30,6 +32,26 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
   }, []);
 
   const active = guide?.snippets.find((snippet) => snippet.id === activeSnippet);
+  const completedSteps = onboarding?.steps.filter((step) => step.state === 'complete').length || 0;
+
+  const refreshOnboarding = async () => {
+    const payload = await fetchOnboarding();
+    setOnboarding(payload);
+    return payload;
+  };
+
+  const handleBootstrap = async () => {
+    setBusy(true);
+    try {
+      const payload = await bootstrapOnboarding();
+      setOnboarding(payload);
+      addToast('Workspace onboarding state refreshed from the backend.', 'success');
+    } catch (error) {
+      addToast(`Could not refresh onboarding: ${error.message}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleCreateKey = async () => {
     setBusy(true);
@@ -41,6 +63,7 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
         scopes: ['trace:ingest'],
       });
       setApiKey(response.token);
+      await refreshOnboarding();
       addToast('Created one-time ingest key. Store it in your server environment.', 'success');
     } catch (error) {
       addToast(`Could not create ingest key: ${error.message}`, 'error');
@@ -63,6 +86,7 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
       }, apiKey.trim());
       setVerification(result);
       refreshDashboard?.();
+      await refreshOnboarding();
       addToast(result.message, 'success');
     } catch (error) {
       addToast(`Connection verification failed: ${error.message}`, 'error');
@@ -89,6 +113,43 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
             Generate an ingest key, verify the connection, and copy SDK or collector setup for a real application.
             {dataSource === 'api' ? ' Backend connected.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
           </p>
+        </div>
+      </div>
+
+      <div className="onboarding-panel">
+        <div className="onboarding-summary">
+          <div>
+            <span className="card-title">Production Connect Checklist</span>
+            <p>
+              {onboarding
+                ? `${onboarding.workspace.name} is using ${onboarding.workspace.storage}. ${completedSteps}/${onboarding.steps.length} steps complete.`
+                : 'Loading workspace connection state from the backend.'}
+            </p>
+          </div>
+          <div className="onboarding-score" aria-label="Onboarding progress">
+            <strong>{onboarding?.progress ?? 0}%</strong>
+            <span>{onboarding?.nextAction || 'Waiting for backend status.'}</span>
+          </div>
+        </div>
+        <div className="onboarding-progress-track">
+          <span style={{ width: `${onboarding?.progress ?? 0}%` }} />
+        </div>
+        <div className="onboarding-step-grid">
+          {onboarding?.steps.map((step) => (
+            <div className={`onboarding-step ${step.state}`} key={step.id}>
+              <span className={`badge ${step.state === 'complete' ? 'badge-success' : 'badge-warning'}`}>
+                {step.state === 'complete' ? 'complete' : 'next'}
+              </span>
+              <strong>{step.label}</strong>
+              <p>{step.detail}</p>
+            </div>
+          ))}
+        </div>
+        <div className="onboarding-actions">
+          <button className="btn-secondary" onClick={handleBootstrap} disabled={busy}>
+            Refresh Workspace Proof
+          </button>
+          <span className="code-font">workspace: {onboarding?.workspace.id || 'loading'}</span>
         </div>
       </div>
 

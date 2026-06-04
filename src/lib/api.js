@@ -136,6 +136,14 @@ export function fetchConnectGuide() {
   return request('/api/connect/guide');
 }
 
+export function fetchOnboarding() {
+  return request('/api/onboarding');
+}
+
+export function bootstrapOnboarding() {
+  return request('/api/onboarding/bootstrap', { method: 'POST' });
+}
+
 export function verifyConnectIngest(payload, apiKey) {
   return request('/api/connect/verify', {
     method: 'POST',

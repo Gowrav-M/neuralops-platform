@@ -62,6 +62,8 @@ from .schemas import (
     LabRunRequest,
     LabRunResponse,
     LabVariantResult,
+    OnboardingStatus,
+    OnboardingStep,
     OtelIngestRequest,
     OtelIngestResult,
     Policy,
@@ -330,6 +332,45 @@ def workspace_access_for_role(role: str) -> str:
     return "Read Only" if role == "Viewer" else "All Workspace"
 
 
+def claim_text(*keys: str) -> str | None:
+    claims = current_claims() or {}
+    for key in keys:
+        value = claims.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def current_user_email() -> str:
+    email = claim_text("email")
+    if email:
+        return email.lower()
+    subject = claim_text("sub")
+    if subject:
+        return f"{subject.lower()}@neuralops.local"
+    return "local-operator@neuralops.local"
+
+
+def current_user_display_name() -> str:
+    email = current_user_email()
+    name = email.split("@", 1)[0].replace(".", " ").replace("_", " ").replace("-", " ").strip()
+    return name.title() if name else "Workspace Owner"
+
+
+def default_workspace_name(workspace_id: str) -> str:
+    configured = os.getenv("NEURALOPS_WORKSPACE_NAME")
+    if configured:
+        return configured
+    if not auth_required():
+        return "Local Workspace"
+    email = current_user_email()
+    if "@" in email and not email.endswith("@neuralops.local"):
+        domain = email.split("@", 1)[1].split(".", 1)[0]
+        if domain:
+            return f"{domain.title()} Workspace"
+    return f"{workspace_id.replace('-', ' ').title()} Workspace"
+
+
 def workspace_profile_payload() -> dict[str, Any]:
     workspace_id = current_workspace_id()
     payload = get_record("workspaces", workspace_id)
@@ -337,7 +378,7 @@ def workspace_profile_payload() -> dict[str, Any]:
     if payload is None:
         payload = {
             "id": workspace_id,
-            "name": os.getenv("NEURALOPS_WORKSPACE_NAME", "Local Workspace"),
+            "name": default_workspace_name(workspace_id),
             "storage": storage_backend(),
             "authRequired": workspace_auth_required(),
             "memberCount": count_domain("workspace_members"),
@@ -350,6 +391,36 @@ def workspace_profile_payload() -> dict[str, Any]:
     payload["memberCount"] = count_domain("workspace_members")
     payload["updatedAt"] = now
     return save_record("workspaces", workspace_id, payload)
+
+
+def ensure_workspace_bootstrap() -> dict[str, Any]:
+    workspace = workspace_profile_payload()
+    if not auth_required():
+        return workspace
+    if workspace_members_payload():
+        return workspace_profile_payload()
+
+    now = datetime.now().isoformat()
+    email = current_user_email()
+    member = WorkspaceMember(
+        id=f"mem_owner_{sha256(f'{current_workspace_id()}:{email}'.encode('utf-8')).hexdigest()[:10]}",
+        workspaceId=current_workspace_id(),
+        name=current_user_display_name(),
+        email=email,
+        role="Owner",
+        access="All Workspace",
+        createdAt=now,
+        updatedAt=now,
+    )
+    save_record("workspace_members", member.id, member.model_dump())
+    save_audit_event(
+        "workspace.bootstrap",
+        email,
+        current_workspace_id(),
+        "allow",
+        "Created first workspace owner from authenticated session.",
+    )
+    return workspace_profile_payload()
 
 
 def workspace_members_payload() -> list[dict[str, Any]]:
@@ -383,8 +454,74 @@ def public_workspace_members() -> list[dict[str, Any]]:
     return members
 
 
+def onboarding_step(step_id: str, label: str, complete: bool, complete_detail: str, action_detail: str) -> OnboardingStep:
+    return OnboardingStep(
+        id=step_id,
+        label=label,
+        state="complete" if complete else "action_required",
+        detail=complete_detail if complete else action_detail,
+    )
+
+
+def build_onboarding_status() -> OnboardingStatus:
+    workspace = WorkspaceProfile.model_validate(ensure_workspace_bootstrap())
+    settings_payload = settings_payload_or_404()
+    has_ingest_key = any(
+        "trace:ingest" in api_key.get("scopes", ["trace:ingest"]) or "admin" in api_key.get("scopes", [])
+        for api_key in settings_payload.get("apiKeys", [])
+    )
+    trace_count = count_domain("traces")
+    gate_count = count_domain("release_gates") + count_domain("evidence_reports")
+    steps = [
+        onboarding_step(
+            "auth",
+            "Sign in",
+            auth_required() or not workspace.authRequired,
+            "Dashboard is running inside an authenticated workspace." if workspace.authRequired else "Local development mode is active.",
+            "Enable Supabase Auth before exposing the product publicly.",
+        ),
+        onboarding_step(
+            "workspace",
+            "Workspace provisioned",
+            True,
+            f"{workspace.name} is stored in {workspace.storage}.",
+            "Create a workspace before ingesting traces.",
+        ),
+        onboarding_step(
+            "ingest_key",
+            "Ingest key created",
+            has_ingest_key,
+            "A server-side trace ingest key exists for this workspace.",
+            "Create an ingest key from Connect or Settings.",
+        ),
+        onboarding_step(
+            "first_trace",
+            "First trace received",
+            trace_count > 0,
+            f"{trace_count} trace records are stored for this workspace.",
+            "Verify the connection or post a real trace to /api/traces/ingest.",
+        ),
+        onboarding_step(
+            "release_evidence",
+            "Release evidence ready",
+            gate_count > 0,
+            "Release gate or evidence records exist for this workspace.",
+            "Run a release gate evidence check.",
+        ),
+    ]
+    completed = sum(1 for step in steps if step.state == "complete")
+    next_action = next((step.detail for step in steps if step.state != "complete"), "Review production readiness evidence.")
+    return OnboardingStatus(
+        workspace=workspace,
+        progress=round((completed / len(steps)) * 100),
+        nextAction=next_action,
+        steps=steps,
+        generatedAt=datetime.now().isoformat(),
+    )
+
+
 def build_system_status() -> SystemStatus:
-    workspace_profile_payload()
+    ensure_workspace_bootstrap()
     domains = [
         "workspaces",
         "workspace_members",
@@ -2458,9 +2595,20 @@ def cancel_agent_job(job_id: str) -> AgentJob:
     return job
 
 
+@app.get("/api/onboarding", response_model=OnboardingStatus)
+def onboarding_status() -> OnboardingStatus:
+    return build_onboarding_status()
+
+
+@app.post("/api/onboarding/bootstrap", response_model=OnboardingStatus)
+def onboarding_bootstrap() -> OnboardingStatus:
+    ensure_workspace_bootstrap()
+    return build_onboarding_status()
+
+
 @app.get("/api/workspace", response_model=WorkspaceProfile)
 def workspace_profile() -> WorkspaceProfile:
-    return WorkspaceProfile.model_validate(workspace_profile_payload())
+    return WorkspaceProfile.model_validate(ensure_workspace_bootstrap())
 
 
 @app.get("/api/workspace/members", response_model=list[WorkspaceMember])
