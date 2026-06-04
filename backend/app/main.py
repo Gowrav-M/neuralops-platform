@@ -1190,45 +1190,55 @@ def run_matching_automations(
     for rule in list_automation_rules():
         if not rule.enabled or rule.trigger != trigger:
             continue
-        result: dict[str, Any] = {"action": rule.action}
-        status = "recorded"
-        if rule.action == "create_incident":
-            incident = create_automation_incident(rule, subject_id, summary)
-            result.update({"incidentId": incident.id, "incidentStatus": incident.status, "owner": incident.owner})
-        elif rule.action == "webhook_record":
-            deliveries = create_webhook_deliveries(
-                subject_type,
-                subject_id,
-                {
-                    "ruleId": rule.id,
-                    "ruleName": rule.name,
-                    "trigger": trigger,
-                    "decision": decision,
-                    "summary": summary,
-                },
-            )
-            webhook_count = len(deliveries)
-            status = "recorded" if webhook_count else "skipped"
-            result.update(
-                {
-                    "webhookCount": webhook_count,
-                    "deliveryAttemptIds": [delivery.id for delivery in deliveries],
-                    "externalDelivery": False,
-                    "reason": "Signed webhook delivery attempts are persisted for a worker; external network sending is disabled in local deterministic mode.",
-                }
-            )
-        else:
-            result.update({"auditOnly": True})
-        event = record_automation_event(rule, subject_type, subject_id, decision, summary, status, result)
-        save_audit_event(
-            "automation.run",
-            "automation_engine",
-            event.id,
-            decision,  # type: ignore[arg-type]
-            f"Rule {rule.name} handled {trigger} for {subject_id}: {status}.",
-        )
-        events.append(event)
+        events.append(run_automation_rule(rule, subject_type, subject_id, decision, summary))
     return events
+
+
+def run_automation_rule(
+    rule: AutomationRule,
+    subject_type: str,
+    subject_id: str,
+    decision: str,
+    summary: str,
+) -> AutomationEvent:
+    result: dict[str, Any] = {"action": rule.action}
+    status = "recorded"
+    if rule.action == "create_incident":
+        incident = create_automation_incident(rule, subject_id, summary)
+        result.update({"incidentId": incident.id, "incidentStatus": incident.status, "owner": incident.owner})
+    elif rule.action == "webhook_record":
+        deliveries = create_webhook_deliveries(
+            subject_type,
+            subject_id,
+            {
+                "ruleId": rule.id,
+                "ruleName": rule.name,
+                "trigger": rule.trigger,
+                "decision": decision,
+                "summary": summary,
+            },
+        )
+        webhook_count = len(deliveries)
+        status = "recorded" if webhook_count else "skipped"
+        result.update(
+            {
+                "webhookCount": webhook_count,
+                "deliveryAttemptIds": [delivery.id for delivery in deliveries],
+                "externalDelivery": False,
+                "reason": "Signed webhook delivery attempts are persisted for a worker; external network sending is disabled in local deterministic mode.",
+            }
+        )
+    else:
+        result.update({"auditOnly": True})
+    event = record_automation_event(rule, subject_type, subject_id, decision, summary, status, result)
+    save_audit_event(
+        "automation.run",
+        "automation_engine",
+        event.id,
+        decision,  # type: ignore[arg-type]
+        f"Rule {rule.name} handled {rule.trigger} for {subject_id}: {status}.",
+    )
+    return event
 
 
 def trigger_release_gate_automations(result: ReleaseGateResult) -> None:
@@ -1573,11 +1583,7 @@ def run_automation_test(rule_id: str, request: AutomationRunTestRequest) -> Auto
     rule = AutomationRule.model_validate(existing)
     if not rule.enabled:
         raise HTTPException(status_code=409, detail="Automation rule is disabled")
-    events = run_matching_automations(rule.trigger, request.subjectType, request.subjectId, request.decision, request.summary)
-    event = next((item for item in events if item.ruleId == rule_id), None)
-    if event is None:
-        raise HTTPException(status_code=409, detail="Automation rule did not match its configured trigger")
-    return event
+    return run_automation_rule(rule, request.subjectType, request.subjectId, request.decision, request.summary)
 
 
 @app.get("/api/automation-events", response_model=list[AutomationEvent])

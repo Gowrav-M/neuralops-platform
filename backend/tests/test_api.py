@@ -212,6 +212,39 @@ def test_connector_delivery_retry_records_new_attempt(client: TestClient) -> Non
     assert payload["id"] != delivery_id
 
 
+def test_manual_automation_test_runs_only_selected_rule(client: TestClient) -> None:
+    first = client.post(
+        "/api/automations",
+        json={
+            "name": "Selected manual rule",
+            "trigger": "release_gate.review",
+            "action": "audit_only",
+            "severity": "Major",
+            "owner": "AI Platform Oncall",
+        },
+    ).json()
+    client.post(
+        "/api/automations",
+        json={
+            "name": "Same trigger should not run",
+            "trigger": "release_gate.review",
+            "action": "audit_only",
+            "severity": "Major",
+            "owner": "AI Platform Oncall",
+        },
+    )
+
+    response = client.post(
+        f"/api/automations/{first['id']}/run-test",
+        json={"subjectId": "manual_only", "subjectType": "release_gate", "decision": "review", "summary": "Run one rule only."},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ruleName"] == "Selected manual rule"
+    events = client.get("/api/automation-events").json()
+    assert [event["ruleName"] for event in events] == ["Selected manual rule"]
+
+
 def test_connector_worker_sends_signed_webhook_when_enabled(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     client.post("/api/settings/webhooks", json={"name": "Slack Ops Hook", "url": "https://hooks.slack.com/services/test"})
     rule = client.post(
