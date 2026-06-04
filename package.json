@@ -9,6 +9,7 @@
     "test:api": "python -m pytest backend",
     "test:e2e": "playwright test",
     "db:verify-rls": "python backend/scripts/verify_supabase_rls.py",
+    "deploy:verify": "node scripts/verify-deployment.mjs",
     "release:gate": "node sdk/javascript/bin/neuralops.mjs release-gate run",
     "build": "vite build",
     "lint": "eslint .",
