@@ -2,6 +2,17 @@ import { useState } from 'react';
 import { supabase } from '../lib/supabase';
 
 const qaAuthEnabled = import.meta.env.VITE_QA_AUTH_ENABLED === 'true';
+const configuredAuthRedirectUrl = import.meta.env.VITE_AUTH_REDIRECT_URL;
+
+function authRedirectUrl() {
+  if (configuredAuthRedirectUrl) {
+    return configuredAuthRedirectUrl;
+  }
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+    return 'https://neuralops-platform.vercel.app';
+  }
+  return window.location.origin;
+}
 
 export default function AuthGate({ onSession }) {
   const [mode, setMode] = useState('sign-in');
@@ -57,7 +68,7 @@ export default function AuthGate({ onSession }) {
       password,
       options: {
         data: { name: email.split('@')[0], neuralops_signup_source: 'production_app' },
-        emailRedirectTo: window.location.origin,
+        emailRedirectTo: authRedirectUrl(),
       },
     });
     setLoading(false);
