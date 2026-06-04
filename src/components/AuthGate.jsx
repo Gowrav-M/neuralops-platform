@@ -94,7 +94,7 @@ export default function AuthGate({ onSession }) {
         </div>
         <div className="auth-mode-switch" aria-label="Authentication mode">
           <button className={mode === 'sign-in' ? 'active' : ''} type="button" onClick={() => switchMode('sign-in')}>
-            Sign in
+            Existing account
           </button>
           <button className={mode === 'sign-up' ? 'active' : ''} type="button" onClick={() => switchMode('sign-up')}>
             Create account
