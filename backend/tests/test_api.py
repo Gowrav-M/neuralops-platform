@@ -26,6 +26,7 @@ def client(tmp_path: Path) -> Generator[TestClient]:
     os.environ.pop("NEURALOPS_API_KEY", None)
     os.environ.pop("NEURALOPS_DELIVERY_SEND_ENABLED", None)
     os.environ.pop("NEURALOPS_GITHUB_SEND_ENABLED", None)
+    os.environ.pop("NEURALOPS_AUTOMATION_INLINE_LIMIT", None)
     os.environ.pop("GITHUB_TOKEN", None)
     os.environ.pop("NEURALOPS_QA_AUTH_TOKEN", None)
     os.environ.pop("NEURALOPS_QA_WORKSPACE_ID", None)
@@ -243,6 +244,31 @@ def test_manual_automation_test_runs_only_selected_rule(client: TestClient) -> N
     assert response.json()["ruleName"] == "Selected manual rule"
     events = client.get("/api/automation-events").json()
     assert [event["ruleName"] for event in events] == ["Selected manual rule"]
+
+
+def test_automatic_automation_fanout_is_bounded(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEURALOPS_AUTOMATION_INLINE_LIMIT", "1")
+    for name in ("First automatic rule", "Second automatic rule"):
+        client.post(
+            "/api/automations",
+            json={
+                "name": name,
+                "trigger": "release_gate.blocked",
+                "action": "audit_only",
+                "severity": "Major",
+                "owner": "AI Platform Oncall",
+            },
+        )
+
+    gate = client.post(
+        "/api/release-gate/run",
+        json={"target": "production", "requireLiveProvider": True, "requireAuth": True},
+    )
+
+    assert gate.status_code == 200
+    events = client.get("/api/automation-events").json()
+    assert len(events) == 1
+    assert events[0]["ruleName"] == "Second automatic rule"
 
 
 def test_connector_worker_sends_signed_webhook_when_enabled(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

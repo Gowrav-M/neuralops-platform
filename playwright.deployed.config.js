@@ -5,6 +5,7 @@ const deployedFrontendUrl = globalThis.process?.env?.DEPLOYED_FRONTEND_URL;
 export default defineConfig({
   testDir: './tests/e2e',
   testMatch: /deployed\.spec\.js/,
+  workers: 1,
   timeout: 90_000,
   expect: {
     timeout: 15_000,

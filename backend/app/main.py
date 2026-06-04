@@ -905,6 +905,17 @@ def env_flag_enabled(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def automation_inline_limit() -> int:
+    return max(0, env_int("NEURALOPS_AUTOMATION_INLINE_LIMIT", 3))
+
+
 def infer_webhook_connector_type(url: str | None) -> str:
     normalized = (url or "").lower()
     if "hooks.slack.com" in normalized or "slack.com" in normalized:
@@ -1187,10 +1198,18 @@ def run_matching_automations(
     summary: str,
 ) -> list[AutomationEvent]:
     events: list[AutomationEvent] = []
-    for rule in list_automation_rules():
-        if not rule.enabled or rule.trigger != trigger:
-            continue
+    matching_rules = [rule for rule in list_automation_rules() if rule.enabled and rule.trigger == trigger]
+    for rule in matching_rules[:automation_inline_limit()]:
         events.append(run_automation_rule(rule, subject_type, subject_id, decision, summary))
+    skipped_count = max(0, len(matching_rules) - len(events))
+    if skipped_count:
+        save_audit_event(
+            "automation.inline_limit",
+            "automation_engine",
+            f"{trigger}:{subject_id}",
+            "review",
+            f"Skipped {skipped_count} matching automation rule(s) for {trigger}; increase NEURALOPS_AUTOMATION_INLINE_LIMIT or process rules with a worker.",
+        )
     return events
 
 
