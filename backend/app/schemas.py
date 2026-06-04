@@ -9,6 +9,8 @@ DecisionStatus = Literal["success", "warning", "failed", "blocked"]
 IncidentStatus = Literal["Open", "Investigating", "Resolved"]
 Severity = Literal["Critical", "Major", "Minor", "Low"]
 WorkspaceRole = Literal["Owner", "Admin", "Developer", "Security", "Viewer"]
+DetectionDecision = Literal["allow", "review", "block"]
+DetectionStatus = Literal["open", "contained", "closed"]
 ApiKeyScope = Literal["trace:ingest", "trace:read", "admin"]
 AutomationTrigger = Literal[
     "release_gate.blocked",
@@ -152,6 +154,34 @@ class PolicyViolation(BaseModel):
     subject: str
     summary: str
     time: str
+
+
+class DetectionCaseCreateRequest(BaseModel):
+    owner: str = Field(default="AI Platform Oncall", min_length=1)
+
+
+class DetectionActionRequest(BaseModel):
+    action: Literal["contain", "close", "reopen"]
+    note: str = Field(default="", max_length=1000)
+
+
+class DetectionCase(BaseModel):
+    id: str
+    title: str
+    severity: Severity
+    decision: DetectionDecision
+    status: DetectionStatus
+    sourceType: Literal["trace", "policy_violation", "manual"]
+    sourceTraceId: str | None = None
+    createdAt: str
+    updatedAt: str
+    owner: str
+    rootCause: str
+    blastRadius: list[str]
+    timeline: list[dict[str, Any]]
+    recommendedActions: list[str]
+    containmentActions: list[str]
+    evidence: dict[str, Any]
 
 
 class PromptTrafficUpdate(BaseModel):

@@ -1533,6 +1533,24 @@ body {
   gap: 6px;
 }
 
+.detection-response-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.4fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.detection-metric-grid,
+.detection-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.detection-evidence-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .settings-member-form {
   display: grid;
   grid-template-columns: minmax(140px, 1fr) minmax(180px, 1fr) minmax(120px, 160px) auto;
@@ -3057,7 +3075,10 @@ body {
   }
   .automation-form-row,
   .automation-stats,
-  .autopilot-summary-grid {
+  .autopilot-summary-grid,
+  .detection-response-grid,
+  .detection-metric-grid,
+  .detection-evidence-grid {
     grid-template-columns: 1fr;
   }
   .automation-rule-row {

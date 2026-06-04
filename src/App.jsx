@@ -18,6 +18,7 @@ import ConnectCenter from './components/ConnectCenter';
 import EvidenceCenter from './components/EvidenceCenter';
 import AutomationCenter from './components/AutomationCenter';
 import ReleaseAutopilot from './components/ReleaseAutopilot';
+import DetectionResponse from './components/DetectionResponse';
 import Settings from './components/Settings';
 import AuthGate from './components/AuthGate';
 
@@ -137,6 +138,15 @@ const getNavIcon = (tab) => {
           <circle cx="12" cy="12" r="4" />
         </svg>
       );
+    case 'Detection':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+          <path d="M8.5 12.5 11 15l5-6" />
+          <path d="M7 19 4 22" />
+          <path d="m17 19 3 3" />
+        </svg>
+      );
     case 'Settings':
       return (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -154,6 +164,7 @@ const workflowStages = [
   { label: 'Test', tab: 'Labs', detail: 'Agents and evals' },
   { label: 'Replay', tab: 'Autopilot', detail: 'Regression proof' },
   { label: 'Gate', tab: 'Evidence', detail: 'Release proof' },
+  { label: 'Respond', tab: 'Detection', detail: 'ADR cases' },
   { label: 'Act', tab: 'Automations', detail: 'Rules and incidents' },
   { label: 'Monitor', tab: 'Dashboard', detail: 'Traces and cost' },
   { label: 'Investigate', tab: 'Traces', detail: 'Replay failures' },
@@ -408,6 +419,7 @@ export default function App() {
     'Connect',
     'Autopilot',
     'Evidence',
+    'Detection',
     'Automations',
     'Settings'
   ];
@@ -470,6 +482,8 @@ export default function App() {
         return <ReleaseAutopilot addToast={addToast} />;
       case 'Evidence':
         return <EvidenceCenter addToast={addToast} />;
+      case 'Detection':
+        return <DetectionResponse addToast={addToast} refreshDashboard={refreshDashboard} />;
       case 'Automations':
         return <AutomationCenter addToast={addToast} />;
       case 'Settings':

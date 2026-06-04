@@ -77,6 +77,9 @@ from .schemas import (
     ConnectorDelivery,
     ConnectorDeliveryProcessRequest,
     ConnectorDeliveryProcessResult,
+    DetectionActionRequest,
+    DetectionCase,
+    DetectionCaseCreateRequest,
     GitHubPrCommentRequest,
     GitHubPrCommentResult,
     PromptTrafficUpdate,
@@ -401,6 +404,7 @@ def build_system_status() -> SystemStatus:
         "automation_events",
         "release_autopilot",
         "connector_deliveries",
+        "detections",
         "release_gate_definitions",
         "release_gates",
         "audit",
@@ -516,6 +520,13 @@ def build_system_status() -> SystemStatus:
             state="persisted" if record_counts["automation_rules"] or record_counts["automation_events"] else "not_configured",
             evidence=f"{record_counts['automation_rules']} rule(s), {record_counts['automation_events']} event(s)",
             action="Create rules that turn release-gate, trace, policy, or cost failures into audit records, incidents, or webhook records.",
+        ),
+        FeatureTruth(
+            id="detection_response",
+            label="Agent Detection + Response",
+            state="persisted" if record_counts["detections"] else "not_configured",
+            evidence=f"{record_counts['detections']} detection case(s), {record_counts['traces']} trace(s)",
+            action="Analyze a risky trace to create a persisted case with root cause, blast radius, containment, and audit proof.",
         ),
         FeatureTruth(
             id="release_autopilot",
@@ -1732,6 +1743,277 @@ def replay_existing_trace(trace_id: str) -> ReplayResult:
 @app.post("/api/traces/simulate", response_model=Trace)
 def simulate_trace() -> Trace:
     raise HTTPException(status_code=410, detail="Random trace simulation is disabled in real-data mode")
+
+
+def trace_risk_text(trace: Trace) -> str:
+    return " ".join(
+        [
+            trace.prompt,
+            trace.output,
+            trace.toolCalls or "",
+            " ".join(trace.riskFlags),
+            trace.status,
+        ]
+    ).lower()
+
+
+def classify_detection_trace(trace: Trace) -> dict[str, Any]:
+    text = trace_risk_text(trace)
+    prompt_injection_terms = ["ignore previous", "ignore standard", "jailbreak", "developer message", "system prompt"]
+    secret_terms = ["api key", "password", "secret", "token", "credential", "private key"]
+    external_terms = ["webhook", "external", "slack", "email", "http://", "https://", "post"]
+    tool_terms = ["shell", "delete", "write", "github", "browser", "tool"]
+
+    matched = {
+        "promptInjection": [term for term in prompt_injection_terms if term in text],
+        "secretExposure": [term for term in secret_terms if term in text],
+        "externalSink": [term for term in external_terms if term in text],
+        "toolAction": [term for term in tool_terms if term in text],
+        "riskFlags": trace.riskFlags,
+    }
+    has_prompt_injection = bool(matched["promptInjection"])
+    has_secret = bool(matched["secretExposure"])
+    has_external_sink = bool(matched["externalSink"])
+    has_tool_action = bool(matched["toolAction"])
+    low_score = trace.score < 0.8
+    failed = trace.status in {"failed", "blocked", "warning"}
+
+    if trace.status == "blocked" or (has_secret and has_external_sink) or (has_prompt_injection and has_tool_action):
+        decision = "block"
+        severity = "Critical"
+    elif failed or low_score or has_external_sink or has_tool_action:
+        decision = "review"
+        severity = "Major"
+    else:
+        decision = "allow"
+        severity = "Low"
+
+    if has_prompt_injection and has_secret and has_external_sink:
+        root_cause = "Prompt injection attempted credential exfiltration through an external sink."
+    elif has_secret and has_external_sink:
+        root_cause = "Credential exfiltration risk: sensitive data was paired with an external destination."
+    elif has_prompt_injection:
+        root_cause = "Prompt injection or instruction override attempt was detected in the trace payload."
+    elif trace.status in {"failed", "warning"} or low_score:
+        root_cause = "Runtime quality, latency, or policy signal requires operator review."
+    else:
+        root_cause = "No high-risk runtime chain was detected from the available trace evidence."
+
+    blast_radius = ["Agent runtime", f"{trace.environment} traces", f"Model: {trace.model}"]
+    if has_external_sink:
+        blast_radius.append("External connector or webhook boundary")
+    if has_secret:
+        blast_radius.append("Credential and API key handling")
+    if has_tool_action:
+        blast_radius.append("Tool execution policy")
+    if has_prompt_injection:
+        blast_radius.append("Prompt registry and guardrail policy")
+
+    recommended_actions = []
+    if has_secret:
+        recommended_actions.append("Rotate any exposed API keys, tokens, or credentials referenced by this workflow.")
+    if has_external_sink:
+        recommended_actions.append("Disable external connector delivery for this workflow until an owner reviews the trace.")
+    if has_prompt_injection:
+        recommended_actions.append("Run Release Autopilot with explicit prompt-injection and secret-exfiltration controls.")
+    if has_tool_action:
+        recommended_actions.append("Require human approval for shell, write, browser, GitHub, and external-post tool calls.")
+    if failed or low_score:
+        recommended_actions.append("Create or attach an incident and rerun the affected prompt/model through the release gate.")
+    if not recommended_actions:
+        recommended_actions.append("Keep monitoring the workflow; no containment is required from current evidence.")
+
+    return {
+        "decision": decision,
+        "severity": severity,
+        "rootCause": root_cause,
+        "blastRadius": list(dict.fromkeys(blast_radius)),
+        "recommendedActions": list(dict.fromkeys(recommended_actions)),
+        "matched": matched,
+    }
+
+
+def build_detection_case(trace: Trace, owner: str) -> DetectionCase:
+    now = datetime.now().isoformat()
+    analysis = classify_detection_trace(trace)
+    case_id = f"adr_{sha256(trace.id.encode('utf-8')).hexdigest()[:12]}"
+    existing = get_scoped_record("detections", case_id)
+    created_at = existing.get("createdAt", now) if existing else now
+    status = existing.get("status", "open") if existing else "open"
+    containment_actions = existing.get("containmentActions", []) if existing else []
+    existing_evidence = existing.get("evidence", {}) if existing else {}
+    evidence = {
+        **existing_evidence,
+        "trace": {
+            "id": trace.id,
+            "session": trace.session,
+            "environment": trace.environment,
+            "model": trace.model,
+            "status": trace.status,
+            "score": trace.score,
+            "latency": trace.latency,
+            "cost": trace.cost,
+            "riskFlags": trace.riskFlags,
+            "toolCalls": trace.toolCalls,
+        },
+        "matchedSignals": analysis["matched"],
+        "workspaceId": current_workspace_id(),
+    }
+    timeline = [
+        {
+            "time": trace.timestamp,
+            "title": "Trace recorded",
+            "detail": f"{trace.model} returned {trace.status} with score {trace.score:.2f}.",
+        },
+        {
+            "time": now,
+            "title": "Detection analysis completed",
+            "detail": analysis["rootCause"],
+        },
+    ]
+    if existing and existing.get("timeline"):
+        preserved = [item for item in existing["timeline"] if item.get("title") not in {"Trace recorded", "Detection analysis completed"}]
+        timeline.extend(preserved)
+
+    return DetectionCase(
+        id=case_id,
+        title=f"{analysis['severity']} detection: {analysis['rootCause']}",
+        severity=analysis["severity"],
+        decision=analysis["decision"],
+        status=status,
+        sourceType="trace",
+        sourceTraceId=trace.id,
+        createdAt=created_at,
+        updatedAt=now,
+        owner=owner,
+        rootCause=analysis["rootCause"],
+        blastRadius=analysis["blastRadius"],
+        timeline=timeline,
+        recommendedActions=analysis["recommendedActions"],
+        containmentActions=containment_actions,
+        evidence=evidence,
+    )
+
+
+def risky_trace_sort_key(trace: Trace) -> tuple[int, float, str]:
+    status_weight = {"blocked": 4, "failed": 3, "warning": 2, "success": 1}[trace.status]
+    risk_flag_weight = 1 if trace.riskFlags else 0
+    return (status_weight + risk_flag_weight, 1 - trace.score, trace.timestamp)
+
+
+@app.get("/api/detections", response_model=list[DetectionCase])
+def detection_cases() -> list[DetectionCase]:
+    cases = [DetectionCase.model_validate(item) for item in scoped_records("detections")]
+    return sorted(cases, key=lambda item: item.updatedAt, reverse=True)
+
+
+@app.post("/api/detections/analyze-trace/{trace_id}", response_model=DetectionCase)
+def analyze_trace_detection(trace_id: str, request: DetectionCaseCreateRequest) -> DetectionCase:
+    trace_payload = get_scoped_record("traces", trace_id)
+    if trace_payload is None:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    trace = Trace.model_validate(trace_payload)
+    detection_case = build_detection_case(trace, request.owner)
+    save_scoped_record("detections", detection_case.id, detection_case.model_dump())
+    save_audit_event(
+        "detection.case.create",
+        request.owner,
+        detection_case.id,
+        detection_case.decision,
+        f"Analyzed trace {trace.id}: {detection_case.rootCause}",
+    )
+    return detection_case
+
+
+@app.post("/api/detections/analyze-latest", response_model=DetectionCase)
+def analyze_latest_detection(request: DetectionCaseCreateRequest) -> DetectionCase:
+    traces = [Trace.model_validate(item) for item in scoped_records("traces")]
+    risky_traces = [
+        trace
+        for trace in traces
+        if trace.status in {"blocked", "failed", "warning"} or trace.score < 0.8 or trace.riskFlags
+    ]
+    if not risky_traces:
+        raise HTTPException(status_code=404, detail="No risky trace is available to analyze")
+    trace = sorted(risky_traces, key=risky_trace_sort_key, reverse=True)[0]
+    detection_case = build_detection_case(trace, request.owner)
+    save_scoped_record("detections", detection_case.id, detection_case.model_dump())
+    save_audit_event(
+        "detection.case.create",
+        request.owner,
+        detection_case.id,
+        detection_case.decision,
+        f"Analyzed latest risky trace {trace.id}: {detection_case.rootCause}",
+    )
+    return detection_case
+
+
+@app.patch("/api/detections/{case_id}/action", response_model=DetectionCase)
+def detection_case_action(case_id: str, request: DetectionActionRequest) -> DetectionCase:
+    payload = get_scoped_record("detections", case_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Detection case not found")
+    detection_case = DetectionCase.model_validate(payload)
+    now = datetime.now().isoformat()
+    evidence = {**detection_case.evidence}
+    containment_actions = list(detection_case.containmentActions)
+    timeline = list(detection_case.timeline)
+
+    if request.action == "contain":
+        incident_id = evidence.get("containment", {}).get("incidentId") or f"inc_adr_{token_hex(5)}"
+        incident = Incident(
+            id=incident_id,
+            title=f"ADR containment: {detection_case.rootCause}",
+            severity=detection_case.severity,
+            status="Investigating",
+            time="current",
+            owner=detection_case.owner,
+        )
+        save_scoped_record("incidents", incident.id, incident.model_dump())
+        note = request.note or "Containment recorded from Detection & Response."
+        containment_actions.append(note)
+        evidence["containment"] = {
+            "incidentId": incident.id,
+            "note": note,
+            "createdAt": now,
+        }
+        status = "contained"
+        event_type = "detection.case.contain"
+        summary = f"Contained detection case and opened incident {incident.id}."
+    elif request.action == "close":
+        note = request.note or "Case closed by operator."
+        containment_actions.append(note)
+        evidence["closure"] = {"note": note, "createdAt": now}
+        status = "closed"
+        event_type = "detection.case.close"
+        summary = "Closed detection case."
+    else:
+        note = request.note or "Case reopened by operator."
+        containment_actions.append(note)
+        evidence["reopen"] = {"note": note, "createdAt": now}
+        status = "open"
+        event_type = "detection.case.reopen"
+        summary = "Reopened detection case."
+
+    timeline.append(
+        {
+            "time": now,
+            "title": f"Case {status}",
+            "detail": containment_actions[-1],
+        }
+    )
+    updated = detection_case.model_copy(
+        update={
+            "status": status,
+            "updatedAt": now,
+            "timeline": timeline,
+            "containmentActions": containment_actions,
+            "evidence": evidence,
+        }
+    )
+    save_scoped_record("detections", updated.id, updated.model_dump())
+    save_audit_event(event_type, updated.owner, updated.id, updated.decision, summary)
+    return updated
 
 
 @app.get("/api/incidents", response_model=list[Incident])

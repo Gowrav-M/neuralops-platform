@@ -306,6 +306,31 @@ export function replayTrace(traceId) {
   return request(`/api/traces/${traceId}/replay`, { method: 'POST' });
 }
 
+export function fetchDetections() {
+  return request('/api/detections');
+}
+
+export function analyzeLatestDetection(payload = { owner: 'AI Platform Oncall' }) {
+  return request('/api/detections/analyze-latest', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function analyzeTraceDetection(traceId, payload = { owner: 'AI Platform Oncall' }) {
+  return request(`/api/detections/analyze-trace/${traceId}`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function patchDetectionAction(caseId, payload) {
+  return request(`/api/detections/${caseId}/action`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
 export function fetchSettings() {
   return request('/api/settings');
 }

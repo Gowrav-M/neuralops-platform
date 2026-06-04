@@ -4,7 +4,7 @@ Production-style AI control plane for LLM apps, RAG systems, agents, cost, evalu
 
 The frontend keeps the premium warm enterprise dashboard direction from the original `D:\SAAS` build, while this repo adds a real FastAPI + SQLite backend, an agent runtime, trace ingestion, eval checks, cost estimates, and provider readiness.
 
-NeuralOps now includes a deploy-readiness layer: `/api/system/status`, `/api/release-gate/run`, and `/api/evidence` power the Evidence page so every feature is labeled as `persisted`, `live_provider`, `local_drill`, or `not_configured`.
+NeuralOps now includes a deploy-readiness and response layer: `/api/system/status`, `/api/release-gate/run`, `/api/evidence`, and `/api/detections/*` power the Evidence and Detection pages so every feature is labeled as `persisted`, `live_provider`, `local_drill`, or `not_configured`.
 
 NeuralOps also includes a Connect workflow so a real app can send traces through SDK, REST, or OpenTelemetry instead of relying on sample dashboard records.
 
@@ -30,8 +30,9 @@ flowchart LR
   E["Evaluations + Policy"] --> F
   I["Cost + Incidents"] --> F
   J["Release Gate + Evidence"] --> F
+  L["Detection + Response Cases"] --> F
   F --> G["Premium React Dashboard"]
-  F --> H["SQLite Local Evidence Store"]
+  F --> H["SQLite or Supabase Postgres Evidence Store"]
 ```
 
 ## Evidence & Release Gate
@@ -60,6 +61,27 @@ cmd /c npm run release:gate -- --base-url http://localhost:8000 --target ci --re
 ```
 
 Saved release gates can be created from the Evidence page and reused by ID in GitHub Actions. See [docs/release-gates.md](docs/release-gates.md).
+
+## Detection & Response
+
+The Detection page turns risky traces into persisted investigation records. It does not invent incidents from frontend state. The backend reads stored traces, risk flags, model outcomes, policy signals, and tool-call text, then writes:
+
+- root cause summary
+- decision (`allow`, `review`, `block`)
+- severity
+- blast radius
+- matched evidence signals
+- recommended containment actions
+- audit event
+- optional incident when an operator clicks `Contain + Open Incident`
+
+Run it through the UI or API:
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8000/api/detections/analyze-latest `
+  -ContentType "application/json" `
+  -Body '{"owner":"AI Platform Oncall"}'
+```
 
 ## Connect Real AI Apps
 
@@ -167,14 +189,15 @@ Example stored evidence shape:
 
 Provider connections are used by `providerMode: live` agent and lab runs. If no live provider is configured or a live call fails in `auto` mode, NeuralOps falls back to the deterministic local runtime; if `providerMode: live` is requested and no provider works, the API returns a 503 instead of pretending.
 
-## What Is Real Locally
+## What Is Real
 
-NeuralOps is not deployed as a hosted SaaS yet. In this repo, "working" means local end-to-end behavior through the FastAPI backend and SQLite evidence store:
+NeuralOps supports local SQLite development and deployed Supabase/Postgres production mode. In this repo, "working" means end-to-end behavior through the FastAPI backend and evidence store, not frontend-only mock state:
 
 - dashboard, traces, incidents, prompts, evals, RAG, costs, policies, agents, and settings are loaded from backend APIs
 - generated API keys are stored as hashes; the full token is shown once
 - API keys have explicit scopes such as `trace:ingest`, `trace:read`, and `admin`; read-only keys cannot write traces
 - the Connect page verifies real ingest keys by writing a trace and audit event
+- Detection & Response analyzes stored risky traces, persists cases, and can open a backend incident through containment
 - provider gateway connections are persisted, secret-redacted, testable, and used by live agent/lab runs
 - `/api/traces/ingest` requires a NeuralOps API key and writes a trace plus an audit event
 - workspace profile and team RBAC changes are persisted through `/api/workspace/*` and write audit events
@@ -325,6 +348,10 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/traces/ingest `
 - `GET /api/release-gates/{gate_id}/runs`
 - `POST /api/release-gates/{gate_id}/run`
 - `GET /api/evidence`
+- `GET /api/detections`
+- `POST /api/detections/analyze-latest`
+- `POST /api/detections/analyze-trace/{trace_id}`
+- `PATCH /api/detections/{case_id}/action`
 - `GET /api/connect/guide`
 - `POST /api/connect/verify`
 - `GET /api/workspace`
