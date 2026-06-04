@@ -4,11 +4,22 @@ import { supabase } from '../lib/supabase';
 const qaAuthEnabled = import.meta.env.VITE_QA_AUTH_ENABLED === 'true';
 
 export default function AuthGate({ onSession }) {
+  const [mode, setMode] = useState('sign-in');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [qaToken, setQaToken] = useState('');
   const [message, setMessage] = useState('Production mode requires Supabase login.');
   const [loading, setLoading] = useState(false);
+
+  const switchMode = (nextMode) => {
+    setMode(nextMode);
+    setPassword('');
+    setConfirmPassword('');
+    setMessage(nextMode === 'sign-up'
+      ? 'Create an account. You may need to confirm your email before signing in.'
+      : 'Production mode requires Supabase login.');
+  };
 
   const handleLogin = async (event) => {
     event.preventDefault();
@@ -26,6 +37,44 @@ export default function AuthGate({ onSession }) {
     onSession(data.session);
   };
 
+  const handleSignup = async (event) => {
+    event.preventDefault();
+    if (!supabase) {
+      setMessage('Supabase URL or publishable key is missing.');
+      return;
+    }
+    if (password.length < 8) {
+      setMessage('Use at least 8 characters for the password.');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setMessage('Passwords do not match.');
+      return;
+    }
+    setLoading(true);
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: { name: email.split('@')[0], neuralops_signup_source: 'production_app' },
+        emailRedirectTo: window.location.origin,
+      },
+    });
+    setLoading(false);
+    if (error) {
+      setMessage(error.message);
+      return;
+    }
+    if (data.session) {
+      onSession(data.session);
+      return;
+    }
+    setMode('sign-in');
+    setPassword('');
+    setConfirmPassword('');
+    setMessage('Account created. Check your email to confirm it, then sign in.');
+  };
+
   const handleQaLogin = (event) => {
     event.preventDefault();
     if (!qaToken.trim()) {
@@ -37,11 +86,19 @@ export default function AuthGate({ onSession }) {
 
   return (
     <div className="auth-shell">
-      <form className="auth-card" onSubmit={handleLogin}>
+      <form className="auth-card" onSubmit={mode === 'sign-up' ? handleSignup : handleLogin}>
         <div>
           <span className="badge badge-warning">AUTH REQUIRED</span>
           <h1 className="page-title" style={{ marginTop: '12px' }}>NeuralOps</h1>
           <p className="page-subtitle">{message}</p>
+        </div>
+        <div className="auth-mode-switch" aria-label="Authentication mode">
+          <button className={mode === 'sign-in' ? 'active' : ''} type="button" onClick={() => switchMode('sign-in')}>
+            Sign in
+          </button>
+          <button className={mode === 'sign-up' ? 'active' : ''} type="button" onClick={() => switchMode('sign-up')}>
+            Create account
+          </button>
         </div>
         <input
           className="filter-search-input"
@@ -59,8 +116,18 @@ export default function AuthGate({ onSession }) {
           onChange={(event) => setPassword(event.target.value)}
           required
         />
+        {mode === 'sign-up' && (
+          <input
+            className="filter-search-input"
+            type="password"
+            value={confirmPassword}
+            placeholder="Confirm password"
+            onChange={(event) => setConfirmPassword(event.target.value)}
+            required
+          />
+        )}
         <button className="btn-primary" type="submit" disabled={loading}>
-          {loading ? 'Signing in...' : 'Sign in'}
+          {loading ? (mode === 'sign-up' ? 'Creating account...' : 'Signing in...') : (mode === 'sign-up' ? 'Create account' : 'Sign in')}
         </button>
       </form>
       {qaAuthEnabled && (
