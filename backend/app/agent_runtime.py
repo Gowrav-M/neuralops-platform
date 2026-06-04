@@ -4,11 +4,11 @@ import os
 import time
 from datetime import datetime, timezone
 from hashlib import sha1
-from typing import Any
 
 import httpx
 
 from .config import load_local_env
+from .provider_catalog import RuntimeProvider, list_provider_statuses, runtime_providers
 from .schemas import (
     AgentDefinition,
     AgentEvalCheck,
@@ -70,36 +70,7 @@ KNOWLEDGE_PACK = {
 
 
 def list_providers() -> list[ProviderStatus]:
-    return [
-        ProviderStatus(
-            id="local",
-            label="Deterministic Local Runtime",
-            configured=True,
-            baseUrl=None,
-            defaultModel="local-neuralops-agent",
-        ),
-        ProviderStatus(
-            id="groq",
-            label="Groq OpenAI-Compatible",
-            configured=bool(os.getenv("GROQ_API_KEY")),
-            baseUrl=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-            defaultModel=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-        ),
-        ProviderStatus(
-            id="nvidia",
-            label="NVIDIA NIM OpenAI-Compatible",
-            configured=bool(os.getenv("NVIDIA_API_KEY")),
-            baseUrl=os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
-            defaultModel=os.getenv("NVIDIA_MODEL", "nvidia/llama-3.1-nemotron-70b-instruct"),
-        ),
-        ProviderStatus(
-            id="openai",
-            label="OpenAI-Compatible",
-            configured=bool(os.getenv("OPENAI_API_KEY") or os.getenv("NEURALOPS_API_KEY")),
-            baseUrl=os.getenv("OPENAI_BASE_URL") or os.getenv("NEURALOPS_PROVIDER_URL") or "https://api.openai.com/v1",
-            defaultModel=os.getenv("OPENAI_MODEL") or os.getenv("NEURALOPS_MODEL") or "gpt-4o-mini",
-        ),
-    ]
+    return list_provider_statuses()
 
 
 def get_agent(agent_id: str) -> AgentDefinition | None:
@@ -215,30 +186,25 @@ def _execute(agent: AgentDefinition, request: AgentRunRequest) -> tuple[str, str
 
 
 def _try_live_provider(agent: AgentDefinition, request: AgentRunRequest) -> tuple[str, str, str] | None:
-    providers = list_providers()
-    live_order = [provider for provider in providers if provider.id in ("groq", "nvidia", "openai") and provider.configured]
-    for provider in live_order:
-        model = request.model or provider.defaultModel
-        api_key = _api_key_for(provider.id)
-        if not api_key or not provider.baseUrl:
-            continue
+    for provider in runtime_providers_for_environment(request.environment):
+        model = request.model or provider.default_model
         try:
-            output = _call_openai_compatible(provider.baseUrl, api_key, model, agent, request.input)
+            output = _call_openai_compatible(provider.base_url, provider.api_key, model, agent, request.input)
             return provider.id, model, output
         except httpx.HTTPError:
             continue
     return None
 
 
-def _api_key_for(provider_id: str) -> str | None:
-    if provider_id == "groq":
-        return os.getenv("GROQ_API_KEY")
-    if provider_id == "nvidia":
-        return os.getenv("NVIDIA_API_KEY")
-    return os.getenv("OPENAI_API_KEY") or os.getenv("NEURALOPS_API_KEY")
+def runtime_providers_for_environment(environment: str) -> list[RuntimeProvider]:
+    return [
+        provider
+        for provider in runtime_providers()
+        if provider.environment in ("all", environment)
+    ]
 
 
-def _call_openai_compatible(base_url: str, api_key: str, model: str, agent: AgentDefinition, user_input: str) -> str:
+def _call_openai_compatible(base_url: str, api_key: str | None, model: str, agent: AgentDefinition, user_input: str) -> str:
     payload = {
         "model": model,
         "temperature": 0.2,
@@ -253,10 +219,13 @@ def _call_openai_compatible(base_url: str, api_key: str, model: str, agent: Agen
             {"role": "user", "content": f"Agent: {agent.name}\nRole: {agent.role}\nInput:\n{user_input}"},
         ],
     }
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     with httpx.Client(timeout=20) as client:
         response = client.post(
             f"{base_url.rstrip('/')}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            headers=headers,
             json=payload,
         )
         response.raise_for_status()

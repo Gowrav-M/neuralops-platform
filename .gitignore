@@ -21,6 +21,8 @@ backend/data
 *.pyc
 artifacts
 *.dev.log
+test-results
+playwright-report
 
 # Editor directories and files
 .vscode/*

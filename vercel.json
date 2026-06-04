@@ -1,0 +1,9 @@
+{
+  "framework": "vite",
+  "buildCommand": "cmd /c npm run build",
+  "outputDirectory": "dist",
+  "installCommand": "cmd /c npm install",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/" }
+  ]
+}

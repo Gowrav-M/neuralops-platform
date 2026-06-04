@@ -1,0 +1,54 @@
+name: NeuralOps Release Gate
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          python -m pip install -r backend/requirements.txt
+
+      - name: Verify app before gate
+        run: |
+          npm run lint
+          npm run build
+          python -m pytest backend
+
+      - name: Start NeuralOps API
+        shell: bash
+        run: |
+          NEURALOPS_AUTH_REQUIRED=false python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 &
+          for i in {1..30}; do
+            curl -fsS http://127.0.0.1:8000/health && exit 0
+            sleep 1
+          done
+          exit 1
+
+      - name: Run local release gate
+        uses: ./
+        with:
+          base-url: http://127.0.0.1:8000
+          target: ci
+          require-auth: "false"
+          fail-on: block
+

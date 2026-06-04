@@ -4,6 +4,10 @@ Production-style AI control plane for LLM apps, RAG systems, agents, cost, evalu
 
 The frontend keeps the premium warm enterprise dashboard direction from the original `D:\SAAS` build, while this repo adds a real FastAPI + SQLite backend, an agent runtime, trace ingestion, eval checks, cost estimates, and provider readiness.
 
+NeuralOps now includes a deploy-readiness layer: `/api/system/status`, `/api/release-gate/run`, and `/api/evidence` power the Evidence page so every feature is labeled as `persisted`, `live_provider`, `local_drill`, or `not_configured`.
+
+NeuralOps also includes a Connect workflow so a real app can send traces through SDK, REST, or OpenTelemetry instead of relying on sample dashboard records.
+
 ![NeuralOps dashboard](docs/assets/desktop-dashboard.png)
 
 ![NeuralOps agent runtime](docs/assets/agent-runtime-studio.png)
@@ -14,17 +18,72 @@ The frontend keeps the premium warm enterprise dashboard direction from the orig
 
 AI teams ship many models, prompts, RAG flows, and agents, but production failures usually appear across multiple layers: latency, cost spikes, bad evals, tool misuse, policy violations, and incident response. NeuralOps puts those signals into one operational cockpit and can run real agent workflows locally or through an OpenAI-compatible provider.
 
+The product goal is CI/CD and observability for AI workflows: test before release, gate risky changes, monitor live traces, and produce evidence that explains why an AI workflow was allowed, reviewed, or blocked.
+
 ```mermaid
 flowchart LR
   A["Agent Runtime"] --> F["NeuralOps API"]
-  B["OpenAI-compatible Providers"] --> F
+  B["Provider Gateway: OpenRouter, Vercel, Groq, NVIDIA, Ollama, vLLM, Custom"] --> F
   C["Neural Labs Experiments"] --> F
   D["GenAI / OTEL Traces"] --> F
+  K["JavaScript / Python SDK"] --> F
   E["Evaluations + Policy"] --> F
   I["Cost + Incidents"] --> F
+  J["Release Gate + Evidence"] --> F
   F --> G["Premium React Dashboard"]
   F --> H["SQLite Local Evidence Store"]
 ```
+
+## Evidence & Release Gate
+
+The Evidence page is the deployment control surface. It reads real backend state and shows:
+
+- database/auth/provider readiness
+- feature truth state (`persisted`, `live_provider`, `local_drill`, `not_configured`)
+- saved release gate definitions
+- current deployment blockers
+- latest release gate decision
+- Markdown evidence report
+
+Run the gate through the UI or API:
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8000/api/release-gate/run `
+  -ContentType "application/json" `
+  -Body '{"target":"production","maxLatencyMs":2500,"maxErrorRate":0.05,"minEvalPassRate":0.85}'
+```
+
+Run the same gate from CLI/CI:
+
+```powershell
+cmd /c npm run release:gate -- --base-url http://localhost:8000 --target ci --require-auth false --fail-on block
+```
+
+Saved release gates can be created from the Evidence page and reused by ID in GitHub Actions. See [docs/release-gates.md](docs/release-gates.md).
+
+## Connect Real AI Apps
+
+The Connect page is the product onboarding path for developers. It creates a hashed ingest key, verifies the key by storing a real trace, and provides setup snippets for:
+
+- JavaScript / Node apps
+- Python / FastAPI apps
+- direct REST ingest
+- OpenTelemetry collectors
+
+Use the UI or API to create a key, then verify the connection:
+
+```powershell
+$created = Invoke-RestMethod -Method Post http://localhost:8000/api/settings/api-keys `
+  -ContentType "application/json" `
+  -Body '{"name":"checkout service ingest","role":"Developer","environment":"staging","scopes":["trace:ingest"]}'
+
+Invoke-RestMethod -Method Post http://localhost:8000/api/connect/verify `
+  -Headers @{"x-neuralops-key" = $created.token} `
+  -ContentType "application/json" `
+  -Body '{"serviceName":"checkout-service","environment":"staging","sdk":"curl"}'
+```
+
+That verification writes a trace and audit event. Full setup notes are in [docs/connect.md](docs/connect.md). Local SDK source lives in [sdk/javascript](sdk/javascript) and [sdk/python](sdk/python).
 
 ## Agent Runtime
 
@@ -44,7 +103,9 @@ Each run creates:
 - trace record
 - replay-ready evidence
 
-The local deterministic runtime works without keys. To test live providers, set `GROQ_API_KEY`, `NVIDIA_API_KEY`, or another OpenAI-compatible API key using `.env.example`. Groq is the fastest first live provider path because it uses the OpenAI-compatible chat completions API at `https://api.groq.com/openai/v1`.
+The local deterministic runtime works without keys. To test live providers, open Settings -> AI Provider Gateway Connections and add OpenRouter, Vercel AI Gateway, Groq, NVIDIA NIM, Together, Fireworks, Mistral, DeepSeek, Ollama, vLLM, LM Studio, Azure/OpenAI-compatible, Bedrock-compatible gateway, or a custom OpenAI-compatible endpoint. Secrets are encrypted server-side and only redacted key previews are returned to the browser.
+
+You can also inject provider credentials through server environment variables in `.env.example` for Render/CI deployments. See [docs/provider-gateway.md](docs/provider-gateway.md).
 
 ## Worker Queue
 
@@ -57,6 +118,17 @@ NeuralOps also includes a local worker queue for production-style agent executio
 - store run and trace evidence when the job completes
 
 This makes the project closer to how real AI platforms run asynchronous agent workloads instead of only direct button-triggered calls.
+
+## Automation Connectors
+
+The Automation Center turns release-gate, trace, policy, and cost signals into persisted operational actions. It can create incidents, write audit events, and record signed connector delivery attempts for Slack, Jira/Atlassian, generic webhooks, and GitHub PR comments.
+
+External sending is intentionally gated:
+
+- webhook delivery worker: `NEURALOPS_DELIVERY_SEND_ENABLED=true`
+- GitHub PR comment posting: `NEURALOPS_GITHUB_SEND_ENABLED=true` plus backend-only `GITHUB_TOKEN`
+
+Without those flags, NeuralOps records dry-run/pending evidence instead of pretending a third-party system was notified.
 
 ## Neural Labs
 
@@ -79,23 +151,21 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/labs/run `
   -Body '{"name":"local prompt release check","input":"Compare this customer support answer for safety and usefulness.","agentIds":["support_triage","rag_answer"],"providerMode":"local","environment":"staging"}'
 ```
 
-## Live Provider Proof
-
-Groq live provider support has been verified locally with `providerMode: live`.
+## Live Provider Gateway
 
 Example stored evidence shape:
 
 ```json
 {
-  "provider": "groq",
-  "model": "llama-3.3-70b-versatile",
+  "provider": "openrouter",
+  "model": "openai/gpt-4o-mini",
   "decision": "allow",
   "traceId": "trace_...",
   "source": "api"
 }
 ```
 
-Secrets are read from local `.env` and are intentionally excluded from Git.
+Provider connections are used by `providerMode: live` agent and lab runs. If no live provider is configured or a live call fails in `auto` mode, NeuralOps falls back to the deterministic local runtime; if `providerMode: live` is requested and no provider works, the API returns a 503 instead of pretending.
 
 ## What Is Real Locally
 
@@ -103,13 +173,18 @@ NeuralOps is not deployed as a hosted SaaS yet. In this repo, "working" means lo
 
 - dashboard, traces, incidents, prompts, evals, RAG, costs, policies, agents, and settings are loaded from backend APIs
 - generated API keys are stored as hashes; the full token is shown once
+- API keys have explicit scopes such as `trace:ingest`, `trace:read`, and `admin`; read-only keys cannot write traces
+- the Connect page verifies real ingest keys by writing a trace and audit event
+- provider gateway connections are persisted, secret-redacted, testable, and used by live agent/lab runs
 - `/api/traces/ingest` requires a NeuralOps API key and writes a trace plus an audit event
+- workspace profile and team RBAC changes are persisted through `/api/workspace/*` and write audit events
+- when Supabase Auth is enabled, workspace settings, members, API keys, webhooks, traces, agent runs, labs, release gates, costs, evidence, and audit events are isolated by trusted JWT `app_metadata`
 - prompt traffic, prompt rollback, policy mode changes, RAG recalculation, retention, webhooks, and settings all call backend endpoints
 - no frontend-only fallback records are created when the backend is offline
 
 Operational screens start empty until real local traces, agent runs, OTEL payloads, API keys, webhooks, prompts, RAG records, eval records, or incidents are created. The only default records are guardrail policy definitions and workspace settings required for the product to function. Random trace and cost simulation endpoints are disabled in real-data mode.
 
-For production SaaS, this should move to Postgres with auth, tenant isolation, migrations, and real customer workspaces.
+For public deployment, enable Supabase/Postgres storage and Supabase Auth. See [docs/production-readiness.md](docs/production-readiness.md).
 
 ## Supabase Production Mode
 
@@ -119,6 +194,9 @@ The backend now supports Supabase/Postgres storage through a server-side connect
 NEURALOPS_DATABASE_URL=postgresql://...
 NEURALOPS_POSTGRES_SCHEMA=neuralops_private
 NEURALOPS_POSTGRES_TABLE=records
+NEURALOPS_AUTH_REQUIRED=true
+SUPABASE_URL=https://<project-ref>.supabase.co
+NEURALOPS_CORS_ORIGINS=https://<vercel-domain>
 ```
 
 `/health` reports the active storage backend:
@@ -188,7 +266,7 @@ Create a local ingest key and send a real trace:
 ```powershell
 $created = Invoke-RestMethod -Method Post http://localhost:8000/api/settings/api-keys `
   -ContentType "application/json" `
-  -Body '{"name":"local sdk ingest","role":"Developer"}'
+  -Body '{"name":"local sdk ingest","role":"Developer","environment":"staging","scopes":["trace:ingest"]}'
 
 Invoke-RestMethod -Method Post http://localhost:8000/api/traces/ingest `
   -Headers @{"x-neuralops-key" = $created.token} `
@@ -237,6 +315,23 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/traces/ingest `
 - `POST /api/labs/run`
 - `POST /api/traces/otel`
 - `POST /api/traces/{trace_id}/replay`
+- `POST /api/release-gate/run`
+- `GET /api/release-gate/latest`
+- `GET /api/release-gates`
+- `POST /api/release-gates`
+- `GET /api/release-gates/{gate_id}`
+- `PATCH /api/release-gates/{gate_id}`
+- `DELETE /api/release-gates/{gate_id}`
+- `GET /api/release-gates/{gate_id}/runs`
+- `POST /api/release-gates/{gate_id}/run`
+- `GET /api/evidence`
+- `GET /api/connect/guide`
+- `POST /api/connect/verify`
+- `GET /api/workspace`
+- `GET /api/workspace/members`
+- `POST /api/workspace/members`
+- `PATCH /api/workspace/members/{member_id}`
+- `DELETE /api/workspace/members/{member_id}`
 - `GET /api/settings`
 - `POST /api/settings/api-keys`
 - `POST /api/settings/webhooks`
@@ -250,6 +345,7 @@ cmd /c npm run lint
 cmd /c npm run build
 python -m pytest backend
 cmd /c npm audit --audit-level=moderate
+cmd /c npm run test:e2e
 ```
 
 ## Disabled Demo Endpoints
@@ -262,7 +358,7 @@ These compatibility routes return `410 Gone` because they create fake operationa
 
 ## Product Roadmap
 
-- Add Postgres migrations for production deployment.
+- Apply Supabase migrations to the live project and verify RLS policy output.
 - Add first-class OpenTelemetry export.
 - Add prompt/eval release approval gates.
 - Add CI gate for policy and eval regression checks.

@@ -1,12 +1,18 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+let authToken = null;
+
+export function setApiAuthToken(token) {
+  authToken = token;
+}
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
     headers: {
       'Content-Type': 'application/json',
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       ...(options.headers || {}),
     },
-    ...options,
   });
 
   if (!response.ok) {
@@ -19,6 +25,119 @@ async function request(path, options = {}) {
 
 export function fetchDashboard() {
   return request('/api/dashboard');
+}
+
+export function fetchSystemStatus() {
+  return request('/api/system/status');
+}
+
+export function runReleaseGate(payload = {}) {
+  return request('/api/release-gate/run', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchLatestReleaseGate() {
+  return request('/api/release-gate/latest');
+}
+
+export function fetchReleaseGates() {
+  return request('/api/release-gates');
+}
+
+export function createReleaseGate(payload) {
+  return request('/api/release-gates', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function runSavedReleaseGate(gateId, payload = {}) {
+  return request(`/api/release-gates/${gateId}/run`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchEvidenceReport() {
+  return request('/api/evidence');
+}
+
+export function runReleaseAutopilot(payload) {
+  return request('/api/release-autopilot/run', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchLatestReleaseAutopilot() {
+  return request('/api/release-autopilot/latest');
+}
+
+export function fetchAutomations() {
+  return request('/api/automations');
+}
+
+export function createAutomation(payload) {
+  return request('/api/automations', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function patchAutomation(ruleId, patch) {
+  return request(`/api/automations/${ruleId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function runAutomationTest(ruleId, payload = {}) {
+  return request(`/api/automations/${ruleId}/run-test`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchAutomationEvents() {
+  return request('/api/automation-events');
+}
+
+export function fetchConnectorDeliveries() {
+  return request('/api/connector-deliveries');
+}
+
+export function retryConnectorDelivery(deliveryId) {
+  return request(`/api/connector-deliveries/${deliveryId}/retry`, { method: 'POST' });
+}
+
+export function processConnectorDeliveries(payload = {}) {
+  return request('/api/connector-deliveries/process', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function postGithubPrComment(payload) {
+  return request('/api/github/pr-comment', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchConnectGuide() {
+  return request('/api/connect/guide');
+}
+
+export function verifyConnectIngest(payload, apiKey) {
+  return request('/api/connect/verify', {
+    method: 'POST',
+    headers: {
+      'x-neuralops-key': apiKey,
+    },
+    body: JSON.stringify(payload),
+  });
 }
 
 export function fetchTraces() {
@@ -105,6 +224,25 @@ export function fetchAgentProviders() {
   return request('/api/agent-runtime/providers');
 }
 
+export function fetchProviderCatalog() {
+  return request('/api/providers/catalog');
+}
+
+export function fetchProviderConnections() {
+  return request('/api/providers/connections');
+}
+
+export function createProviderConnection(payload) {
+  return request('/api/providers/connections', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function testProviderConnection(connectionId) {
+  return request(`/api/providers/connections/${connectionId}/test`, { method: 'POST' });
+}
+
 export function fetchAgentRuns() {
   return request('/api/agent-runtime/runs');
 }
@@ -164,6 +302,32 @@ export function replayTrace(traceId) {
 
 export function fetchSettings() {
   return request('/api/settings');
+}
+
+export function fetchWorkspace() {
+  return request('/api/workspace');
+}
+
+export function fetchWorkspaceMembers() {
+  return request('/api/workspace/members');
+}
+
+export function createWorkspaceMember(payload) {
+  return request('/api/workspace/members', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function patchWorkspaceMember(memberId, patch) {
+  return request(`/api/workspace/members/${memberId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function deleteWorkspaceMember(memberId) {
+  return request(`/api/workspace/members/${memberId}`, { method: 'DELETE' });
 }
 
 export function createApiKey(payload) {

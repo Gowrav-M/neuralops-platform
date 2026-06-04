@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import './index.css';
-import { fetchDashboard } from './lib/api';
+import { fetchDashboard, fetchSystemStatus, setApiAuthToken } from './lib/api';
+import { AUTH_ENABLED, supabase } from './lib/supabase';
 
 // Import Screens
 import Overview from './components/Overview';
@@ -13,7 +14,12 @@ import PolicyManager from './components/PolicyManager';
 import IncidentTimeline from './components/IncidentTimeline';
 import Agents from './components/Agents';
 import NeuralLabs from './components/NeuralLabs';
+import ConnectCenter from './components/ConnectCenter';
+import EvidenceCenter from './components/EvidenceCenter';
+import AutomationCenter from './components/AutomationCenter';
+import ReleaseAutopilot from './components/ReleaseAutopilot';
 import Settings from './components/Settings';
+import AuthGate from './components/AuthGate';
 
 const getNavIcon = (tab) => {
   switch (tab) {
@@ -94,6 +100,43 @@ const getNavIcon = (tab) => {
           <path d="M7.2 16h9.6" />
         </svg>
       );
+    case 'Connect':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+          <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+        </svg>
+      );
+    case 'Evidence':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M9 11l3 3L22 4" />
+          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+        </svg>
+      );
+    case 'Automations':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M4 4v6h6" />
+          <path d="M20 20v-6h-6" />
+          <path d="M20 9a7 7 0 0 0-12-4.9L4 10" />
+          <path d="M4 15a7 7 0 0 0 12 4.9L20 14" />
+        </svg>
+      );
+    case 'Autopilot':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 2v4" />
+          <path d="M12 18v4" />
+          <path d="m4.93 4.93 2.83 2.83" />
+          <path d="m16.24 16.24 2.83 2.83" />
+          <path d="M2 12h4" />
+          <path d="M18 12h4" />
+          <path d="m4.93 19.07 2.83-2.83" />
+          <path d="m16.24 7.76 2.83-2.83" />
+          <circle cx="12" cy="12" r="4" />
+        </svg>
+      );
     case 'Settings':
       return (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -105,6 +148,17 @@ const getNavIcon = (tab) => {
       return null;
   }
 };
+
+const workflowStages = [
+  { label: 'Ingest', tab: 'Connect', detail: 'SDK, REST, OTEL' },
+  { label: 'Test', tab: 'Labs', detail: 'Agents and evals' },
+  { label: 'Replay', tab: 'Autopilot', detail: 'Regression proof' },
+  { label: 'Gate', tab: 'Evidence', detail: 'Release proof' },
+  { label: 'Act', tab: 'Automations', detail: 'Rules and incidents' },
+  { label: 'Monitor', tab: 'Dashboard', detail: 'Traces and cost' },
+  { label: 'Investigate', tab: 'Traces', detail: 'Replay failures' },
+  { label: 'Configure', tab: 'Settings', detail: 'Providers and auth' },
+];
 
 export default function App() {
   const [theme, setTheme] = useState(() => {
@@ -123,6 +177,26 @@ export default function App() {
   const [cmdSearch, setCmdSearch] = useState('');
   const [toasts, setToasts] = useState([]);
   const [apiStatus, setApiStatus] = useState({ state: 'loading', message: 'Connecting to FastAPI backend...' });
+  const [systemStatus, setSystemStatus] = useState(null);
+  const [session, setSession] = useState(null);
+
+  useEffect(() => {
+    if (!AUTH_ENABLED || !supabase) return undefined;
+    let mounted = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) return;
+      setSession(data.session);
+      setApiAuthToken(data.session?.access_token || null);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setApiAuthToken(nextSession?.access_token || null);
+    });
+    return () => {
+      mounted = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
 
   // Uptime/realtime timer
   const [timerSeconds, setTimerSeconds] = useState(155); // 02:35 initial
@@ -143,14 +217,16 @@ export default function App() {
   const [traces, setTraces] = useState([]);
 
   useEffect(() => {
+    if (AUTH_ENABLED && !session) return undefined;
     let cancelled = false;
 
-    fetchDashboard()
-      .then((snapshot) => {
+    Promise.all([fetchDashboard(), fetchSystemStatus()])
+      .then(([snapshot, status]) => {
         if (cancelled) return;
         setStats(snapshot.stats);
         setTraces(snapshot.traces);
         setIncidents(snapshot.incidents);
+        setSystemStatus(status);
         setApiStatus({ state: 'connected', message: 'Live backend data store connected' });
       })
       .catch(() => {
@@ -161,7 +237,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [session]);
 
   // Web Audio synthesizer for crisp physical haptic audio notes
   const playAudioCue = useCallback((type = 'click') => {
@@ -226,11 +302,12 @@ export default function App() {
   const [chaosActive, setChaosActive] = useState(false);
 
   const refreshDashboard = () => {
-    fetchDashboard()
-      .then((snapshot) => {
+    Promise.all([fetchDashboard(), fetchSystemStatus()])
+      .then(([snapshot, status]) => {
         setStats(snapshot.stats);
         setTraces(snapshot.traces);
         setIncidents(snapshot.incidents);
+        setSystemStatus(status);
         setApiStatus({ state: 'connected', message: 'Live backend data store connected' });
       })
       .catch(() => {
@@ -297,6 +374,10 @@ export default function App() {
     'Incidents',
     'Agents',
     'Labs',
+    'Connect',
+    'Autopilot',
+    'Evidence',
+    'Automations',
     'Settings'
   ];
 
@@ -309,6 +390,8 @@ export default function App() {
             stats={stats}
             traces={traces}
             incidents={incidents}
+            systemStatus={systemStatus}
+            apiStatus={apiStatus}
             setActiveTab={setActiveTab}
             setSelectedTrace={setSelectedTrace}
             setDrawerOpen={setDrawerOpen}
@@ -350,6 +433,14 @@ export default function App() {
         return <Agents addToast={addToast} />;
       case 'Labs':
         return <NeuralLabs addToast={addToast} refreshDashboard={refreshDashboard} />;
+      case 'Connect':
+        return <ConnectCenter addToast={addToast} refreshDashboard={refreshDashboard} />;
+      case 'Autopilot':
+        return <ReleaseAutopilot addToast={addToast} />;
+      case 'Evidence':
+        return <EvidenceCenter addToast={addToast} />;
+      case 'Automations':
+        return <AutomationCenter addToast={addToast} />;
       case 'Settings':
         return <Settings addToast={addToast} />;
       default:
@@ -361,6 +452,13 @@ export default function App() {
   const filteredCommands = navItems.filter(cmd =>
     cmd.toLowerCase().includes(cmdSearch.toLowerCase())
   );
+
+  if (AUTH_ENABLED && !session) {
+    return <AuthGate onSession={(nextSession) => {
+      setSession(nextSession);
+      setApiAuthToken(nextSession?.access_token || null);
+    }} />;
+  }
 
   return (
     <div className="dashboard-wrapper">
@@ -404,6 +502,16 @@ export default function App() {
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
               <span>Incidents</span>
               <span className="code-font">{incidents.length}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+              <span>DB</span>
+              <span className="code-font">{systemStatus?.storage || 'checking'}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+              <span>Auth</span>
+              <span className={`badge ${systemStatus?.authRequired ? 'badge-success' : 'badge-warning'}`} style={{ fontSize: '8px' }}>
+                {systemStatus?.authRequired ? 'enabled' : 'local'}
+              </span>
             </div>
             <button className="btn-secondary" style={{ padding: '6px 10px', fontSize: '10px' }} onClick={refreshDashboard}>
               Refresh Backend
@@ -496,6 +604,16 @@ export default function App() {
               >
                 {apiStatus.state === 'connected' ? 'API LIVE' : apiStatus.state === 'loading' ? 'API LOADING' : 'API OFFLINE'}
               </span>
+              {systemStatus && (
+                <button
+                  className="api-status-pill connected"
+                  onClick={() => handleNavClick('Evidence')}
+                  title="Open feature truth and release evidence"
+                  style={{ cursor: 'pointer', border: 0 }}
+                >
+                  {systemStatus.readinessScore}/100 READY
+                </button>
+              )}
             </span>
           </div>
 
@@ -537,6 +655,25 @@ export default function App() {
               </svg>
               <span className="notification-badge"></span>
             </button>
+          </div>
+        </div>
+
+        <div className="operator-workflow-rail" aria-label="NeuralOps operator workflow">
+          <div className="workflow-rail-copy">
+            <span className="metric-label">Operator Workflow</span>
+            <strong>{'Ingest -> Test -> Gate -> Monitor -> Investigate'}</strong>
+          </div>
+          <div className="workflow-stage-list">
+            {workflowStages.map((stage) => (
+              <button
+                key={stage.label}
+                className={`workflow-stage-button ${activeTab === stage.tab ? 'active' : ''}`}
+                onClick={() => handleNavClick(stage.tab)}
+              >
+                <span>{stage.label}</span>
+                <small>{stage.detail}</small>
+              </button>
+            ))}
           </div>
         </div>
 

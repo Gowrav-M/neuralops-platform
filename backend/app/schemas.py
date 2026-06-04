@@ -8,6 +8,17 @@ from pydantic import BaseModel, ConfigDict, Field
 DecisionStatus = Literal["success", "warning", "failed", "blocked"]
 IncidentStatus = Literal["Open", "Investigating", "Resolved"]
 Severity = Literal["Critical", "Major", "Minor", "Low"]
+WorkspaceRole = Literal["Owner", "Admin", "Developer", "Security", "Viewer"]
+ApiKeyScope = Literal["trace:ingest", "trace:read", "admin"]
+AutomationTrigger = Literal[
+    "release_gate.blocked",
+    "release_gate.review",
+    "trace.blocked",
+    "trace.failed",
+    "policy.violation",
+    "cost.budget_risk",
+]
+AutomationAction = Literal["audit_only", "create_incident", "webhook_record"]
 
 
 class Stats(BaseModel):
@@ -184,6 +195,329 @@ class ProviderStatus(BaseModel):
     configured: bool
     baseUrl: str | None = None
     defaultModel: str
+    source: Literal["local", "env", "connection", "preset"] = "preset"
+    environment: Literal["prod", "staging", "dev", "all"] = "all"
+    priority: int = Field(default=100, ge=1, le=999)
+    supportsChat: bool = True
+    supportsEmbeddings: bool = False
+    supportsVision: bool = False
+    status: Literal["configured", "not_configured", "healthy", "failed"] | None = None
+
+
+class ProviderPreset(BaseModel):
+    id: str
+    label: str
+    category: Literal["frontier", "gateway", "cloud", "open-source", "local", "custom"]
+    baseUrl: str
+    defaultModel: str
+    authType: Literal["bearer", "none"] = "bearer"
+    supportsChat: bool = True
+    supportsEmbeddings: bool = False
+    supportsVision: bool = False
+    notes: list[str] = Field(default_factory=list)
+
+
+class ProviderConnectionCreate(BaseModel):
+    providerId: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    baseUrl: str = Field(min_length=1)
+    defaultModel: str = Field(min_length=1)
+    apiKey: str | None = Field(default=None)
+    environment: Literal["prod", "staging", "dev", "all"] = "staging"
+    priority: int = Field(default=100, ge=1, le=999)
+    supportsChat: bool = True
+    supportsEmbeddings: bool = False
+    supportsVision: bool = False
+
+
+class ProviderConnection(BaseModel):
+    id: str
+    providerId: str
+    label: str
+    baseUrl: str
+    defaultModel: str
+    environment: Literal["prod", "staging", "dev", "all"]
+    priority: int = Field(ge=1, le=999)
+    configured: bool
+    keyPreview: str | None = None
+    supportsChat: bool = True
+    supportsEmbeddings: bool = False
+    supportsVision: bool = False
+    lastTestedAt: str | None = None
+    lastStatus: Literal["untested", "healthy", "failed", "not_configured"] = "untested"
+    lastError: str | None = None
+    createdAt: str
+    updatedAt: str
+
+
+class ProviderConnectionTestResult(BaseModel):
+    ok: bool
+    connection: ProviderConnection
+    latencyMs: int = Field(ge=0)
+    message: str
+
+
+class FeatureTruth(BaseModel):
+    id: str
+    label: str
+    state: Literal["persisted", "live_provider", "local_drill", "not_configured"]
+    evidence: str
+    action: str
+
+
+class SystemStatus(BaseModel):
+    storage: Literal["sqlite", "postgres"]
+    environment: str
+    authRequired: bool
+    workspaceId: str
+    recordCounts: dict[str, int]
+    providers: list[ProviderStatus]
+    features: list[FeatureTruth]
+    readinessScore: int = Field(ge=0, le=100)
+    blockers: list[str]
+    generatedAt: str
+
+
+class ReleaseGateRequest(BaseModel):
+    target: str = Field(default="production", min_length=1)
+    promptId: str | None = None
+    maxLatencyMs: int = Field(default=2500, ge=1)
+    maxErrorRate: float = Field(default=0.05, ge=0, le=1)
+    minEvalPassRate: float = Field(default=0.85, ge=0, le=1)
+    requireLiveProvider: bool = False
+    requireAuth: bool = True
+
+
+class ReleaseGateDefinitionCreate(BaseModel):
+    name: str = Field(min_length=1)
+    target: str = Field(default="production", min_length=1)
+    promptId: str | None = None
+    maxLatencyMs: int = Field(default=2500, ge=1)
+    maxErrorRate: float = Field(default=0.05, ge=0, le=1)
+    minEvalPassRate: float = Field(default=0.85, ge=0, le=1)
+    requireLiveProvider: bool = False
+    requireAuth: bool = True
+    description: str = ""
+
+
+class ReleaseGateDefinitionPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1)
+    target: str | None = Field(default=None, min_length=1)
+    promptId: str | None = None
+    maxLatencyMs: int | None = Field(default=None, ge=1)
+    maxErrorRate: float | None = Field(default=None, ge=0, le=1)
+    minEvalPassRate: float | None = Field(default=None, ge=0, le=1)
+    requireLiveProvider: bool | None = None
+    requireAuth: bool | None = None
+    description: str | None = None
+
+
+class ReleaseGateDefinition(ReleaseGateDefinitionCreate):
+    id: str
+    createdAt: str
+    updatedAt: str
+    lastRunId: str | None = None
+    lastDecision: Literal["allow", "review", "block"] | None = None
+    lastScore: int | None = Field(default=None, ge=0, le=100)
+
+
+class ReleaseGateRunRequest(BaseModel):
+    gateId: str | None = None
+    target: str | None = None
+    failOn: Literal["review", "block"] = "block"
+
+
+class ReleaseGateCheck(BaseModel):
+    id: str
+    label: str
+    status: Literal["pass", "warn", "fail"]
+    reason: str
+    evidence: str
+
+
+class ReleaseGateResult(BaseModel):
+    id: str
+    gateId: str | None = None
+    gateName: str | None = None
+    target: str
+    decision: Literal["allow", "review", "block"]
+    score: int = Field(ge=0, le=100)
+    checks: list[ReleaseGateCheck]
+    recommendations: list[str]
+    generatedAt: str
+
+
+class EvidenceReport(BaseModel):
+    id: str
+    generatedAt: str
+    status: SystemStatus
+    latestGate: ReleaseGateResult | None = None
+    summary: dict[str, Any]
+    markdown: str
+
+
+class ReleaseAutopilotRequest(BaseModel):
+    candidateName: str = Field(min_length=1)
+    candidateInstructions: str = Field(min_length=1)
+    target: str = Field(default="production", min_length=1)
+    traceLimit: int = Field(default=5, ge=1, le=25)
+    requireLiveProvider: bool = False
+    requireAuth: bool = False
+
+
+class ReleaseAutopilotComparison(BaseModel):
+    traceId: str
+    currentStatus: DecisionStatus
+    currentScore: float = Field(ge=0, le=1)
+    replayDecision: Literal["allow", "review", "block"]
+    candidateDecision: Literal["allow", "review", "block"]
+    candidateScore: float = Field(ge=0, le=1)
+    improvement: float
+    requiredControls: list[str]
+    missingControls: list[str]
+    recommendation: str
+
+
+class ReleaseAutopilotResult(BaseModel):
+    id: str
+    candidateName: str
+    target: str
+    decision: Literal["allow", "review", "block"]
+    score: int = Field(ge=0, le=100)
+    mode: Literal["deterministic_policy_replay", "live_provider_replay"] = "deterministic_policy_replay"
+    comparisons: list[ReleaseAutopilotComparison]
+    gate: ReleaseGateResult
+    summary: dict[str, Any]
+    prCommentMarkdown: str
+    generatedAt: str
+
+
+class AutomationRuleCreate(BaseModel):
+    name: str = Field(min_length=1)
+    trigger: AutomationTrigger
+    action: AutomationAction
+    enabled: bool = True
+    severity: Severity = "Major"
+    owner: str = Field(default="AI Platform Oncall", min_length=1)
+    description: str = ""
+
+
+class AutomationRulePatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1)
+    trigger: AutomationTrigger | None = None
+    action: AutomationAction | None = None
+    enabled: bool | None = None
+    severity: Severity | None = None
+    owner: str | None = Field(default=None, min_length=1)
+    description: str | None = None
+
+
+class AutomationRule(AutomationRuleCreate):
+    id: str
+    createdAt: str
+    updatedAt: str
+    lastRunAt: str | None = None
+    runCount: int = Field(default=0, ge=0)
+
+
+class AutomationEvent(BaseModel):
+    id: str
+    ruleId: str
+    ruleName: str
+    trigger: AutomationTrigger
+    action: AutomationAction
+    subjectType: str
+    subjectId: str
+    decision: Literal["allow", "review", "block"]
+    summary: str
+    status: Literal["recorded", "skipped", "failed"]
+    result: dict[str, Any]
+    createdAt: str
+
+
+class ConnectorDelivery(BaseModel):
+    id: str
+    connectorType: Literal["webhook", "github", "slack", "jira"]
+    connectorId: str
+    connectorName: str
+    subjectType: str
+    subjectId: str
+    eventId: str | None = None
+    status: Literal["pending", "delivered", "failed", "skipped"]
+    attempt: int = Field(ge=1)
+    url: str | None = None
+    signature: str
+    payload: dict[str, Any]
+    lastError: str | None = None
+    createdAt: str
+    nextRetryAt: str | None = None
+
+
+class ConnectorDeliveryProcessRequest(BaseModel):
+    limit: int = Field(default=10, ge=1, le=100)
+    sendExternal: bool = False
+
+
+class ConnectorDeliveryProcessResult(BaseModel):
+    processed: int = Field(ge=0)
+    delivered: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    skipped: int = Field(ge=0)
+    mode: Literal["dry_run", "external_send"]
+    deliveries: list[ConnectorDelivery]
+
+
+class GitHubPrCommentRequest(BaseModel):
+    owner: str = Field(min_length=1)
+    repo: str = Field(min_length=1)
+    issueNumber: int = Field(ge=1)
+    body: str = Field(min_length=1)
+    sendExternal: bool = False
+
+
+class GitHubPrCommentResult(BaseModel):
+    posted: bool
+    delivery: ConnectorDelivery
+    url: str | None = None
+    message: str
+
+
+class AutomationRunTestRequest(BaseModel):
+    subjectId: str = Field(default="manual-test", min_length=1)
+    subjectType: str = Field(default="manual", min_length=1)
+    decision: Literal["allow", "review", "block"] = "review"
+    summary: str = Field(default="Manual automation test from NeuralOps.", min_length=1)
+
+
+class ConnectSnippet(BaseModel):
+    id: str
+    label: str
+    language: str
+    command: str | None = None
+    code: str
+    notes: list[str] = Field(default_factory=list)
+
+
+class ConnectGuide(BaseModel):
+    apiBaseUrl: str
+    ingestEndpoint: str
+    otelEndpoint: str
+    authHeader: str
+    snippets: list[ConnectSnippet]
+    generatedAt: str
+
+
+class ConnectVerifyRequest(BaseModel):
+    serviceName: str = Field(default="neuralops-connected-app", min_length=1)
+    environment: Literal["prod", "staging", "dev"] = "staging"
+    sdk: Literal["javascript", "python", "curl", "otel", "manual"] = "manual"
+
+
+class ConnectVerifyResponse(BaseModel):
+    ok: bool
+    trace: Trace
+    auditId: str
+    message: str
 
 
 class AgentRunRequest(BaseModel):
@@ -237,7 +571,7 @@ class AgentRunRecord(BaseModel):
     id: str
     agentId: str
     agentName: str
-    provider: Literal["local", "groq", "nvidia", "openai", "custom"]
+    provider: str
     model: str
     input: str
     output: str
@@ -271,7 +605,7 @@ class LabVariantResult(BaseModel):
     agentName: str
     runId: str
     traceId: str
-    provider: Literal["local", "groq", "nvidia", "openai", "custom"]
+    provider: str
     model: str
     decision: Literal["allow", "review", "block"]
     score: float = Field(ge=0, le=1)
@@ -310,9 +644,44 @@ class SettingsPayload(BaseModel):
     nextInvoice: str | None = None
 
 
+class WorkspaceMember(BaseModel):
+    id: str
+    workspaceId: str
+    name: str = Field(min_length=1)
+    email: str = Field(min_length=3)
+    role: WorkspaceRole
+    access: Literal["All Workspace", "Read Only"]
+    createdAt: str
+    updatedAt: str
+
+
+class WorkspaceMemberCreateRequest(BaseModel):
+    name: str = Field(min_length=1)
+    email: str = Field(min_length=3)
+    role: WorkspaceRole
+
+
+class WorkspaceMemberPatchRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1)
+    email: str | None = Field(default=None, min_length=3)
+    role: WorkspaceRole | None = None
+
+
+class WorkspaceProfile(BaseModel):
+    id: str
+    name: str
+    storage: Literal["sqlite", "postgres"]
+    authRequired: bool
+    memberCount: int = Field(ge=0)
+    createdAt: str
+    updatedAt: str
+
+
 class ApiKeyCreateRequest(BaseModel):
     name: str = Field(min_length=1)
     role: str = Field(min_length=1)
+    environment: Literal["prod", "staging", "dev", "all"] = "all"
+    scopes: list[ApiKeyScope] = Field(default_factory=lambda: ["trace:ingest"], min_length=1)
 
 
 class ApiKeyCreateResponse(BaseModel):

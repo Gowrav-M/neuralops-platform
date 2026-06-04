@@ -1,0 +1,45 @@
+name: NeuralOps Release Gate
+description: Run a NeuralOps AI release gate and fail CI when safety, eval, latency, auth, or provider checks miss thresholds.
+
+inputs:
+  base-url:
+    description: NeuralOps API base URL.
+    required: false
+    default: http://127.0.0.1:8000
+  gate-id:
+    description: Optional saved release gate definition ID.
+    required: false
+    default: ""
+  target:
+    description: Target environment for ad hoc gates.
+    required: false
+    default: ci
+  fail-on:
+    description: Decision threshold that fails CI: review or block.
+    required: false
+    default: block
+  require-auth:
+    description: Whether auth must be enabled for the gate to pass.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Run NeuralOps release gate
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.gate-id }}" ]; then
+          node "$GITHUB_ACTION_PATH/sdk/javascript/bin/neuralops.mjs" release-gate run \
+            --base-url "${{ inputs.base-url }}" \
+            --gate-id "${{ inputs.gate-id }}" \
+            --target "${{ inputs.target }}" \
+            --fail-on "${{ inputs.fail-on }}"
+        else
+          node "$GITHUB_ACTION_PATH/sdk/javascript/bin/neuralops.mjs" release-gate run \
+            --base-url "${{ inputs.base-url }}" \
+            --target "${{ inputs.target }}" \
+            --require-auth "${{ inputs.require-auth }}" \
+            --fail-on "${{ inputs.fail-on }}"
+        fi
+

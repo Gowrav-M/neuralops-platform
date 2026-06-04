@@ -4,6 +4,8 @@ export default function Overview({
   stats,
   traces,
   incidents,
+  systemStatus,
+  apiStatus,
   setActiveTab,
   setSelectedTrace,
   setDrawerOpen,
@@ -84,6 +86,53 @@ export default function Overview({
   const warningCount = traces.filter((trace) => trace.status === 'warning').length;
   const failedCount = traces.filter((trace) => trace.status === 'failed').length;
   const successfulCount = traces.filter((trace) => trace.status === 'success').length;
+  const featureState = (id) => systemStatus?.features?.find((feature) => feature.id === id)?.state || 'not_configured';
+  const featureEvidence = (id) => systemStatus?.features?.find((feature) => feature.id === id)?.evidence || 'Waiting for backend status';
+  const providerConfigured = systemStatus?.providers?.some((provider) => provider.configured && provider.id !== 'local');
+  const launchSteps = [
+    {
+      label: 'Connect an app',
+      state: featureState('connect_sdk'),
+      evidence: featureEvidence('connect_sdk'),
+      action: 'Create ingest key',
+      tab: 'Connect',
+    },
+    {
+      label: 'Add live provider',
+      state: providerConfigured ? 'live_provider' : featureState('provider_gateway'),
+      evidence: providerConfigured ? 'At least one live model provider is configured' : featureEvidence('provider_gateway'),
+      action: 'Open provider gateway',
+      tab: 'Settings',
+    },
+    {
+      label: 'Run agent lab',
+      state: featureState('agent_runtime'),
+      evidence: featureEvidence('agent_runtime'),
+      action: 'Run Neural Labs',
+      tab: 'Labs',
+    },
+    {
+      label: 'Gate a release',
+      state: featureState('release_gates'),
+      evidence: featureEvidence('release_gates'),
+      action: 'Create release gate',
+      tab: 'Evidence',
+    },
+  ];
+
+  const launchBadgeClass = {
+    persisted: 'badge-success',
+    live_provider: 'badge-success',
+    local_drill: 'badge-warning',
+    not_configured: 'badge-error',
+  };
+
+  const launchStateLabel = {
+    persisted: 'persisted',
+    live_provider: 'live',
+    local_drill: 'local',
+    not_configured: 'missing',
+  };
 
   return (
     <div className="main-panel">
@@ -91,7 +140,37 @@ export default function Overview({
       <div className="page-header">
         <div>
           <h1 className="page-title">NeuralOps Control Plane</h1>
-          <p className="page-subtitle">Observe locally ingested AI traces, cost signals, eval outcomes, and guardrail decisions.</p>
+          <p className="page-subtitle">CI/CD and observability for AI workflows: connect providers, ingest traces, test agents, gate releases, and investigate failures.</p>
+        </div>
+      </div>
+
+      <div className="operator-launch-board">
+        <div className="launch-board-copy">
+          <span className="metric-label">Production Readiness Path</span>
+          <h3>Ship AI changes only after evidence exists.</h3>
+          <p>
+            NeuralOps is useful when every model, prompt, RAG, or agent change leaves proof:
+            who ran it, which provider answered, what it cost, what failed, and why release was allowed or blocked.
+          </p>
+          <div className="launch-board-status-row">
+            <span className={`api-status-pill ${apiStatus?.state || 'loading'}`}>{apiStatus?.state || 'loading'}</span>
+            <span className="api-status-pill connected">{systemStatus?.storage || 'storage'} store</span>
+            <button className="btn-primary" onClick={() => setActiveTab('Evidence')}>
+              Open Evidence Center
+            </button>
+          </div>
+        </div>
+        <div className="launch-step-grid">
+          {launchSteps.map((step) => (
+            <button className="launch-step-card" key={step.label} onClick={() => setActiveTab(step.tab)}>
+              <div className="dark-panel-title-row">
+                <strong>{step.label}</strong>
+                <span className={`badge ${launchBadgeClass[step.state]}`}>{launchStateLabel[step.state]}</span>
+              </div>
+              <p>{step.evidence}</p>
+              <span>{step.action}</span>
+            </button>
+          ))}
         </div>
       </div>
 

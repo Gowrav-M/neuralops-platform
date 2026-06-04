@@ -7,16 +7,21 @@
     "dev": "vite",
     "dev:api": "python -m uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 8000",
     "test:api": "python -m pytest backend",
+    "test:e2e": "playwright test",
+    "db:verify-rls": "python backend/scripts/verify_supabase_rls.py",
+    "release:gate": "node sdk/javascript/bin/neuralops.mjs release-gate run",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.107.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.60.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",

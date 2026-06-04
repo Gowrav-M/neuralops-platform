@@ -50,13 +50,14 @@ The publishable key is safe for frontend auth and client reads governed by RLS, 
 
 ## Migration
 
-The migration file is:
+The migration files are:
 
 ```text
 supabase/migrations/001_neuralops_records.sql
+supabase/migrations/002_workspace_rls.sql
 ```
 
-It creates:
+They create:
 
 - private schema `neuralops_private`
 - table `records`
@@ -66,10 +67,34 @@ It creates:
 - RLS enabled
 - revoked access from `anon` and `authenticated`
 - updated-at trigger
+- trusted workspace helper using Supabase JWT `app_metadata`
+- select/insert/update/delete RLS policies for authenticated workspace rows
+
+The table remains private by default. Do not grant Data API access unless you intentionally want browser/client access. If you later grant `authenticated` access, the second migration makes rows visible only when `payload.workspaceId` matches `app_metadata.neuralops_workspace_id` or `app_metadata.workspace_id`. It never uses user-editable metadata for authorization.
+
+Apply migrations only after reviewing the SQL:
+
+```powershell
+supabase db push
+```
+
+or paste the reviewed SQL into Supabase SQL Editor.
 
 ## Verification
 
-Run:
+Run the packaged verification command:
+
+```powershell
+cmd /c npm run db:verify-rls
+```
+
+Expected:
+
+```text
+rls_verified=neuralops_private.records
+```
+
+Or verify manually:
 
 ```sql
 select n.nspname as schema_name, c.relname as table_name, c.relrowsecurity as rls_enabled
@@ -82,6 +107,24 @@ Expected:
 
 ```text
 rls_enabled = true
+```
+
+Check RLS policy names:
+
+```sql
+select policyname, cmd, roles
+from pg_policies
+where schemaname = 'neuralops_private' and tablename = 'records'
+order by policyname;
+```
+
+Expected policies:
+
+```text
+records_workspace_delete
+records_workspace_insert
+records_workspace_select
+records_workspace_update
 ```
 
 Start the API with `NEURALOPS_DATABASE_URL` set, then call:
