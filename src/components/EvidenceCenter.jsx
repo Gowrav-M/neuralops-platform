@@ -26,6 +26,7 @@ export default function EvidenceCenter({ addToast }) {
   const [status, setStatus] = useState(null);
   const [report, setReport] = useState(null);
   const [releaseGates, setReleaseGates] = useState([]);
+  const [runMessage, setRunMessage] = useState('');
   const [gateForm, setGateForm] = useState({
     name: 'Production AI Release Gate',
     target: 'production',
@@ -63,6 +64,8 @@ export default function EvidenceCenter({ addToast }) {
 
   const handleRunGate = async () => {
     setRunning(true);
+    setRunMessage('');
+    setError('');
     try {
       const gate = await runReleaseGate({
         target: gateForm.target,
@@ -72,9 +75,16 @@ export default function EvidenceCenter({ addToast }) {
         requireLiveProvider: Boolean(gateForm.requireLiveProvider),
         requireAuth: Boolean(gateForm.requireAuth),
       });
-      const nextReport = await fetchEvidenceReport();
-      setReport(nextReport);
-      await load();
+      setReport((currentReport) => ({
+        ...(currentReport || {}),
+        latestGate: gate,
+        summary: {
+          ...(currentReport?.summary || {}),
+          decision: gate.decision,
+        },
+      }));
+      setRunMessage(`Release gate completed: ${gate.decision.toUpperCase()} (${gate.score}/100).`);
+      load();
       addToast(`Release gate completed: ${gate.decision.toUpperCase()} (${gate.score}/100).`, gate.decision === 'block' ? 'error' : 'success');
     } catch (err) {
       addToast('Release gate failed to run against the backend.', 'error');
@@ -136,6 +146,13 @@ export default function EvidenceCenter({ addToast }) {
           {running ? 'Running Gate...' : 'Run Current Config'}
         </button>
       </div>
+
+      {runMessage && (
+        <div className="state-container" style={{ alignItems: 'flex-start', textAlign: 'left' }}>
+          <strong>{runMessage}</strong>
+          <span>Evidence has been persisted. The larger report is refreshing in the background.</span>
+        </div>
+      )}
 
       {error && (
         <div className="state-container" style={{ alignItems: 'flex-start', textAlign: 'left' }}>

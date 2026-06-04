@@ -198,6 +198,60 @@ def list_records(domain: str) -> list[dict[str, Any]]:
     return [item["payload"] for item in list_domain_records_with_ids(domain)]
 
 
+def list_records_for_workspace(domain: str, workspace_id: str, global_domains: set[str] | None = None) -> list[dict[str, Any]]:
+    global_domains = global_domains or set()
+    if domain in global_domains:
+        return list_records(domain)
+    if POSTGRES_URL:
+        with postgres_connection() as conn:
+            with conn.cursor() as cursor:
+                if domain == "workspaces":
+                    cursor.execute(
+                        f"SELECT id, payload FROM {pg_table()} WHERE domain = %s AND (id = %s OR payload->>'id' = %s) ORDER BY id",
+                        (domain, workspace_id, workspace_id),
+                    )
+                else:
+                    cursor.execute(
+                        f"SELECT id, payload FROM {pg_table()} WHERE domain = %s AND payload->>'workspaceId' = %s ORDER BY id",
+                        (domain, workspace_id),
+                    )
+                rows = cursor.fetchall()
+        return [normalize_payload(row[1]) for row in rows]
+    records = list_domain_records_with_ids(domain)
+    if domain == "workspaces":
+        return [item["payload"] for item in records if item["payload"].get("id") == workspace_id]
+    return [item["payload"] for item in records if item["payload"].get("workspaceId") == workspace_id]
+
+
+def count_records_for_workspace(domains: list[str], workspace_id: str, global_domains: set[str] | None = None) -> dict[str, int]:
+    global_domains = global_domains or set()
+    counts = {domain: 0 for domain in domains}
+    if POSTGRES_URL:
+        global_list = list(global_domains) or ["__none__"]
+        with postgres_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT domain, COUNT(*)
+                    FROM {pg_table()}
+                    WHERE domain = ANY(%s)
+                      AND (
+                        domain = ANY(%s)
+                        OR (domain = 'workspaces' AND (id = %s OR payload->>'id' = %s))
+                        OR payload->>'workspaceId' = %s
+                      )
+                    GROUP BY domain
+                    """,
+                    (domains, global_list, workspace_id, workspace_id, workspace_id),
+                )
+                rows = cursor.fetchall()
+        counts.update({row[0]: int(row[1]) for row in rows})
+        return counts
+    for domain in domains:
+        counts[domain] = len(list_records_for_workspace(domain, workspace_id, global_domains))
+    return counts
+
+
 def list_domain_records_with_ids(domain: str) -> list[dict[str, Any]]:
     if POSTGRES_URL:
         with postgres_connection() as conn:

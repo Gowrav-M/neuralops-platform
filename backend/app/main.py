@@ -15,7 +15,17 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .database import delete_record, get_record, init_db, list_records, save_record, storage_backend, update_record
+from .database import (
+    count_records_for_workspace,
+    delete_record,
+    get_record,
+    init_db,
+    list_records,
+    list_records_for_workspace,
+    save_record,
+    storage_backend,
+    update_record,
+)
 from .agent_runtime import AGENT_DEFINITIONS, list_providers, run_agent
 from .auth import auth_required, current_claims, public_auth_paths, reset_current_claims, set_current_claims, verify_request_claims, workspace_id_from_claims
 from . import seed
@@ -253,20 +263,11 @@ def save_audit_event(event_type: str, actor: str, subject: str, decision: str, s
 
 
 def scoped_records(domain: str) -> list[dict[str, Any]]:
-    records = list_records(domain)
     if not auth_required():
-        return records
+        return list_records(domain)
     workspace_id = current_workspace_id()
     global_domains = {"policies"}
-    scoped: list[dict[str, Any]] = []
-    for record in records:
-        if domain in global_domains:
-            scoped.append(record)
-        elif record.get("workspaceId") == workspace_id:
-            scoped.append(record)
-        elif domain == "workspaces" and record.get("id") == workspace_id:
-            scoped.append(record)
-    return scoped
+    return list_records_for_workspace(domain, workspace_id, global_domains)
 
 
 def count_domain(domain: str) -> int:
@@ -404,11 +405,14 @@ def build_system_status() -> SystemStatus:
         "release_gates",
         "audit",
     ]
-    record_counts = {domain: count_domain(domain) for domain in domains}
+    if auth_required():
+        record_counts = count_records_for_workspace(domains, current_workspace_id(), {"policies"})
+    else:
+        record_counts = {domain: count_domain(domain) for domain in domains}
     settings_payload = settings_payload_or_404()
     providers = list_providers()
     live_configured = any(provider.configured for provider in providers if provider.id != "local")
-    auth_required = os.getenv("NEURALOPS_AUTH_REQUIRED", "false").lower() in {"1", "true", "yes"}
+    auth_required_enabled = os.getenv("NEURALOPS_AUTH_REQUIRED", "false").lower() in {"1", "true", "yes"}
     webhook_count = len(settings_payload.get("webhooks", []))
     api_key_count = len(settings_payload.get("apiKeys", []))
     member_count = record_counts["workspace_members"]
@@ -523,8 +527,8 @@ def build_system_status() -> SystemStatus:
         FeatureTruth(
             id="auth",
             label="Supabase Auth Gate",
-            state="persisted" if auth_required else "not_configured",
-            evidence="Auth required by backend" if auth_required else "Auth is not enforced in local development",
+            state="persisted" if auth_required_enabled else "not_configured",
+            evidence="Auth required by backend" if auth_required_enabled else "Auth is not enforced in local development",
             action="Set NEURALOPS_AUTH_REQUIRED=true before public deployment.",
         ),
     ]
@@ -537,7 +541,7 @@ def build_system_status() -> SystemStatus:
     return SystemStatus(
         storage=storage_backend(),  # type: ignore[arg-type]
         environment=os.getenv("NEURALOPS_ENVIRONMENT", "local"),
-        authRequired=auth_required,
+        authRequired=auth_required_enabled,
         workspaceId=current_workspace_id(),
         recordCounts=record_counts,
         providers=providers,
