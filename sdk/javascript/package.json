@@ -2,7 +2,7 @@
   "name": "@neuralops/sdk",
   "version": "0.1.0",
   "type": "module",
-  "description": "Server-side JavaScript client for NeuralOps trace ingestion.",
+  "description": "Server-side JavaScript client for NeuralOps trace ingestion and policy-gateway model routing.",
   "main": "index.js",
   "exports": {
     ".": "./index.js"

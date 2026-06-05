@@ -1,6 +1,6 @@
 # neuralops-sdk
 
-Local Python SDK for sending real AI workflow traces into NeuralOps.
+Local Python SDK for sending real AI workflow traces into NeuralOps and routing OpenAI-compatible model calls through the NeuralOps Policy Gateway.
 
 ```python
 import os
@@ -23,7 +23,17 @@ client.ingest_trace(
     prompt="Answer billing policy question",
     output="Answered from retrieval context",
 )
+
+completion = client.chat_completions(
+    model="gpt-4o-mini",
+    metadata={"environment": "staging", "session": "rag-api-001"},
+    messages=[
+        {"role": "system", "content": "Answer from approved context only."},
+        {"role": "user", "content": "Explain the support policy."},
+    ],
+)
+
+print(completion["neuralops"]["traceId"])
 ```
 
-Keep the API key on the server. Do not expose it in browser JavaScript.
-
+Keep the API key on the server. Use `trace:ingest` for telemetry and `gateway:invoke` for governed model calls. Do not expose keys in browser JavaScript.

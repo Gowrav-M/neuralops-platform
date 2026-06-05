@@ -154,6 +154,16 @@ export function verifyConnectIngest(payload, apiKey) {
   });
 }
 
+export function routeGatewayChatCompletion(payload, apiKey) {
+  return request('/api/gateway/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'x-neuralops-key': apiKey,
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
 export function fetchTraces() {
   return request('/api/traces');
 }

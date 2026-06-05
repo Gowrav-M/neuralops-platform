@@ -26,13 +26,13 @@ from .database import (
     storage_backend,
     update_record,
 )
-from .agent_runtime import AGENT_DEFINITIONS, list_providers, run_agent
+from .agent_runtime import AGENT_DEFINITIONS, detect_policy_findings, estimate_tokens, list_providers, run_agent
 from .auth import auth_required, current_claims, public_auth_paths, reset_current_claims, set_current_claims, verify_request_claims, workspace_id_from_claims
 from . import seed
 from .job_queue import cancel_job, get_job, list_jobs, process_job, process_next_job, queue_summary, retry_job, submit_job
 from .metrics import build_stats
 from .otel import normalize_otel_payload, replay_trace
-from .provider_catalog import create_provider_connection, list_provider_presets, provider_connections, test_provider_connection
+from .provider_catalog import RuntimeProvider, create_provider_connection, list_provider_presets, provider_connections, runtime_providers, test_provider_connection
 from .schemas import (
     AgentJob,
     AgentJobProcessResponse,
@@ -82,6 +82,8 @@ from .schemas import (
     DetectionActionRequest,
     DetectionCase,
     DetectionCaseCreateRequest,
+    GatewayChatCompletionRequest,
+    GatewayPolicyDecision,
     GitHubPrCommentRequest,
     GitHubPrCommentResult,
     PromptTrafficUpdate,
@@ -110,6 +112,7 @@ from .schemas import (
     Trace,
     TraceIngestRequest,
     TraceIngestResponse,
+    TraceSpan,
     RetentionUpdateRequest,
     WebhookCreateRequest,
     WorkspaceMember,
@@ -556,6 +559,8 @@ def build_system_status() -> SystemStatus:
     auth_required_enabled = os.getenv("NEURALOPS_AUTH_REQUIRED", "false").lower() in {"1", "true", "yes"}
     webhook_count = len(settings_payload.get("webhooks", []))
     api_key_count = len(settings_payload.get("apiKeys", []))
+    gateway_key_count = sum(1 for api_key in settings_payload.get("apiKeys", []) if "gateway:invoke" in api_key.get("scopes", []) or "admin" in api_key.get("scopes", []))
+    gateway_trace_count = sum(1 for trace in scoped_records("traces") if str(trace.get("id", "")).startswith("tr_gateway_"))
     member_count = record_counts["workspace_members"]
     blockers: list[str] = []
 
@@ -594,6 +599,13 @@ def build_system_status() -> SystemStatus:
             state="persisted" if api_key_count and record_counts["traces"] else "not_configured",
             evidence=f"{api_key_count} key(s), {record_counts['traces']} trace(s)",
             action="Use the Connect page to create a key and verify JavaScript, Python, REST, or OTEL ingestion.",
+        ),
+        FeatureTruth(
+            id="policy_gateway",
+            label="OpenAI-Compatible Policy Gateway",
+            state="persisted" if gateway_trace_count else "live_provider" if live_configured and gateway_key_count else "not_configured",
+            evidence=f"{gateway_key_count} gateway key(s), {gateway_trace_count} gateway trace(s)",
+            action="Route LLM calls through /api/gateway/openai/v1/chat/completions to enforce policy and store evidence.",
         ),
         FeatureTruth(
             id="prompt_registry",
@@ -1470,6 +1482,179 @@ def api_base_url() -> str:
     return os.getenv("NEURALOPS_PUBLIC_API_URL", "http://localhost:8000").rstrip("/")
 
 
+def gateway_environment(request: GatewayChatCompletionRequest) -> str:
+    value = request.metadata.get("environment") if isinstance(request.metadata, dict) else None
+    if value in {"prod", "staging", "dev"}:
+        return str(value)
+    return "staging"
+
+
+def gateway_messages_text(messages: list[Any]) -> str:
+    parts: list[str] = []
+    for message in messages:
+        role = getattr(message, "role", None) or (message.get("role") if isinstance(message, dict) else "message")
+        content = getattr(message, "content", None) if not isinstance(message, dict) else message.get("content")
+        parts.append(f"{role}: {gateway_content_text(content)}")
+    return "\n".join(parts).strip()
+
+
+def gateway_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        values: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                values.append(str(item.get("text") or item.get("content") or item))
+            else:
+                values.append(str(item))
+        return " ".join(values)
+    return "" if content is None else str(content)
+
+
+def gateway_providers_for_environment(environment: str) -> list[RuntimeProvider]:
+    return [
+        provider
+        for provider in runtime_providers()
+        if provider.environment in ("all", environment)
+    ]
+
+
+def gateway_policy_mode(policy_id: str) -> str:
+    policy = next((item for item in scoped_records("policies") if item.get("id") == policy_id), None)
+    if not policy or not policy.get("enabled", True):
+        return "monitor"
+    return str(policy.get("mode", "monitor"))
+
+
+def gateway_finding_metadata(finding: str) -> tuple[str, str]:
+    if finding == "prompt-injection":
+        return "pol_01", "Critical"
+    if finding == "credential-language":
+        return "pol_02", "Critical"
+    return "pol_03", "Major"
+
+
+def evaluate_gateway_policy(stage: str, prompt: str, output: str = "") -> GatewayPolicyDecision:
+    findings = detect_policy_findings(prompt, output)
+    if not findings:
+        return GatewayPolicyDecision(decision="allow", stage=stage, findings=[], reason="No gateway policy matched.")  # type: ignore[arg-type]
+
+    decision = "allow"
+    for finding in findings:
+        policy_id, severity = gateway_finding_metadata(finding)
+        mode = gateway_policy_mode(policy_id)
+        if mode == "monitor":
+            continue
+        if mode == "block" or (mode == "review" and severity == "Critical"):
+            decision = "block"
+            break
+        if mode == "review":
+            decision = "review"
+    reason = (
+        "Gateway policy blocked critical prompt, credential, or tool-risk content."
+        if decision == "block"
+        else "Gateway policy matched content that requires review."
+        if decision == "review"
+        else "Gateway policy matched in monitor mode only."
+    )
+    return GatewayPolicyDecision(decision=decision, stage=stage, findings=findings, reason=reason)  # type: ignore[arg-type]
+
+
+def save_gateway_policy_violations(trace: Trace, policy_decision: GatewayPolicyDecision) -> None:
+    for finding in policy_decision.findings:
+        policy_id, severity = gateway_finding_metadata(finding)
+        policy_name = next((item.get("name", policy_id) for item in scoped_records("policies") if item.get("id") == policy_id), policy_id)
+        violation = PolicyViolation(
+            id=f"vio_gateway_{token_hex(5)}",
+            policyId=policy_id,
+            policyName=str(policy_name),
+            decision="blocked" if policy_decision.decision == "block" else "review" if policy_decision.decision == "review" else "warned",
+            severity=severity,  # type: ignore[arg-type]
+            subject=trace.id,
+            summary=f"Gateway {policy_decision.stage} matched {finding}.",
+            time=datetime.now().isoformat(),
+        )
+        save_scoped_record("policy_violations", violation.id, violation.model_dump())
+
+
+def gateway_trace(
+    *,
+    request: GatewayChatCompletionRequest,
+    environment: str,
+    provider: RuntimeProvider | None,
+    prompt: str,
+    output: str,
+    policy_decision: GatewayPolicyDecision,
+    latency_ms: int,
+    usage: dict[str, Any] | None,
+) -> Trace:
+    token_count = int((usage or {}).get("total_tokens") or estimate_tokens(f"{prompt}\n{output}"))
+    cost_usd = round(token_count * 0.000015, 5)
+    status = "blocked" if policy_decision.decision == "block" else "warning" if policy_decision.decision == "review" else "success"
+    model = request.model or provider.default_model if provider is not None else request.model or "gateway-unconfigured"
+    trace_id = f"tr_gateway_{token_hex(6)}"
+    return Trace(
+        id=trace_id,
+        timestamp=datetime.now().strftime("%H:%M:%S"),
+        session=str(request.metadata.get("session") or request.metadata.get("session_id") or f"gateway-{trace_id[-6:]}"),
+        environment=environment,  # type: ignore[arg-type]
+        model=model,
+        tokens=token_count,
+        latency=f"{latency_ms / 1000:.2f}s",
+        cost=f"${cost_usd:.3f}",
+        status=status,
+        score=0.0 if status == "blocked" else 0.74 if status == "warning" else 0.96,
+        prompt=prompt,
+        output=output,
+        toolCalls=f"gateway.openai_chat -> {provider.label}" if provider is not None else "gateway.openai_chat -> policy",
+        source="api",
+        spanCount=3 if provider is not None else 2,
+        riskFlags=policy_decision.findings,
+        spans=[
+            TraceSpan(id=f"{trace_id}_policy", name=f"gateway.{policy_decision.stage}", operation="policy.evaluate", durationMs=1, status="ok"),
+            TraceSpan(id=f"{trace_id}_provider", name="gateway.provider.forward", operation="chat.completions", durationMs=max(1, latency_ms), status="ok" if provider is not None else "unset"),
+            TraceSpan(id=f"{trace_id}_audit", name="gateway.audit", operation="audit.persist", durationMs=1, status="ok"),
+        ],
+    )
+
+
+def provider_chat_completion(provider: RuntimeProvider, request: GatewayChatCompletionRequest) -> dict[str, Any]:
+    payload = request.model_dump(exclude_none=True)
+    payload["model"] = request.model or provider.default_model
+    payload.pop("metadata", None)
+    headers = {"Content-Type": "application/json"}
+    if provider.api_key:
+        headers["Authorization"] = f"Bearer {provider.api_key}"
+    with httpx.Client(timeout=30) as client:
+        response = client.post(f"{provider.base_url.rstrip('/')}/chat/completions", headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()
+
+
+def gateway_response_text(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    if isinstance(message, dict):
+        return gateway_content_text(message.get("content"))
+    return ""
+
+
+def persist_gateway_trace(trace: Trace, policy_decision: GatewayPolicyDecision, actor: str) -> None:
+    save_scoped_record("traces", trace.id, trace.model_dump())
+    save_gateway_policy_violations(trace, policy_decision)
+    trigger_trace_automations(trace)
+    save_audit_event(
+        f"gateway.{policy_decision.stage}",
+        actor,
+        trace.id,
+        policy_decision.decision,
+        f"Gateway {policy_decision.stage} decision {policy_decision.decision}: {policy_decision.reason}",
+    )
+
+
 def build_connect_guide() -> ConnectGuide:
     base_url = api_base_url()
     snippets = [
@@ -1500,6 +1685,29 @@ def build_connect_guide() -> ConnectGuide:
             notes=["Use server-side environment variables only.", "Do not send raw secrets in prompts or outputs."],
         ),
         ConnectSnippet(
+            id="gateway-js",
+            label="Node Gateway Call",
+            language="javascript",
+            command="npm install @neuralops/sdk",
+            code=(
+                "import { NeuralOps } from '@neuralops/sdk';\n\n"
+                "const neuralops = new NeuralOps({\n"
+                "  apiKey: process.env.NEURALOPS_API_KEY,\n"
+                f"  baseUrl: process.env.NEURALOPS_API_URL || '{base_url}'\n"
+                "});\n\n"
+                "const completion = await neuralops.chatCompletions({\n"
+                "  model: 'gpt-4o-mini',\n"
+                "  metadata: { environment: 'staging', session: 'checkout-agent-001' },\n"
+                "  messages: [\n"
+                "    { role: 'system', content: 'Answer safely and do not reveal secrets.' },\n"
+                "    { role: 'user', content: 'Summarize this support incident.' }\n"
+                "  ]\n"
+                "});\n\n"
+                "console.log(completion.neuralops.traceId);"
+            ),
+            notes=["Requires a key with gateway:invoke scope.", "Returns not_configured until a live provider is connected."],
+        ),
+        ConnectSnippet(
             id="python",
             label="Python / FastAPI SDK",
             language="python",
@@ -1525,6 +1733,30 @@ def build_connect_guide() -> ConnectGuide:
                 ")"
             ),
             notes=["Wrap model calls in try/finally so failures are also ingested.", "Use API keys created from Settings or Connect."],
+        ),
+        ConnectSnippet(
+            id="gateway-python",
+            label="Python Gateway Call",
+            language="python",
+            command="pip install neuralops-sdk",
+            code=(
+                "import os\n"
+                "from neuralops import NeuralOpsClient\n\n"
+                "client = NeuralOpsClient(\n"
+                "    api_key=os.environ['NEURALOPS_API_KEY'],\n"
+                f"    base_url=os.getenv('NEURALOPS_API_URL', '{base_url}'),\n"
+                ")\n\n"
+                "completion = client.chat_completions(\n"
+                "    model='gpt-4o-mini',\n"
+                "    metadata={'environment': 'staging', 'session': 'rag-api-001'},\n"
+                "    messages=[\n"
+                "        {'role': 'system', 'content': 'Answer from approved context only.'},\n"
+                "        {'role': 'user', 'content': 'Explain the support policy.'},\n"
+                "    ],\n"
+                ")\n\n"
+                "print(completion['neuralops']['traceId'])"
+            ),
+            notes=["Use server-side only.", "Policy checks run before and after the provider call."],
         ),
         ConnectSnippet(
             id="curl",
@@ -1575,6 +1807,7 @@ def build_connect_guide() -> ConnectGuide:
         apiBaseUrl=base_url,
         ingestEndpoint=f"{base_url}/api/traces/ingest",
         otelEndpoint=f"{base_url}/api/traces/otel",
+        gatewayEndpoint=f"{base_url}/api/gateway/openai/v1/chat/completions",
         authHeader="x-neuralops-key",
         snippets=snippets,
         generatedAt=datetime.now().isoformat(),
@@ -1811,6 +2044,74 @@ def verify_connect_ingest(
         auditId=audit.id,
         message=f"Connection verified. Trace {trace.id} was stored.",
     )
+
+
+@app.post("/api/gateway/openai/v1/chat/completions")
+def gateway_chat_completions(
+    request: GatewayChatCompletionRequest,
+    authorization: str | None = Header(default=None),
+    neuralops_key: str | None = Header(default=None, alias="x-neuralops-key"),
+) -> dict[str, Any]:
+    api_key = authenticate_api_key(authorization, neuralops_key, "gateway:invoke")
+    if request.stream:
+        raise HTTPException(status_code=501, detail={"code": "streaming_not_implemented", "message": "NeuralOps Gateway supports non-streaming chat completions first."})
+
+    environment = gateway_environment(request)
+    prompt = gateway_messages_text(request.messages)
+    started = datetime.now()
+    pre_policy = evaluate_gateway_policy("pre_policy", prompt)
+    actor = api_key.get("name", api_key.get("id", "gateway-key"))
+    if pre_policy.decision == "block":
+        trace = gateway_trace(
+            request=request,
+            environment=environment,
+            provider=None,
+            prompt=prompt,
+            output="Blocked before provider call by NeuralOps Policy Gateway.",
+            policy_decision=pre_policy,
+            latency_ms=1,
+            usage=None,
+        )
+        persist_gateway_trace(trace, pre_policy, actor)
+        raise HTTPException(status_code=403, detail={"decision": pre_policy.decision, "stage": pre_policy.stage, "findings": pre_policy.findings, "reason": pre_policy.reason, "traceId": trace.id})
+
+    providers = gateway_providers_for_environment(environment)
+    if not providers:
+        raise HTTPException(status_code=503, detail={"code": "not_configured", "message": "No configured live provider is available for the NeuralOps Gateway."})
+
+    provider = providers[0]
+    try:
+        provider_payload = provider_chat_completion(provider, request)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail={"code": "provider_error", "message": str(exc)}) from exc
+
+    output = gateway_response_text(provider_payload)
+    latency_ms = max(1, int((datetime.now() - started).total_seconds() * 1000))
+    post_policy = evaluate_gateway_policy("post_policy", prompt, output)
+    usage = provider_payload.get("usage") if isinstance(provider_payload.get("usage"), dict) else None
+    trace = gateway_trace(
+        request=request,
+        environment=environment,
+        provider=provider,
+        prompt=prompt,
+        output=output or "Provider returned no text content.",
+        policy_decision=post_policy if post_policy.findings else pre_policy,
+        latency_ms=latency_ms,
+        usage=usage,
+    )
+    effective_policy = post_policy if post_policy.decision != "allow" else pre_policy
+    persist_gateway_trace(trace, effective_policy, actor)
+    if post_policy.decision == "block":
+        raise HTTPException(status_code=403, detail={"decision": post_policy.decision, "stage": post_policy.stage, "findings": post_policy.findings, "reason": post_policy.reason, "traceId": trace.id})
+
+    provider_payload["neuralops"] = {
+        "decision": effective_policy.decision,
+        "stage": effective_policy.stage,
+        "findings": effective_policy.findings,
+        "traceId": trace.id,
+        "provider": {"id": provider.id, "label": provider.label, "source": provider.source},
+    }
+    return provider_payload
 
 
 @app.get("/api/dashboard", response_model=DashboardSnapshot)

@@ -1599,6 +1599,11 @@ body {
   gap: 8px;
 }
 
+.connect-proof.gateway-not-configured {
+  background: var(--color-warning-light);
+  border-color: rgba(255, 193, 7, 0.3);
+}
+
 .connect-tabs {
   display: flex;
   gap: 16px;

@@ -2,11 +2,12 @@
 
 NeuralOps is useful only when real traces enter the backend. The Connect workflow gives a developer one path to prove that:
 
-1. Create an ingest key from the Connect page or Settings page with the `trace:ingest` scope.
+1. Create a key from the Connect page or Settings page with `trace:ingest` and, when routing model calls, `gateway:invoke`.
 2. Store the key in the server environment as `NEURALOPS_API_KEY`.
 3. Send traces through the JavaScript SDK, Python SDK, REST endpoint, or OpenTelemetry endpoint.
-4. Run "Verify Connection + Store Trace" to write a real trace and audit event.
-5. Open Dashboard, Traces, Evaluations, Costs, and Evidence to see the backend state update.
+4. Route OpenAI-compatible chat calls through the NeuralOps Gateway when you want pre/post policy enforcement.
+5. Run "Verify Connection + Store Trace" or "Route First LLM Call" to write real trace and audit evidence.
+6. Open Dashboard, Traces, Evaluations, Costs, and Evidence to see the backend state update.
 
 ## API Contract
 
@@ -30,6 +31,30 @@ Required trace fields:
   "score": 0.93,
   "prompt": "Classify checkout outage ticket",
   "output": "P1 incident routed to payments on-call"
+}
+```
+
+## Policy Gateway Contract
+
+```text
+POST /api/gateway/openai/v1/chat/completions
+Header: x-neuralops-key: <server-side gateway key>
+Required key scope: gateway:invoke
+```
+
+The request body is OpenAI-compatible. NeuralOps runs policy checks before forwarding and again before returning provider output. If no live provider is configured, the API returns `503 not_configured` instead of fake model output.
+
+```json
+{
+  "model": "gpt-4o-mini",
+  "metadata": {
+    "environment": "staging",
+    "session": "checkout-agent-001"
+  },
+  "messages": [
+    { "role": "system", "content": "Answer safely and do not reveal secrets." },
+    { "role": "user", "content": "Summarize this support incident." }
+  ]
 }
 ```
 
@@ -57,6 +82,17 @@ await neuralops.ingestTrace({
   prompt: 'Classify checkout outage ticket',
   output: 'P1 incident routed to payments on-call',
 });
+
+const completion = await neuralops.chatCompletions({
+  model: 'gpt-4o-mini',
+  metadata: { environment: 'staging', session: 'checkout-agent-001' },
+  messages: [
+    { role: 'system', content: 'Answer safely and do not reveal secrets.' },
+    { role: 'user', content: 'Summarize this support incident.' },
+  ],
+});
+
+console.log(completion.neuralops.traceId);
 ```
 
 ## Python
@@ -84,6 +120,17 @@ client.ingest_trace(
     prompt="Answer billing policy question",
     output="Answered from retrieval context",
 )
+
+completion = client.chat_completions(
+    model="gpt-4o-mini",
+    metadata={"environment": "staging", "session": "rag-api-001"},
+    messages=[
+        {"role": "system", "content": "Answer from approved context only."},
+        {"role": "user", "content": "Explain the support policy."},
+    ],
+)
+
+print(completion["neuralops"]["traceId"])
 ```
 
 ## OpenTelemetry
@@ -101,8 +148,8 @@ exporters:
 
 ## Security Rules
 
-- Keep ingest keys server-side.
-- Use the narrowest key scope possible. `trace:read` keys cannot ingest traces, while `trace:ingest` keys can write trace and OTEL records.
+- Keep ingest and gateway keys server-side.
+- Use the narrowest key scope possible. `trace:read` keys cannot ingest traces, `trace:ingest` keys can write trace and OTEL records, and `gateway:invoke` keys can route governed model calls.
 - Rotate keys before any public deployment if a key was pasted into chat, logs, screenshots, or Git.
 - Do not send raw provider secrets in prompts, outputs, tool calls, or trace metadata.
 - Treat prompt and output capture as sensitive production telemetry.

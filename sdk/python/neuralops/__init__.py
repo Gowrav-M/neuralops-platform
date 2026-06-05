@@ -61,6 +61,25 @@ class NeuralOpsClient:
             payload["toolCalls"] = tool_calls
         return self._post("/api/traces/ingest", payload)
 
+    def chat_completions(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        stream: bool = False,
+        **options: Any,
+    ) -> dict[str, Any]:
+        if not messages:
+            raise ValueError("messages is required")
+        payload: dict[str, Any] = {
+            **options,
+            "messages": messages,
+            "stream": stream,
+        }
+        if model is not None:
+            payload["model"] = model
+        return self._post("/api/gateway/openai/v1/chat/completions", payload)
+
     def trace_model_call(
         self,
         *,
@@ -126,4 +145,3 @@ class NeuralOpsClient:
 
 
 __all__ = ["NeuralOpsClient", "NeuralOpsError"]
-

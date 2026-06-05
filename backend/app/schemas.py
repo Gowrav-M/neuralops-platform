@@ -11,7 +11,7 @@ Severity = Literal["Critical", "Major", "Minor", "Low"]
 WorkspaceRole = Literal["Owner", "Admin", "Developer", "Security", "Viewer"]
 DetectionDecision = Literal["allow", "review", "block"]
 DetectionStatus = Literal["open", "contained", "closed"]
-ApiKeyScope = Literal["trace:ingest", "trace:read", "admin"]
+ApiKeyScope = Literal["trace:ingest", "trace:read", "gateway:invoke", "admin"]
 AutomationTrigger = Literal[
     "release_gate.blocked",
     "release_gate.review",
@@ -532,6 +532,7 @@ class ConnectGuide(BaseModel):
     apiBaseUrl: str
     ingestEndpoint: str
     otelEndpoint: str
+    gatewayEndpoint: str
     authHeader: str
     snippets: list[ConnectSnippet]
     generatedAt: str
@@ -776,6 +777,31 @@ class OtelIngestResult(BaseModel):
     trace: Trace
     spanCount: int = Field(ge=0)
     findings: list[str]
+
+
+class GatewayChatMessage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    role: str = Field(min_length=1)
+    content: Any
+
+
+class GatewayChatCompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    model: str | None = None
+    messages: list[GatewayChatMessage] = Field(min_length=1)
+    stream: bool = False
+    temperature: float | None = None
+    max_tokens: int | None = Field(default=None, ge=1)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GatewayPolicyDecision(BaseModel):
+    decision: Literal["allow", "review", "block"]
+    stage: Literal["pre_policy", "post_policy"]
+    findings: list[str]
+    reason: str
 
 
 class ReplayCheck(BaseModel):

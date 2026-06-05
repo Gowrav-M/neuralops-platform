@@ -34,6 +34,13 @@ MODEL_KEYS = (
     "model",
 )
 
+PROVIDER_KEYS = (
+    "gen_ai.provider.name",
+    "gen_ai.system",
+    "llm.system",
+    "provider",
+)
+
 INPUT_TOKEN_KEYS = ("gen_ai.usage.input_tokens", "llm.usage.prompt_tokens", "input_tokens")
 OUTPUT_TOKEN_KEYS = ("gen_ai.usage.output_tokens", "llm.usage.completion_tokens", "output_tokens")
 
@@ -60,7 +67,7 @@ def normalize_otel_payload(payload: dict[str, Any], environment: str = "prod") -
     attrs = root["attributes"]
     prompt = _first_text(attrs, PROMPT_KEYS) or _text_from_events(root, "user") or "No prompt captured in trace."
     output = _first_text(attrs, OUTPUT_KEYS) or _text_from_events(root, "assistant") or "No completion captured in trace."
-    model = _first_text(attrs, MODEL_KEYS) or "unknown-model"
+    model = _display_model(attrs)
     token_count = _sum_tokens(attrs)
     duration_ms = max(span["durationMs"] for span in spans)
     risk_flags = _detect_risk_flags(prompt, output, spans)
@@ -263,6 +270,14 @@ def _first_number(attrs: dict[str, Any], keys: tuple[str, ...]) -> int:
         except (TypeError, ValueError):
             continue
     return 0
+
+
+def _display_model(attrs: dict[str, Any]) -> str:
+    model = _first_text(attrs, MODEL_KEYS) or "unknown-model"
+    provider = _first_text(attrs, PROVIDER_KEYS)
+    if provider and "/" not in model:
+        return f"{provider}/{model}"
+    return model
 
 
 def _detect_risk_flags(prompt: str, output: str, spans: list[dict[str, Any]]) -> list[str]:

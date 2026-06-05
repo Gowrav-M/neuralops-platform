@@ -122,6 +122,11 @@ test('Connect page creates a key and stores a verification trace', async ({ page
   await expect(page.getByPlaceholder(/Paste NEURALOPS_API_KEY/i)).toHaveValue(/nop_sk_/);
   await expect(page.locator('.onboarding-step', { hasText: 'Ingest key created' })).toContainText('complete');
 
+  const gatewayResponse = page.waitForResponse((response) => response.url().includes('/api/gateway/openai/v1/chat/completions'));
+  await page.getByRole('button', { name: /Route First LLM Call/i }).click();
+  expect((await gatewayResponse).status()).toBe(503);
+  await expect(page.getByText('gateway not_configured')).toBeVisible();
+
   const verifyResponse = page.waitForResponse((response) => response.url().includes('/api/connect/verify'));
   await page.getByRole('button', { name: /Verify Connection/i }).click();
   expect((await verifyResponse).ok()).toBe(true);

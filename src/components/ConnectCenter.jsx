@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { bootstrapOnboarding, createApiKey, fetchConnectGuide, fetchOnboarding, verifyConnectIngest } from '../lib/api';
+import { bootstrapOnboarding, createApiKey, fetchConnectGuide, fetchOnboarding, routeGatewayChatCompletion, verifyConnectIngest } from '../lib/api';
 
 export default function ConnectCenter({ addToast, refreshDashboard }) {
   const [guide, setGuide] = useState(null);
@@ -9,6 +9,7 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
   const [environment, setEnvironment] = useState('staging');
   const [apiKey, setApiKey] = useState('');
   const [verification, setVerification] = useState(null);
+  const [gatewayResult, setGatewayResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [dataSource, setDataSource] = useState('loading');
 
@@ -60,13 +61,57 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
         name: `${serviceName} ingest`,
         role: 'Developer',
         environment,
-        scopes: ['trace:ingest'],
+        scopes: ['trace:ingest', 'gateway:invoke'],
       });
       setApiKey(response.token);
       await refreshOnboarding();
       addToast('Created one-time ingest key. Store it in your server environment.', 'success');
     } catch (error) {
       addToast(`Could not create ingest key: ${error.message}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRouteGateway = async () => {
+    if (!apiKey.trim()) {
+      addToast('Create or paste a gateway-enabled NeuralOps key first.', 'error');
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await routeGatewayChatCompletion({
+        model: 'neuralops-auto',
+        metadata: {
+          environment,
+          session: `${serviceName}-gateway-smoke`,
+        },
+        messages: [
+          { role: 'system', content: 'You are a concise enterprise support assistant.' },
+          { role: 'user', content: 'Summarize an AI incident and list the next owner action.' },
+        ],
+      }, apiKey.trim());
+      setGatewayResult({
+        state: 'routed',
+        message: `Gateway routed through ${result.neuralops?.provider?.label || 'configured provider'}.`,
+        traceId: result.neuralops?.traceId,
+        decision: result.neuralops?.decision || 'allow',
+      });
+      refreshDashboard?.();
+      await refreshOnboarding();
+      addToast('Gateway call routed and trace evidence stored.', 'success');
+    } catch (error) {
+      const message = error.message || '';
+      const notConfigured = message.includes('not_configured');
+      setGatewayResult({
+        state: notConfigured ? 'not_configured' : 'blocked',
+        message: notConfigured
+          ? 'No live provider is configured yet. Add Groq, NVIDIA, OpenRouter, Vercel AI Gateway, Ollama, vLLM, or a custom OpenAI-compatible provider in Settings.'
+          : message,
+        traceId: extractTraceId(message),
+        decision: message.includes('"decision":"block"') ? 'block' : 'review',
+      });
+      addToast(notConfigured ? 'Gateway is ready but no live provider is configured.' : 'Gateway policy blocked or rejected the call.', notConfigured ? 'warning' : 'error');
     } finally {
       setBusy(false);
     }
@@ -224,6 +269,54 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
         </div>
       </div>
 
+      <div className="connect-layout" style={{ marginTop: '24px' }}>
+        <div className="card-container">
+          <span className="card-title">2. Route First LLM Call</span>
+          <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+            This uses the OpenAI-compatible NeuralOps Gateway. It stores policy, provider, latency, token, cost, trace, and audit evidence.
+          </p>
+          <button className="btn-primary" onClick={handleRouteGateway} disabled={busy}>
+            {busy ? 'Routing...' : 'Route First LLM Call'}
+          </button>
+          {gatewayResult && (
+            <div className={`connect-proof ${gatewayResult.state === 'not_configured' ? 'gateway-not-configured' : ''}`}>
+              <span className={`badge ${gatewayResult.decision === 'block' ? 'badge-blocked' : gatewayResult.state === 'not_configured' ? 'badge-warning' : 'badge-success'}`}>
+                gateway {gatewayResult.state}
+              </span>
+              <strong>{gatewayResult.message}</strong>
+              {gatewayResult.traceId && <span className="code-font">trace: {gatewayResult.traceId}</span>}
+              <span className="code-font">decision: {gatewayResult.decision}</span>
+            </div>
+          )}
+        </div>
+        <div className="dark-panel-container">
+          <div className="dark-panel-title-row">
+            <span className="dark-panel-title">Gateway Contract</span>
+            <span className="badge badge-warning">Policy</span>
+          </div>
+          <div className="dark-list">
+            <div className="dark-list-item">
+              <div className="item-meta">
+                <span className="item-title">Endpoint</span>
+                <span className="item-subtitle">{guide?.gatewayEndpoint || `${guide?.apiBaseUrl || 'loading'}/api/gateway/openai/v1/chat/completions`}</span>
+              </div>
+            </div>
+            <div className="dark-list-item">
+              <div className="item-meta">
+                <span className="item-title">Required scope</span>
+                <span className="item-subtitle">gateway:invoke</span>
+              </div>
+            </div>
+            <div className="dark-list-item">
+              <div className="item-meta">
+                <span className="item-title">Failure truth</span>
+                <span className="item-subtitle">Returns not_configured when no live provider exists.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div className="table-container" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
         <div className="connect-tabs">
           {guide?.snippets.map((snippet) => (
@@ -263,4 +356,9 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
       </div>
     </div>
   );
+}
+
+function extractTraceId(text) {
+  const match = String(text).match(/tr_gateway_[a-f0-9]+/i);
+  return match?.[0] || null;
 }

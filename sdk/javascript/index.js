@@ -28,6 +28,22 @@ export class NeuralOps {
     return response.json();
   }
 
+  async chatCompletions(payload) {
+    const response = await this.fetchImpl(`${this.baseUrl}/api/gateway/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-neuralops-key': this.apiKey,
+      },
+      body: JSON.stringify(normalizeChatCompletion(payload)),
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(detail || `NeuralOps gateway failed with ${response.status}`);
+    }
+    return response.json();
+  }
+
   async traceModelCall({ session, environment = 'staging', model, prompt, call, toolCalls }) {
     const started = Date.now();
     try {
@@ -63,6 +79,17 @@ export class NeuralOps {
       throw error;
     }
   }
+}
+
+function normalizeChatCompletion(payload = {}) {
+  if (!Array.isArray(payload.messages) || payload.messages.length === 0) {
+    throw new Error('NeuralOps gateway field "messages" is required');
+  }
+  return {
+    ...payload,
+    stream: Boolean(payload.stream ?? false),
+    messages: payload.messages,
+  };
 }
 
 function normalizeTrace(trace) {

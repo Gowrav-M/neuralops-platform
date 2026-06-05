@@ -8,6 +8,8 @@ NeuralOps now includes a deploy-readiness and response layer: `/api/system/statu
 
 NeuralOps also includes a Connect workflow so a real app can send traces through SDK, REST, or OpenTelemetry instead of relying on sample dashboard records.
 
+NeuralOps now also exposes an OpenAI-compatible Policy Gateway. A backend service can call `/api/gateway/openai/v1/chat/completions` with a NeuralOps key, and NeuralOps will run pre/post guardrails, forward only to configured live providers, store trace/audit/cost evidence, and return `not_configured` when no provider is connected instead of inventing model output.
+
 ![NeuralOps dashboard](docs/assets/desktop-dashboard.png)
 
 ![NeuralOps agent runtime](docs/assets/agent-runtime-studio.png)
@@ -27,6 +29,7 @@ flowchart LR
   C["Neural Labs Experiments"] --> F
   D["GenAI / OTEL Traces"] --> F
   K["JavaScript / Python SDK"] --> F
+  M["OpenAI-Compatible Policy Gateway"] --> F
   E["Evaluations + Policy"] --> F
   I["Cost + Incidents"] --> F
   J["Release Gate + Evidence"] --> F
@@ -91,6 +94,7 @@ The Connect page is the product onboarding path for developers. It creates a has
 - Python / FastAPI apps
 - direct REST ingest
 - OpenTelemetry collectors
+- OpenAI-compatible gateway calls with `gateway:invoke`
 
 Use the UI or API to create a key, then verify the connection:
 
@@ -106,6 +110,17 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/connect/verify `
 ```
 
 That verification writes a trace and audit event. Full setup notes are in [docs/connect.md](docs/connect.md). Local SDK source lives in [sdk/javascript](sdk/javascript) and [sdk/python](sdk/python).
+
+Route a governed model call through the gateway:
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8000/api/gateway/openai/v1/chat/completions `
+  -Headers @{"x-neuralops-key" = $created.token} `
+  -ContentType "application/json" `
+  -Body '{"model":"gpt-4o-mini","metadata":{"environment":"staging","session":"checkout-agent-001"},"messages":[{"role":"user","content":"Summarize this incident safely."}]}'
+```
+
+If no live provider is configured, this returns `503 not_configured`. If policy blocks the input or output, NeuralOps stores a blocked gateway trace and returns a policy error with the trace ID.
 
 ## Agent Runtime
 
