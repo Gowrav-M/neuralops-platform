@@ -40,6 +40,7 @@ def test_health(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert response.json()["storage"] == "sqlite"
+    assert response.json()["routesRevision"] == "synthetic-canary-v1"
 
 
 def test_supabase_rls_migration_uses_trusted_workspace_claims() -> None:

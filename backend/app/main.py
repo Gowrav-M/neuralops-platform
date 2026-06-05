@@ -2238,7 +2238,13 @@ def latest_synthetic_canary() -> SyntheticCanaryRun | None:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"ok": True, "service": "neuralops-api", "version": app.version, "storage": storage_backend()}
+    return {
+        "ok": True,
+        "service": "neuralops-api",
+        "version": app.version,
+        "storage": storage_backend(),
+        "routesRevision": "synthetic-canary-v1",
+    }
 
 
 @app.get("/api/system/status", response_model=SystemStatus)
