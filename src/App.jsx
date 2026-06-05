@@ -196,9 +196,11 @@ export default function App() {
     let mounted = true;
     supabase.auth.getSession().then(({ data }) => {
       if (!mounted) return;
-      setSession(data.session);
-      setApiAuthToken(data.session?.access_token || null);
-      setQaAuthToken(null);
+      if (data.session) {
+        setSession(data.session);
+        setApiAuthToken(data.session.access_token);
+        setQaAuthToken(null);
+      }
     });
     const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
