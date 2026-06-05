@@ -137,6 +137,76 @@ def test_automation_rule_creates_incident_from_blocked_release_gate(client: Test
     assert feature_states["automation_engine"] == "persisted"
 
 
+def test_release_gate_blocks_when_required_synthetic_canary_is_missing(client: TestClient) -> None:
+    response = client.post(
+        "/api/release-gate/run",
+        json={
+            "target": "production",
+            "maxErrorRate": 1,
+            "minEvalPassRate": 0,
+            "requireAuth": False,
+            "requireLiveProvider": False,
+            "requireSyntheticCanary": True,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    synthetic_check = next(check for check in payload["checks"] if check["id"] == "synthetic_canary")
+    assert synthetic_check["status"] == "fail"
+    assert "No synthetic canary" in synthetic_check["evidence"]
+    assert payload["decision"] == "block"
+
+
+def test_release_gate_uses_recorded_synthetic_canary_evidence(client: TestClient) -> None:
+    client.post(
+        "/api/settings/api-keys",
+        json={"name": "canary ingest", "role": "Developer", "environment": "staging", "scopes": ["trace:ingest", "gateway:invoke"]},
+    )
+    client.post(
+        "/api/providers/connections",
+        json={
+            "providerId": "custom",
+            "label": "Canary Provider",
+            "baseUrl": "https://gateway.example.com/v1",
+            "defaultModel": "pytest-model",
+            "apiKey": "pytest-secret-provider-key",
+            "environment": "staging",
+            "priority": 1,
+        },
+    )
+    client.post("/api/settings/webhooks", json={"name": "Canary webhook", "url": "https://hooks.example.test/canary"})
+    client.post(
+        "/api/automations",
+        json={
+            "name": "Canary webhook rule",
+            "trigger": "release_gate.review",
+            "action": "webhook_record",
+            "severity": "Major",
+            "owner": "AI Platform Oncall",
+        },
+    )
+    canary = client.post("/api/synthetic/run", json={"target": "staging"})
+    assert canary.status_code == 200
+
+    response = client.post(
+        "/api/release-gate/run",
+        json={
+            "target": "staging",
+            "maxErrorRate": 1,
+            "minEvalPassRate": 0,
+            "requireAuth": False,
+            "requireLiveProvider": False,
+            "requireSyntheticCanary": True,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    synthetic_check = next(check for check in payload["checks"] if check["id"] == "synthetic_canary")
+    assert synthetic_check["status"] in {"pass", "warn"}
+    assert canary.json()["id"] in synthetic_check["evidence"]
+    assert payload["decision"] != "block"
+
+
 def test_automation_rule_records_blocked_trace_webhook_action(client: TestClient) -> None:
     webhook = client.post(
         "/api/settings/webhooks",

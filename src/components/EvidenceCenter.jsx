@@ -35,6 +35,8 @@ export default function EvidenceCenter({ addToast }) {
     minEvalPassRate: 0.85,
     requireLiveProvider: false,
     requireAuth: true,
+    requireSyntheticCanary: true,
+    syntheticCanaryMaxAgeMinutes: 60,
   });
   const [running, setRunning] = useState(false);
   const [error, setError] = useState('');
@@ -74,6 +76,8 @@ export default function EvidenceCenter({ addToast }) {
         minEvalPassRate: Number(gateForm.minEvalPassRate),
         requireLiveProvider: Boolean(gateForm.requireLiveProvider),
         requireAuth: Boolean(gateForm.requireAuth),
+        requireSyntheticCanary: Boolean(gateForm.requireSyntheticCanary),
+        syntheticCanaryMaxAgeMinutes: Number(gateForm.syntheticCanaryMaxAgeMinutes),
       });
       setReport((currentReport) => ({
         ...(currentReport || {}),
@@ -102,6 +106,7 @@ export default function EvidenceCenter({ addToast }) {
         maxLatencyMs: Number(gateForm.maxLatencyMs),
         maxErrorRate: Number(gateForm.maxErrorRate),
         minEvalPassRate: Number(gateForm.minEvalPassRate),
+        syntheticCanaryMaxAgeMinutes: Number(gateForm.syntheticCanaryMaxAgeMinutes),
       });
       await load();
       addToast(`Saved release gate: ${gate.name}.`, 'success');
@@ -201,6 +206,10 @@ export default function EvidenceCenter({ addToast }) {
                 <span className="metric-label">Min Eval Pass</span>
                 <input className="filter-search-input" type="number" min="0" max="1" step="0.01" value={gateForm.minEvalPassRate} onChange={(event) => updateGateField('minEvalPassRate', event.target.value)} />
               </label>
+              <label>
+                <span className="metric-label">Canary Max Age</span>
+                <input className="filter-search-input" type="number" min="1" max="1440" value={gateForm.syntheticCanaryMaxAgeMinutes} onChange={(event) => updateGateField('syntheticCanaryMaxAgeMinutes', event.target.value)} />
+              </label>
               <label className="gate-checkbox">
                 <input type="checkbox" checked={gateForm.requireAuth} onChange={(event) => updateGateField('requireAuth', event.target.checked)} />
                 <span>Require auth</span>
@@ -209,6 +218,10 @@ export default function EvidenceCenter({ addToast }) {
                 <input type="checkbox" checked={gateForm.requireLiveProvider} onChange={(event) => updateGateField('requireLiveProvider', event.target.checked)} />
                 <span>Require live provider</span>
               </label>
+              <label className="gate-checkbox">
+                <input type="checkbox" checked={gateForm.requireSyntheticCanary} onChange={(event) => updateGateField('requireSyntheticCanary', event.target.checked)} />
+                <span>Require fresh canary</span>
+              </label>
             </div>
 
             <div className="gate-definition-list">
@@ -216,7 +229,9 @@ export default function EvidenceCenter({ addToast }) {
                 <div className="gate-definition-row" key={gate.id}>
                   <div>
                     <strong>{gate.name}</strong>
-                    <span className="code-font">{gate.id} | {gate.target} | latency {gate.maxLatencyMs}ms | eval {(gate.minEvalPassRate * 100).toFixed(0)}%</span>
+                    <span className="code-font">
+                      {gate.id} | {gate.target} | latency {gate.maxLatencyMs}ms | eval {(gate.minEvalPassRate * 100).toFixed(0)}% | canary {gate.requireSyntheticCanary ? `${gate.syntheticCanaryMaxAgeMinutes}m` : 'optional'}
+                    </span>
                   </div>
                   <div className="gate-row-actions">
                     <span className={`badge ${gate.lastDecision === 'block' ? 'badge-error' : gate.lastDecision === 'allow' ? 'badge-success' : 'badge-warning'}`}>

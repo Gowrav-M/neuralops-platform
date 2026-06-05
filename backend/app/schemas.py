@@ -316,6 +316,8 @@ class ReleaseGateRequest(BaseModel):
     minEvalPassRate: float = Field(default=0.85, ge=0, le=1)
     requireLiveProvider: bool = False
     requireAuth: bool = True
+    requireSyntheticCanary: bool = False
+    syntheticCanaryMaxAgeMinutes: int = Field(default=60, ge=1, le=1440)
 
 
 class ReleaseGateDefinitionCreate(BaseModel):
@@ -327,6 +329,8 @@ class ReleaseGateDefinitionCreate(BaseModel):
     minEvalPassRate: float = Field(default=0.85, ge=0, le=1)
     requireLiveProvider: bool = False
     requireAuth: bool = True
+    requireSyntheticCanary: bool = False
+    syntheticCanaryMaxAgeMinutes: int = Field(default=60, ge=1, le=1440)
     description: str = ""
 
 
@@ -339,6 +343,8 @@ class ReleaseGateDefinitionPatch(BaseModel):
     minEvalPassRate: float | None = Field(default=None, ge=0, le=1)
     requireLiveProvider: bool | None = None
     requireAuth: bool | None = None
+    requireSyntheticCanary: bool | None = None
+    syntheticCanaryMaxAgeMinutes: int | None = Field(default=None, ge=1, le=1440)
     description: str | None = None
 
 

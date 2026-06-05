@@ -740,6 +740,52 @@ def release_gate_request_from_definition(gate: ReleaseGateDefinition, target_ove
         minEvalPassRate=gate.minEvalPassRate,
         requireLiveProvider=gate.requireLiveProvider,
         requireAuth=gate.requireAuth,
+        requireSyntheticCanary=gate.requireSyntheticCanary,
+        syntheticCanaryMaxAgeMinutes=gate.syntheticCanaryMaxAgeMinutes,
+    )
+
+
+def synthetic_canary_release_gate_check(request: ReleaseGateRequest) -> ReleaseGateCheck:
+    canary = latest_synthetic_canary()
+    if canary is None:
+        return ReleaseGateCheck(
+            id="synthetic_canary",
+            label="Synthetic Production Canary",
+            status="fail" if request.requireSyntheticCanary else "warn",
+            reason="Production release should include a recent synthetic end-to-end canary.",
+            evidence="No synthetic canary has been recorded.",
+        )
+
+    try:
+        age_seconds = max(0.0, (datetime.now() - datetime.fromisoformat(canary.generatedAt)).total_seconds())
+    except ValueError:
+        age_seconds = request.syntheticCanaryMaxAgeMinutes * 60 + 1
+    age_minutes = round(age_seconds / 60, 1)
+    stale = age_seconds > request.syntheticCanaryMaxAgeMinutes * 60
+    failed_checks = [check.label for check in canary.checks if check.status == "fail"]
+    warned_checks = [check.label for check in canary.checks if check.status == "warn"]
+
+    if canary.decision == "block" or stale:
+        status = "fail" if request.requireSyntheticCanary else "warn"
+    elif canary.decision == "review":
+        status = "warn"
+    else:
+        status = "pass"
+
+    evidence_parts = [
+        f"{canary.id}: {canary.decision} ({canary.score}/100)",
+        f"age {age_minutes}m / limit {request.syntheticCanaryMaxAgeMinutes}m",
+    ]
+    if failed_checks:
+        evidence_parts.append(f"failed: {', '.join(failed_checks)}")
+    if warned_checks:
+        evidence_parts.append(f"warned: {', '.join(warned_checks)}")
+    return ReleaseGateCheck(
+        id="synthetic_canary",
+        label="Synthetic Production Canary",
+        status=status,
+        reason="Release gate uses the latest backend/database/gateway synthetic proof before deploy.",
+        evidence=" | ".join(evidence_parts),
     )
 
 
@@ -814,6 +860,7 @@ def run_release_gate(request: ReleaseGateRequest) -> ReleaseGateResult:
             reason="Public deployment must require authentication unless this gate is explicitly local-only.",
             evidence="NEURALOPS_AUTH_REQUIRED=true" if status.authRequired else "Auth is not enforced",
         ),
+        synthetic_canary_release_gate_check(request),
     ]
     fail_count = sum(1 for check in checks if check.status == "fail")
     warn_count = sum(1 for check in checks if check.status == "warn")
