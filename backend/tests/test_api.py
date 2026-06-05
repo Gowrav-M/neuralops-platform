@@ -617,6 +617,68 @@ def test_connectivity_map_tracks_ingest_webhook_and_automation_state(client: Tes
     assert "gateway:invoke" in checks["ingest_key"]["evidence"]
 
 
+def test_synthetic_canary_run_records_blockers_and_latest_result(client: TestClient) -> None:
+    response = client.post("/api/synthetic/run", json={"target": "production"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["target"] == "production"
+    assert payload["decision"] == "block"
+    checks = {check["id"]: check for check in payload["checks"]}
+    assert checks["database_write_read"]["status"] == "pass"
+    assert checks["provider_gateway"]["status"] == "fail"
+    assert checks["ingest_key"]["status"] == "fail"
+    assert payload["summary"]["failed"] >= 2
+
+    latest = client.get("/api/synthetic/latest")
+    assert latest.status_code == 200
+    assert latest.json()["id"] == payload["id"]
+
+    audit = client.get("/api/audit")
+    assert audit.status_code == 200
+    assert any(event["type"] == "synthetic.canary.run" and event["subject"] == payload["id"] for event in audit.json())
+
+
+def test_synthetic_canary_reflects_configured_connectors(client: TestClient) -> None:
+    key_response = client.post(
+        "/api/settings/api-keys",
+        json={
+            "name": "canary ingest",
+            "role": "Developer",
+            "environment": "staging",
+            "scopes": ["trace:ingest", "gateway:invoke"],
+        },
+    )
+    assert key_response.status_code == 200
+    webhook = client.post(
+        "/api/settings/webhooks",
+        json={"name": "Canary webhook", "url": "https://hooks.example.test/neuralops"},
+    )
+    assert webhook.status_code == 200
+    automation = client.post(
+        "/api/automations",
+        json={
+            "name": "Canary webhook rule",
+            "trigger": "trace.blocked",
+            "action": "webhook_record",
+            "severity": "Major",
+        },
+    )
+    assert automation.status_code == 200
+
+    response = client.post("/api/synthetic/run", json={"target": "staging"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    checks = {check["id"]: check for check in payload["checks"]}
+    assert checks["database_write_read"]["status"] == "pass"
+    assert checks["ingest_key"]["status"] == "pass"
+    assert checks["trace_roundtrip"]["status"] == "pass"
+    assert checks["webhook_delivery"]["status"] == "pass"
+    assert checks["automation_worker"]["status"] == "pass"
+    assert checks["provider_gateway"]["status"] == "fail"
+
+
 def test_auth_gate_requires_valid_supabase_jwt_when_enabled(client: TestClient) -> None:
     os.environ["NEURALOPS_AUTH_REQUIRED"] = "true"
     os.environ["SUPABASE_JWT_SECRET"] = "pytest-secret-with-at-least-thirty-two-bytes"

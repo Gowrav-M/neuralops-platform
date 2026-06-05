@@ -8,6 +8,7 @@ import hmac
 import os
 from secrets import compare_digest, token_hex
 from threading import Lock
+from time import perf_counter
 from typing import Any
 
 import httpx
@@ -112,6 +113,9 @@ from .schemas import (
     SettingsPayload,
     Stats,
     SystemStatus,
+    SyntheticCanaryCheck,
+    SyntheticCanaryRequest,
+    SyntheticCanaryRun,
     Trace,
     TraceIngestRequest,
     TraceIngestResponse,
@@ -2014,6 +2018,224 @@ def build_connectivity_map() -> ConnectivityMap:
     )
 
 
+def synthetic_check(
+    check_id: str,
+    label: str,
+    status: str,
+    started_at: float,
+    evidence: str,
+    action: str,
+) -> SyntheticCanaryCheck:
+    return SyntheticCanaryCheck(
+        id=check_id,
+        label=label,
+        status=status,  # type: ignore[arg-type]
+        latencyMs=max(0, round((perf_counter() - started_at) * 1000)),
+        evidence=evidence,
+        action=action,
+    )
+
+
+def run_synthetic_canary(request: SyntheticCanaryRequest) -> SyntheticCanaryRun:
+    run_id = f"syn_{token_hex(6)}"
+    checks: list[SyntheticCanaryCheck] = []
+    connectivity = build_connectivity_map()
+
+    started = perf_counter()
+    probe_id = f"probe_{token_hex(5)}"
+    save_scoped_record(
+        "synthetic_probes",
+        probe_id,
+        {
+            "id": probe_id,
+            "runId": run_id,
+            "target": request.target,
+            "createdAt": datetime.now().isoformat(),
+        },
+    )
+    probe_payload = get_scoped_record("synthetic_probes", probe_id)
+    checks.append(
+        synthetic_check(
+            "database_write_read",
+            "Database write/read",
+            "pass" if probe_payload is not None else "fail",
+            started,
+            f"Wrote and read synthetic probe {probe_id} using {storage_backend()} storage.",
+            "Check database credentials and migration state." if probe_payload is None else "No action required.",
+        )
+    )
+
+    connectivity_checks = {check.id: check for check in connectivity.checks}
+    auth_check = connectivity_checks["auth"]
+    checks.append(
+        synthetic_check(
+            "auth_boundary",
+            "Auth boundary",
+            "pass" if auth_check.status == "ready" else "warn",
+            perf_counter(),
+            auth_check.evidence,
+            auth_check.action,
+        )
+    )
+
+    ingest_check = connectivity_checks["ingest_key"]
+    checks.append(
+        synthetic_check(
+            "ingest_key",
+            "Ingest key scope",
+            "pass" if ingest_check.status == "ready" else "fail",
+            perf_counter(),
+            ingest_check.evidence,
+            ingest_check.action,
+        )
+    )
+
+    started = perf_counter()
+    if ingest_check.status == "ready":
+        trace = Trace(
+            id=f"tr_synth_{token_hex(6)}",
+            timestamp=datetime.now().strftime("%H:%M:%S"),
+            session=f"synthetic-{request.target}-{token_hex(3)}",
+            environment="prod" if request.target == "production" else "staging",
+            model="neuralops-synthetic-canary",
+            tokens=32,
+            latency="0.01s",
+            cost="$0.000",
+            status="success",
+            score=1,
+            prompt="Synthetic canary trace. No user prompt captured.",
+            output="Synthetic trace roundtrip stored for operational readiness.",
+            toolCalls="synthetic.trace_roundtrip",
+            source="api",
+            riskFlags=["synthetic-canary"],
+        )
+        save_scoped_record("traces", trace.id, trace.model_dump())
+        trace_read = get_scoped_record("traces", trace.id)
+        trace_status = "pass" if trace_read is not None else "fail"
+        trace_evidence = f"Stored and read synthetic trace {trace.id}."
+    else:
+        trace_status = "fail"
+        trace_evidence = "No scoped API key exists, so external trace ingest cannot be proven."
+    checks.append(
+        synthetic_check(
+            "trace_roundtrip",
+            "Trace roundtrip",
+            trace_status,
+            started,
+            trace_evidence,
+            "Create an ingest key and verify SDK/REST ingestion." if trace_status != "pass" else "No action required.",
+        )
+    )
+
+    started = perf_counter()
+    try:
+        otel_trace, _ = normalize_otel_payload(
+            {
+                "spans": [
+                    {
+                        "traceId": f"otel-synthetic-{run_id}",
+                        "spanId": "span-synthetic-root",
+                        "name": "gen_ai.chat",
+                        "operation": "chat",
+                        "durationMs": 12,
+                        "status": {"code": "ok"},
+                        "attributes": {
+                            "gen_ai.provider.name": "neuralops",
+                            "gen_ai.request.model": "synthetic-canary",
+                            "gen_ai.prompt": "Synthetic OTel prompt.",
+                            "gen_ai.completion": "Synthetic OTel completion.",
+                            "gen_ai.usage.input_tokens": 12,
+                            "gen_ai.usage.output_tokens": 8,
+                        },
+                    }
+                ]
+            },
+            "prod" if request.target == "production" else "staging",
+        )
+        otel_status = "pass"
+        otel_evidence = f"Normalized {otel_trace.spanCount} GenAI span(s) into trace shape."
+    except ValueError as exc:
+        otel_status = "fail"
+        otel_evidence = str(exc)
+    checks.append(
+        synthetic_check(
+            "otel_normalization",
+            "OpenTelemetry normalization",
+            otel_status,
+            started,
+            otel_evidence,
+            "Review OTel payload mapping and GenAI semantic conventions." if otel_status != "pass" else "No action required.",
+        )
+    )
+
+    provider_check = connectivity_checks["provider_gateway"]
+    checks.append(
+        synthetic_check(
+            "provider_gateway",
+            "Provider gateway readiness",
+            "pass" if provider_check.status == "ready" else "fail" if provider_check.status == "missing" else "warn",
+            perf_counter(),
+            provider_check.evidence,
+            provider_check.action,
+        )
+    )
+
+    webhook_check = connectivity_checks["webhook_delivery"]
+    checks.append(
+        synthetic_check(
+            "webhook_delivery",
+            "Webhook delivery readiness",
+            "pass" if webhook_check.status == "ready" else "warn",
+            perf_counter(),
+            webhook_check.evidence,
+            webhook_check.action,
+        )
+    )
+
+    automation_check = connectivity_checks["automation_worker"]
+    checks.append(
+        synthetic_check(
+            "automation_worker",
+            "Automation worker readiness",
+            "pass" if automation_check.status == "ready" else "warn",
+            perf_counter(),
+            automation_check.evidence,
+            automation_check.action,
+        )
+    )
+
+    failed = sum(check.status == "fail" for check in checks)
+    warned = sum(check.status == "warn" for check in checks)
+    passed = sum(check.status == "pass" for check in checks)
+    decision = "block" if failed else "review" if warned else "allow"
+    score = max(0, 100 - (failed * 24) - (warned * 8))
+    result = SyntheticCanaryRun(
+        id=run_id,
+        target=request.target,
+        decision=decision,
+        score=score,
+        checks=checks,
+        summary={"passed": passed, "warned": warned, "failed": failed},
+        generatedAt=datetime.now().isoformat(),
+    )
+    save_scoped_record("synthetic_runs", run_id, result.model_dump())
+    save_audit_event(
+        "synthetic.canary.run",
+        current_workspace_id(),
+        run_id,
+        decision,
+        f"Synthetic canary completed for {request.target}: {passed} pass, {warned} warn, {failed} fail.",
+    )
+    return result
+
+
+def latest_synthetic_canary() -> SyntheticCanaryRun | None:
+    runs = [SyntheticCanaryRun.model_validate(item) for item in scoped_records("synthetic_runs")]
+    if not runs:
+        return None
+    return sorted(runs, key=lambda item: item.generatedAt, reverse=True)[0]
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "service": "neuralops-api", "version": app.version, "storage": storage_backend()}
@@ -2027,6 +2249,16 @@ def system_status() -> SystemStatus:
 @app.get("/api/connectivity", response_model=ConnectivityMap)
 def connectivity_map() -> ConnectivityMap:
     return build_connectivity_map()
+
+
+@app.post("/api/synthetic/run", response_model=SyntheticCanaryRun)
+def synthetic_canary_run(request: SyntheticCanaryRequest) -> SyntheticCanaryRun:
+    return run_synthetic_canary(request)
+
+
+@app.get("/api/synthetic/latest", response_model=SyntheticCanaryRun | None)
+def synthetic_canary_latest() -> SyntheticCanaryRun | None:
+    return latest_synthetic_canary()
 
 
 @app.post("/api/release-gate/run", response_model=ReleaseGateResult)

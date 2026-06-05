@@ -144,6 +144,17 @@ export function fetchConnectivity() {
   return request('/api/connectivity');
 }
 
+export function fetchSyntheticCanaryLatest() {
+  return request('/api/synthetic/latest');
+}
+
+export function runSyntheticCanary(payload = {}) {
+  return request('/api/synthetic/run', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export function bootstrapOnboarding() {
   return request('/api/onboarding/bootstrap', { method: 'POST' });
 }

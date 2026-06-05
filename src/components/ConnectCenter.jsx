@@ -1,10 +1,26 @@
 import { useEffect, useState } from 'react';
-import { bootstrapOnboarding, createApiKey, fetchConnectGuide, fetchConnectivity, fetchOnboarding, routeGatewayChatCompletion, verifyConnectIngest } from '../lib/api';
+import {
+  bootstrapOnboarding,
+  createApiKey,
+  fetchConnectGuide,
+  fetchConnectivity,
+  fetchOnboarding,
+  fetchSyntheticCanaryLatest,
+  routeGatewayChatCompletion,
+  runSyntheticCanary,
+  verifyConnectIngest,
+} from '../lib/api';
 
 const connectivityBadgeClass = {
   ready: 'badge-success',
   degraded: 'badge-warning',
   missing: 'badge-error',
+};
+
+const canaryBadgeClass = {
+  pass: 'badge-success',
+  warn: 'badge-warning',
+  fail: 'badge-error',
 };
 
 export default function ConnectCenter({ addToast, refreshDashboard }) {
@@ -17,17 +33,20 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
   const [verification, setVerification] = useState(null);
   const [gatewayResult, setGatewayResult] = useState(null);
   const [connectivity, setConnectivity] = useState(null);
+  const [syntheticCanary, setSyntheticCanary] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [canaryBusy, setCanaryBusy] = useState(false);
   const [dataSource, setDataSource] = useState('loading');
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchConnectGuide(), fetchOnboarding(), fetchConnectivity()])
-      .then(([guidePayload, onboardingPayload, connectivityPayload]) => {
+    Promise.all([fetchConnectGuide(), fetchOnboarding(), fetchConnectivity(), fetchSyntheticCanaryLatest()])
+      .then(([guidePayload, onboardingPayload, connectivityPayload, canaryPayload]) => {
         if (cancelled) return;
         setGuide(guidePayload);
         setOnboarding(onboardingPayload);
         setConnectivity(connectivityPayload);
+        setSyntheticCanary(canaryPayload);
         setActiveSnippet(guidePayload.snippets[0]?.id || 'javascript');
         setDataSource('api');
       })
@@ -53,6 +72,21 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
     const payload = await fetchConnectivity();
     setConnectivity(payload);
     return payload;
+  };
+
+  const handleRunCanary = async () => {
+    setCanaryBusy(true);
+    try {
+      const result = await runSyntheticCanary({ target: environment === 'prod' ? 'production' : environment });
+      setSyntheticCanary(result);
+      await refreshConnectivity();
+      refreshDashboard?.();
+      addToast(`Synthetic canary completed: ${result.decision.toUpperCase()}.`, result.decision === 'block' ? 'error' : result.decision === 'review' ? 'warning' : 'success');
+    } catch (error) {
+      addToast(`Synthetic canary failed: ${error.message}`, 'error');
+    } finally {
+      setCanaryBusy(false);
+    }
   };
 
   const handleBootstrap = async () => {
@@ -253,6 +287,37 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
             ))}
           </div>
         )}
+        <div className="synthetic-canary-panel">
+          <div>
+            <span className="card-title">Synthetic Production Canary</span>
+            <p>
+              Runs a backend write/read probe, trace roundtrip, OTel normalization, provider gateway readiness, webhook delivery readiness, and automation worker check.
+            </p>
+          </div>
+          <button className="btn-primary" onClick={handleRunCanary} disabled={canaryBusy}>
+            {canaryBusy ? 'Running Canary...' : 'Run Synthetic Canary'}
+          </button>
+          {syntheticCanary && (
+            <div className="synthetic-canary-result">
+              <div className="synthetic-canary-summary">
+                <span className={`badge ${syntheticCanary.decision === 'allow' ? 'badge-success' : syntheticCanary.decision === 'review' ? 'badge-warning' : 'badge-error'}`}>
+                  {syntheticCanary.decision}
+                </span>
+                <strong>{syntheticCanary.score}/100</strong>
+                <span className="code-font">{syntheticCanary.id}</span>
+              </div>
+              <div className="synthetic-canary-checks">
+                {syntheticCanary.checks.map((check) => (
+                  <div key={check.id}>
+                    <span className={`badge ${canaryBadgeClass[check.status] || 'badge-warning'}`}>{check.status}</span>
+                    <strong>{check.label}</strong>
+                    <p>{check.evidence}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="connect-layout">

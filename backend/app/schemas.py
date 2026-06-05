@@ -584,6 +584,30 @@ class ConnectivityMap(BaseModel):
     generatedAt: str
 
 
+class SyntheticCanaryRequest(BaseModel):
+    target: str = Field(default="production", min_length=1)
+    includeLiveProvider: bool = False
+
+
+class SyntheticCanaryCheck(BaseModel):
+    id: str
+    label: str
+    status: Literal["pass", "warn", "fail"]
+    latencyMs: int = Field(ge=0)
+    evidence: str
+    action: str
+
+
+class SyntheticCanaryRun(BaseModel):
+    id: str
+    target: str
+    decision: Literal["allow", "review", "block"]
+    score: int = Field(ge=0, le=100)
+    checks: list[SyntheticCanaryCheck]
+    summary: dict[str, int]
+    generatedAt: str
+
+
 class AgentRunRequest(BaseModel):
     agentId: str
     input: str = Field(min_length=1)

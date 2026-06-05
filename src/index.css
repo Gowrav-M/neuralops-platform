@@ -1695,6 +1695,64 @@ body {
   gap: 7px;
 }
 
+.synthetic-canary-panel {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  padding: 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.synthetic-canary-panel p,
+.synthetic-canary-checks p {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.synthetic-canary-result {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+}
+
+.synthetic-canary-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.synthetic-canary-summary strong {
+  color: var(--text-primary);
+  font-size: 18px;
+}
+
+.synthetic-canary-checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.synthetic-canary-checks > div {
+  min-width: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  padding: 12px;
+  display: grid;
+  gap: 7px;
+}
+
+.synthetic-canary-checks strong {
+  color: var(--text-primary);
+  font-size: 12.5px;
+  line-height: 1.25;
+}
+
 .connect-form-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 150px auto;
@@ -3276,6 +3334,7 @@ body {
   .connect-form-grid,
   .gate-config-grid,
   .onboarding-step-grid,
+  .synthetic-canary-panel,
   .settings-member-form,
   .evidence-hero,
   .operator-workflow-rail,

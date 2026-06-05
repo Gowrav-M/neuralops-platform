@@ -125,6 +125,12 @@ test('Connect page creates a key and stores a verification trace', async ({ page
   await expect(page.locator('.onboarding-step', { hasText: 'Ingest key created' })).toContainText('complete');
   await expect(page.locator('.connectivity-check', { hasText: 'Scoped NeuralOps API key' })).toContainText('ready');
 
+  const canaryResponse = page.waitForResponse((response) => response.url().includes('/api/synthetic/run'));
+  await page.getByRole('button', { name: 'Run Synthetic Canary' }).click();
+  expect((await canaryResponse).ok()).toBe(true);
+  await expect(page.getByText('Synthetic Production Canary')).toBeVisible();
+  await expect(page.getByText('Database write/read')).toBeVisible();
+
   const gatewayResponse = page.waitForResponse((response) => response.url().includes('/api/gateway/openai/v1/chat/completions'));
   await page.getByRole('button', { name: /Route First LLM Call/i }).click();
   expect((await gatewayResponse).status()).toBe(503);
