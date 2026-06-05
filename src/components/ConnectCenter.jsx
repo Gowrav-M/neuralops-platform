@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react';
-import { bootstrapOnboarding, createApiKey, fetchConnectGuide, fetchOnboarding, routeGatewayChatCompletion, verifyConnectIngest } from '../lib/api';
+import { bootstrapOnboarding, createApiKey, fetchConnectGuide, fetchConnectivity, fetchOnboarding, routeGatewayChatCompletion, verifyConnectIngest } from '../lib/api';
+
+const connectivityBadgeClass = {
+  ready: 'badge-success',
+  degraded: 'badge-warning',
+  missing: 'badge-error',
+};
 
 export default function ConnectCenter({ addToast, refreshDashboard }) {
   const [guide, setGuide] = useState(null);
@@ -10,16 +16,18 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
   const [apiKey, setApiKey] = useState('');
   const [verification, setVerification] = useState(null);
   const [gatewayResult, setGatewayResult] = useState(null);
+  const [connectivity, setConnectivity] = useState(null);
   const [busy, setBusy] = useState(false);
   const [dataSource, setDataSource] = useState('loading');
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchConnectGuide(), fetchOnboarding()])
-      .then(([guidePayload, onboardingPayload]) => {
+    Promise.all([fetchConnectGuide(), fetchOnboarding(), fetchConnectivity()])
+      .then(([guidePayload, onboardingPayload, connectivityPayload]) => {
         if (cancelled) return;
         setGuide(guidePayload);
         setOnboarding(onboardingPayload);
+        setConnectivity(connectivityPayload);
         setActiveSnippet(guidePayload.snippets[0]?.id || 'javascript');
         setDataSource('api');
       })
@@ -41,11 +49,18 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
     return payload;
   };
 
+  const refreshConnectivity = async () => {
+    const payload = await fetchConnectivity();
+    setConnectivity(payload);
+    return payload;
+  };
+
   const handleBootstrap = async () => {
     setBusy(true);
     try {
       const payload = await bootstrapOnboarding();
       setOnboarding(payload);
+      await refreshConnectivity();
       addToast('Workspace onboarding state refreshed from the backend.', 'success');
     } catch (error) {
       addToast(`Could not refresh onboarding: ${error.message}`, 'error');
@@ -64,7 +79,7 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
         scopes: ['trace:ingest', 'gateway:invoke'],
       });
       setApiKey(response.token);
-      await refreshOnboarding();
+      await Promise.all([refreshOnboarding(), refreshConnectivity()]);
       addToast('Created one-time ingest key. Store it in your server environment.', 'success');
     } catch (error) {
       addToast(`Could not create ingest key: ${error.message}`, 'error');
@@ -98,7 +113,7 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
         decision: result.neuralops?.decision || 'allow',
       });
       refreshDashboard?.();
-      await refreshOnboarding();
+      await Promise.all([refreshOnboarding(), refreshConnectivity()]);
       addToast('Gateway call routed and trace evidence stored.', 'success');
     } catch (error) {
       const message = error.message || '';
@@ -112,6 +127,7 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
         decision: message.includes('"decision":"block"') ? 'block' : 'review',
       });
       addToast(notConfigured ? 'Gateway is ready but no live provider is configured.' : 'Gateway policy blocked or rejected the call.', notConfigured ? 'warning' : 'error');
+      await refreshConnectivity().catch(() => undefined);
     } finally {
       setBusy(false);
     }
@@ -131,7 +147,7 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
       }, apiKey.trim());
       setVerification(result);
       refreshDashboard?.();
-      await refreshOnboarding();
+      await Promise.all([refreshOnboarding(), refreshConnectivity()]);
       addToast(result.message, 'success');
     } catch (error) {
       addToast(`Connection verification failed: ${error.message}`, 'error');
@@ -196,6 +212,47 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
           </button>
           <span className="code-font">workspace: {onboarding?.workspace.id || 'loading'}</span>
         </div>
+      </div>
+
+      <div className="connectivity-panel">
+        <div className="connectivity-summary">
+          <div>
+            <span className="card-title">Connectivity Command Center</span>
+            <p>
+              {connectivity
+                ? `${connectivity.workspaceId} is ${connectivity.overallStatus} with ${connectivity.score}/100 connectivity readiness.`
+                : 'Loading real backend connectivity proof.'}
+            </p>
+          </div>
+          <div className="connectivity-score">
+            <strong>{connectivity?.score ?? 0}</strong>
+            <span>{connectivity?.overallStatus || 'loading'}</span>
+          </div>
+        </div>
+        <div className="connectivity-check-grid">
+          {connectivity?.checks.map((check) => (
+            <div className={`connectivity-check ${check.status}`} key={check.id}>
+              <div className="connectivity-check-header">
+                <span className={`badge ${connectivityBadgeClass[check.status] || 'badge-warning'}`}>{check.status}</span>
+                <span className="code-font">{check.category}</span>
+              </div>
+              <strong>{check.label}</strong>
+              <p>{check.evidence}</p>
+              <span className="code-font">{check.endpoint || check.action}</span>
+            </div>
+          ))}
+        </div>
+        {connectivity?.nextActions?.length > 0 && (
+          <div className="connectivity-actions">
+            {connectivity.nextActions.slice(0, 4).map((action) => (
+              <div key={action.id}>
+                <span className={`badge ${action.priority === 'high' ? 'badge-error' : 'badge-warning'}`}>{action.priority}</span>
+                <strong>{action.label}</strong>
+                <p>{action.reason}</p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="connect-layout">

@@ -115,12 +115,15 @@ test('Connect page creates a key and stores a verification trace', async ({ page
   await sidebar.getByRole('button', { name: 'Connect', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Connect Your AI App' })).toBeVisible();
   await expect(page.getByText('Production Connect Checklist')).toBeVisible();
+  await expect(page.getByText('Connectivity Command Center')).toBeVisible();
+  await expect(page.locator('.connectivity-check', { hasText: 'Database storage' })).toContainText('ready');
   await expect(page.locator('.onboarding-score')).toContainText('%');
 
   await page.getByPlaceholder('service name').fill('playwright-service');
   await page.getByRole('button', { name: 'Create Ingest Key' }).click();
   await expect(page.getByPlaceholder(/Paste NEURALOPS_API_KEY/i)).toHaveValue(/nop_sk_/);
   await expect(page.locator('.onboarding-step', { hasText: 'Ingest key created' })).toContainText('complete');
+  await expect(page.locator('.connectivity-check', { hasText: 'Scoped NeuralOps API key' })).toContainText('ready');
 
   const gatewayResponse = page.waitForResponse((response) => response.url().includes('/api/gateway/openai/v1/chat/completions'));
   await page.getByRole('button', { name: /Route First LLM Call/i }).click();

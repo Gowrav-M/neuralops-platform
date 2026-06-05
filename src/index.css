@@ -1582,6 +1582,119 @@ body {
   flex-wrap: wrap;
 }
 
+.connectivity-panel {
+  background: var(--bg-card);
+  border: var(--border-card);
+  border-radius: var(--radius-md);
+  padding: 20px;
+  margin-bottom: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  box-shadow: var(--shadow-sm);
+}
+
+.connectivity-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.connectivity-summary p,
+.connectivity-check p,
+.connectivity-actions p,
+.connectivity-score span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.connectivity-score {
+  min-width: 150px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-transform: capitalize;
+}
+
+.connectivity-score strong {
+  color: var(--text-primary);
+  font-size: 26px;
+  line-height: 1;
+}
+
+.connectivity-check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.connectivity-check {
+  min-width: 0;
+  min-height: 156px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-secondary);
+}
+
+.connectivity-check.ready {
+  border-color: rgba(76, 158, 122, 0.36);
+}
+
+.connectivity-check.degraded {
+  border-color: rgba(255, 193, 7, 0.42);
+}
+
+.connectivity-check.missing {
+  border-color: rgba(241, 86, 74, 0.34);
+}
+
+.connectivity-check-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.connectivity-check strong,
+.connectivity-actions strong {
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.connectivity-check .code-font {
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
+.connectivity-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.connectivity-actions > div {
+  min-width: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  padding: 12px;
+  display: grid;
+  gap: 7px;
+}
+
 .connect-form-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 150px auto;

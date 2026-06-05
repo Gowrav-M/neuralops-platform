@@ -76,6 +76,9 @@ from .schemas import (
     ConnectSnippet,
     ConnectVerifyRequest,
     ConnectVerifyResponse,
+    ConnectivityAction,
+    ConnectivityCheck,
+    ConnectivityMap,
     ConnectorDelivery,
     ConnectorDeliveryProcessRequest,
     ConnectorDeliveryProcessResult,
@@ -1814,6 +1817,203 @@ def build_connect_guide() -> ConnectGuide:
     )
 
 
+def latest_timestamp(records: list[dict[str, Any]], *keys: str) -> str | None:
+    values: list[str] = []
+    for record in records:
+        for key in keys:
+            value = record.get(key)
+            if isinstance(value, str) and value.strip():
+                values.append(value.strip())
+                break
+    return max(values) if values else None
+
+
+def connectivity_status_score(status: str) -> int:
+    if status == "ready":
+        return 100
+    if status == "degraded":
+        return 55
+    return 0
+
+
+def connectivity_next_actions(checks: list[ConnectivityCheck]) -> list[ConnectivityAction]:
+    action_map = {
+        "auth": ConnectivityAction(
+            id="enable_auth",
+            label="Enable Supabase Auth",
+            target="Settings",
+            reason="Public SaaS needs authenticated workspace isolation before broad user access.",
+            priority="high",
+        ),
+        "provider_gateway": ConnectivityAction(
+            id="connect_provider",
+            label="Connect a live model provider",
+            target="Settings",
+            reason="Gateway calls return not_configured until Groq, NVIDIA, OpenAI-compatible, Ollama, or another provider is configured.",
+            priority="high",
+        ),
+        "ingest_key": ConnectivityAction(
+            id="create_ingest_key",
+            label="Create an ingest and gateway key",
+            target="Connect",
+            reason="Applications need a scoped server-side key before sending traces or routing LLM calls.",
+            priority="high",
+        ),
+        "webhook_delivery": ConnectivityAction(
+            id="register_webhook",
+            label="Register a webhook destination",
+            target="Settings",
+            reason="Slack, Jira, GitHub, n8n, or generic webhook delivery needs a destination before incident automation can notify people.",
+            priority="medium",
+        ),
+        "automation_worker": ConnectivityAction(
+            id="create_automation",
+            label="Create an automation rule",
+            target="Automations",
+            reason="Connector delivery is useful only when rules create events from blocked traces, release gates, or policy violations.",
+            priority="medium",
+        ),
+    }
+    actions: list[ConnectivityAction] = []
+    action_ids: set[str] = set()
+    for check in checks:
+        if check.status == "ready":
+            continue
+        action = action_map.get(check.id)
+        if action is not None and action.id not in action_ids:
+            action_ids.add(action.id)
+            actions.append(action)
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    return sorted(actions, key=lambda item: priority_order[item.priority])
+
+
+def build_connectivity_map() -> ConnectivityMap:
+    ensure_workspace_bootstrap()
+    settings_payload = settings_payload_or_404()
+    api_keys = settings_payload.get("apiKeys", [])
+    webhooks = settings_payload.get("webhooks", [])
+    providers = [provider for provider in list_providers() if provider.id != "local"]
+    configured_provider_count = sum(1 for provider in providers if provider.configured)
+    live_provider_count = sum(1 for provider in providers if provider.configured and provider.source in {"env", "connection"})
+    gateway_key_count = sum(
+        1
+        for api_key in api_keys
+        if "gateway:invoke" in api_key.get("scopes", []) or "admin" in api_key.get("scopes", [])
+    )
+    trace_records = scoped_records("traces")
+    automation_rules = [AutomationRule.model_validate(item) for item in scoped_records("automation_rules")]
+    connector_records = scoped_records("connector_deliveries")
+
+    provider_status = "ready" if live_provider_count else "degraded" if configured_provider_count else "missing"
+    provider_action = (
+        "Live provider available for NeuralOps Gateway."
+        if live_provider_count
+        else "Provider presets are visible, but a live key-backed provider is not configured."
+        if configured_provider_count
+        else "Add a live provider connection or environment key in Settings."
+    )
+    gateway_status = "ready" if live_provider_count and gateway_key_count else "degraded" if gateway_key_count else "missing"
+
+    checks = [
+        ConnectivityCheck(
+            id="database",
+            label="Database storage",
+            category="database",
+            status="ready",
+            evidence=f"{storage_backend()} backend is active for workspace {current_workspace_id()}.",
+            endpoint="/health",
+            action="No action required.",
+        ),
+        ConnectivityCheck(
+            id="auth",
+            label="Workspace authentication",
+            category="auth",
+            status="ready" if auth_required() else "missing",
+            evidence="Supabase/JWT auth is required for API access." if auth_required() else "Local mode is open; enable auth before public production.",
+            endpoint="/api/system/status",
+            action="No action required." if auth_required() else "Enable NEURALOPS_AUTH_REQUIRED and Supabase Auth for public SaaS.",
+        ),
+        ConnectivityCheck(
+            id="provider_gateway",
+            label="Live provider gateway",
+            category="provider",
+            status=provider_status,
+            evidence=f"{live_provider_count} live provider(s), {configured_provider_count} configured provider surface(s).",
+            endpoint="/api/gateway/openai/v1/chat/completions",
+            action=provider_action,
+        ),
+        ConnectivityCheck(
+            id="gateway_policy",
+            label="Policy gateway route",
+            category="gateway",
+            status=gateway_status,
+            evidence=f"{gateway_key_count} key(s) can invoke the gateway.",
+            endpoint="/api/gateway/openai/v1/chat/completions",
+            action="Create a gateway-scoped key and connect a provider." if gateway_status != "ready" else "No action required.",
+        ),
+        ConnectivityCheck(
+            id="ingest_key",
+            label="Scoped NeuralOps API key",
+            category="ingest",
+            status="ready" if api_keys else "missing",
+            evidence=f"{len(api_keys)} key(s), {gateway_key_count} with gateway:invoke or admin scope.",
+            endpoint="/api/settings/api-keys",
+            lastSeenAt=latest_timestamp(api_keys, "lastUsedAt", "created"),
+            action="Create a scoped server-side key in Connect or Settings." if not api_keys else "Keep keys server-side and rotate after exposure.",
+        ),
+        ConnectivityCheck(
+            id="trace_ingest",
+            label="Trace ingestion API",
+            category="ingest",
+            status="ready" if api_keys and trace_records else "degraded" if api_keys else "missing",
+            evidence=f"{len(trace_records)} trace(s) stored from API, OTel, gateway, or local agent runs.",
+            endpoint="/api/traces/ingest",
+            lastSeenAt=latest_timestamp(trace_records, "createdAt", "timestamp"),
+            action="Verify an SDK/REST trace from Connect." if not trace_records else "No action required.",
+        ),
+        ConnectivityCheck(
+            id="otel_ingest",
+            label="OpenTelemetry GenAI ingest",
+            category="otel",
+            status="ready",
+            evidence="OTel normalization endpoint is mounted and accepts GenAI span payloads.",
+            endpoint="/api/traces/otel",
+            action="Point an OTel collector or SDK exporter at the endpoint using a scoped NeuralOps key.",
+        ),
+        ConnectivityCheck(
+            id="webhook_delivery",
+            label="Webhook and connector destinations",
+            category="webhook",
+            status="ready" if webhooks else "missing",
+            evidence=f"{len(webhooks)} webhook(s), {len(connector_records)} connector delivery record(s).",
+            endpoint="/api/settings/webhooks",
+            lastSeenAt=latest_timestamp(webhooks, "createdAt"),
+            action="Run the delivery worker from Automations." if webhooks else "Register Slack/Jira/GitHub/n8n or generic webhook endpoints.",
+        ),
+        ConnectivityCheck(
+            id="automation_worker",
+            label="Automation worker",
+            category="automation",
+            status="ready" if any(rule.enabled for rule in automation_rules) else "missing",
+            evidence=f"{len(automation_rules)} rule(s), {sum(1 for rule in automation_rules if rule.enabled)} enabled.",
+            endpoint="/api/connector-deliveries/process",
+            lastSeenAt=latest_timestamp([rule.model_dump() for rule in automation_rules], "lastRunAt", "updatedAt"),
+            action="Use Dry Run Worker before enabling external sends." if automation_rules else "Create a rule that records webhook delivery or opens incidents.",
+        ),
+    ]
+    score = round(sum(connectivity_status_score(check.status) for check in checks) / len(checks))
+    overall_status = "ready" if score >= 90 else "degraded" if score >= 20 else "missing"
+    return ConnectivityMap(
+        workspaceId=current_workspace_id(),
+        storage=storage_backend(),
+        overallStatus=overall_status,
+        score=score,
+        checks=checks,
+        nextActions=connectivity_next_actions(checks),
+        generatedAt=datetime.now().isoformat(),
+    )
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "service": "neuralops-api", "version": app.version, "storage": storage_backend()}
@@ -1822,6 +2022,11 @@ def health() -> dict[str, Any]:
 @app.get("/api/system/status", response_model=SystemStatus)
 def system_status() -> SystemStatus:
     return build_system_status()
+
+
+@app.get("/api/connectivity", response_model=ConnectivityMap)
+def connectivity_map() -> ConnectivityMap:
+    return build_connectivity_map()
 
 
 @app.post("/api/release-gate/run", response_model=ReleaseGateResult)

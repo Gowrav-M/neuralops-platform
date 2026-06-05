@@ -140,6 +140,10 @@ export function fetchOnboarding() {
   return request('/api/onboarding');
 }
 
+export function fetchConnectivity() {
+  return request('/api/connectivity');
+}
+
 export function bootstrapOnboarding() {
   return request('/api/onboarding/bootstrap', { method: 'POST' });
 }

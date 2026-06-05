@@ -562,6 +562,61 @@ def test_onboarding_progress_after_ingest_key_and_trace(client: TestClient) -> N
     assert payload["nextAction"] in {"Run a release gate evidence check.", "Review production readiness evidence."}
 
 
+def test_connectivity_map_reports_missing_and_ready_surfaces(client: TestClient) -> None:
+    response = client.get("/api/connectivity")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["overallStatus"] == "degraded"
+    assert payload["score"] < 100
+    checks = {check["id"]: check for check in payload["checks"]}
+    assert checks["database"]["status"] == "ready"
+    assert checks["auth"]["status"] == "missing"
+    assert checks["provider_gateway"]["status"] == "missing"
+    assert checks["ingest_key"]["status"] == "missing"
+    assert checks["webhook_delivery"]["status"] == "missing"
+    assert checks["otel_ingest"]["status"] == "ready"
+    assert any(action["id"] == "connect_provider" for action in payload["nextActions"])
+
+
+def test_connectivity_map_tracks_ingest_webhook_and_automation_state(client: TestClient) -> None:
+    key_response = client.post(
+        "/api/settings/api-keys",
+        json={
+            "name": "connectivity ingest",
+            "role": "Developer",
+            "environment": "staging",
+            "scopes": ["trace:ingest", "gateway:invoke"],
+        },
+    )
+    assert key_response.status_code == 200
+    webhook = client.post(
+        "/api/settings/webhooks",
+        json={"name": "Connectivity webhook", "url": "https://hooks.example.test/neuralops"},
+    )
+    assert webhook.status_code == 200
+    automation = client.post(
+        "/api/automations",
+        json={
+            "name": "Connectivity delivery rule",
+            "trigger": "trace.blocked",
+            "action": "webhook_record",
+            "severity": "Major",
+        },
+    )
+    assert automation.status_code == 200
+
+    response = client.get("/api/connectivity")
+
+    assert response.status_code == 200
+    checks = {check["id"]: check for check in response.json()["checks"]}
+    assert checks["ingest_key"]["status"] == "ready"
+    assert checks["webhook_delivery"]["status"] == "ready"
+    assert checks["automation_worker"]["status"] == "ready"
+    assert checks["provider_gateway"]["status"] == "missing"
+    assert "gateway:invoke" in checks["ingest_key"]["evidence"]
+
+
 def test_auth_gate_requires_valid_supabase_jwt_when_enabled(client: TestClient) -> None:
     os.environ["NEURALOPS_AUTH_REQUIRED"] = "true"
     os.environ["SUPABASE_JWT_SECRET"] = "pytest-secret-with-at-least-thirty-two-bytes"

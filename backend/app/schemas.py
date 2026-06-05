@@ -551,6 +551,39 @@ class ConnectVerifyResponse(BaseModel):
     message: str
 
 
+ConnectivityStatus = Literal["ready", "degraded", "missing"]
+ConnectivityCategory = Literal["database", "auth", "ingest", "gateway", "otel", "webhook", "automation", "provider"]
+
+
+class ConnectivityCheck(BaseModel):
+    id: str
+    label: str
+    category: ConnectivityCategory
+    status: ConnectivityStatus
+    evidence: str
+    endpoint: str | None = None
+    lastSeenAt: str | None = None
+    action: str
+
+
+class ConnectivityAction(BaseModel):
+    id: str
+    label: str
+    target: str
+    reason: str
+    priority: Literal["high", "medium", "low"]
+
+
+class ConnectivityMap(BaseModel):
+    workspaceId: str
+    storage: Literal["sqlite", "postgres"]
+    overallStatus: ConnectivityStatus
+    score: int = Field(ge=0, le=100)
+    checks: list[ConnectivityCheck]
+    nextActions: list[ConnectivityAction]
+    generatedAt: str
+
+
 class AgentRunRequest(BaseModel):
     agentId: str
     input: str = Field(min_length=1)
