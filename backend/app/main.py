@@ -109,6 +109,8 @@ from .schemas import (
     ReleaseAutopilotComparison,
     ReleaseAutopilotRequest,
     ReleaseAutopilotResult,
+    ReplayGateRequest,
+    ReplayGateResult,
     ReplayResult,
     SettingsPayload,
     Stats,
@@ -550,6 +552,7 @@ def build_system_status() -> SystemStatus:
         "automation_rules",
         "automation_events",
         "release_autopilot",
+        "replay_gates",
         "connector_deliveries",
         "detections",
         "release_gate_definitions",
@@ -722,6 +725,13 @@ def build_system_status() -> SystemStatus:
 def parse_seconds(value: str) -> float:
     try:
         return float(value.replace("s", ""))
+    except ValueError:
+        return 0.0
+
+
+def parse_cost(value: str) -> float:
+    try:
+        return float(value.replace("$", "").replace(",", ""))
     except ValueError:
         return 0.0
 
@@ -942,6 +952,103 @@ def latest_release_gate() -> ReleaseGateResult | None:
     if not gates:
         return None
     return sorted(gates, key=lambda item: item.generatedAt, reverse=True)[0]
+
+
+def latest_replay_gate() -> ReplayGateResult | None:
+    gates = [ReplayGateResult.model_validate(item) for item in scoped_records("replay_gates")]
+    if not gates:
+        return None
+    return sorted(gates, key=lambda item: item.generatedAt, reverse=True)[0]
+
+
+def run_trace_replay_gate(trace: Trace, request: ReplayGateRequest) -> ReplayGateResult:
+    replay = replay_trace(trace.model_dump())
+    latency_ms = round(parse_seconds(trace.latency) * 1000)
+    cost_usd = parse_cost(trace.cost)
+    combined_text = f"{trace.prompt}\n{trace.output}".lower()
+    blocked_phrase_hits = [phrase for phrase in request.blockedPhrases if phrase.lower() in combined_text]
+    live_provider_configured = bool(gateway_providers_for_environment(trace.environment))
+    provider_required = request.providerMode == "live" or request.requireLiveProvider
+
+    checks = [
+        ReleaseGateCheck(
+            id="policy_replay",
+            label="Replay Policy Decision",
+            status="fail" if replay.decision == "block" else "warn" if replay.decision == "review" else "pass",
+            reason="Stored trace replay must not reproduce blocked or review-only policy paths.",
+            evidence=f"Replay decision {replay.decision}; {replay.recommendation}",
+        ),
+        ReleaseGateCheck(
+            id="latency_budget",
+            label="Latency Regression Budget",
+            status="pass" if latency_ms <= request.maxLatencyMs else "warn",
+            reason=f"Replay candidate should stay under {request.maxLatencyMs}ms.",
+            evidence=f"{latency_ms}ms recorded latency",
+        ),
+        ReleaseGateCheck(
+            id="cost_budget",
+            label="Cost Budget",
+            status="pass" if cost_usd <= request.maxCostUsd else "warn",
+            reason=f"Replay candidate should stay under ${request.maxCostUsd:.4f}.",
+            evidence=f"${cost_usd:.4f} recorded trace cost",
+        ),
+        ReleaseGateCheck(
+            id="eval_score",
+            label="Evaluation Score Floor",
+            status="pass" if trace.score >= request.minScore else "fail" if trace.score < 0.5 else "warn",
+            reason=f"Trace score should be at least {request.minScore:.2f} before promotion.",
+            evidence=f"{trace.score:.2f} recorded score",
+        ),
+        ReleaseGateCheck(
+            id="blocked_phrases",
+            label="Policy-as-Code Blocked Phrases",
+            status="fail" if blocked_phrase_hits else "pass",
+            reason="Local policy file phrases must not appear in replayed release evidence.",
+            evidence=", ".join(blocked_phrase_hits) if blocked_phrase_hits else "No policy-file blocked phrases matched.",
+        ),
+        ReleaseGateCheck(
+            id="provider_mode",
+            label="Provider Mode Readiness",
+            status="fail" if provider_required and not live_provider_configured else "pass",
+            reason="Live replay must use a configured key-backed provider; local replay remains deterministic.",
+            evidence=(
+                "Live provider configured"
+                if live_provider_configured
+                else "Live provider not configured; local deterministic replay only"
+            ),
+        ),
+    ]
+
+    failed = sum(check.status == "fail" for check in checks)
+    warned = sum(check.status == "warn" for check in checks)
+    decision = "block" if failed else "review" if warned else "allow"
+    recommendations = [f"{check.label}: {check.reason} {check.evidence}" for check in checks if check.status != "pass"]
+    result = ReplayGateResult(
+        id=f"rpg_{token_hex(6)}",
+        traceId=trace.id,
+        target=request.target,
+        decision=decision,
+        score=max(0, 100 - failed * 28 - warned * 10),
+        providerMode=request.providerMode,
+        replay=replay,
+        checks=checks,
+        originalOutput=trace.output,
+        replayedOutput=(
+            f"Local deterministic replay reused stored output for trace {trace.id}. "
+            "Configure providerMode=live after a live provider is connected to compare fresh model output."
+        ),
+        recommendations=recommendations,
+        generatedAt=datetime.now().isoformat(),
+    )
+    save_scoped_record("replay_gates", result.id, result.model_dump())
+    save_audit_event(
+        "trace.replay_gate",
+        current_workspace_id(),
+        result.id,
+        result.decision,
+        f"Replay gate for trace {trace.id}: {result.decision} ({result.score}/100).",
+    )
+    return result
 
 
 CONTROL_PATTERNS: dict[str, tuple[str, ...]] = {
@@ -1513,13 +1620,15 @@ def trigger_trace_automations(trace: Trace) -> None:
 def build_evidence_report() -> EvidenceReport:
     status = build_system_status()
     gate = latest_release_gate()
+    replay_gate = latest_replay_gate()
     saved_gates = list_release_gate_definitions()
     summary = {
-        "decision": gate.decision if gate else "review",
+        "decision": "block" if replay_gate and replay_gate.decision == "block" else gate.decision if gate else "review",
         "readinessScore": status.readinessScore,
         "configuredFeatures": sum(1 for feature in status.features if feature.state != "not_configured"),
         "blockedFeatures": sum(1 for feature in status.features if feature.state == "not_configured"),
         "savedReleaseGates": len(saved_gates),
+        "latestReplayGateDecision": replay_gate.decision if replay_gate else "not_run",
     }
     markdown_lines = [
         "# NeuralOps Evidence Report",
@@ -1530,6 +1639,7 @@ def build_evidence_report() -> EvidenceReport:
         f"- Readiness score: {status.readinessScore}/100",
         f"- Saved release gates: {len(saved_gates)}",
         f"- Latest gate decision: {gate.decision if gate else 'not_run'}",
+        f"- Latest replay gate decision: {replay_gate.decision if replay_gate else 'not_run'}",
         "",
         "## Feature Truth Contract",
         *[f"- **{feature.label}**: `{feature.state}` - {feature.evidence}" for feature in status.features],
@@ -1540,6 +1650,16 @@ def build_evidence_report() -> EvidenceReport:
                 "",
                 "## Release Gate Checks",
                 *[f"- **{check.label}**: `{check.status}` - {check.evidence}" for check in gate.checks],
+            ]
+        )
+    if replay_gate:
+        markdown_lines.extend(
+            [
+                "",
+                "## Replay Gate Checks",
+                f"- Trace: `{replay_gate.traceId}`",
+                f"- Decision: `{replay_gate.decision}` ({replay_gate.score}/100)",
+                *[f"- **{check.label}**: `{check.status}` - {check.evidence}" for check in replay_gate.checks],
             ]
         )
     if saved_gates:
@@ -1558,6 +1678,7 @@ def build_evidence_report() -> EvidenceReport:
         generatedAt=datetime.now().isoformat(),
         status=status,
         latestGate=gate,
+        latestReplayGate=replay_gate,
         summary=summary,
         markdown="\n".join(markdown_lines),
     )
@@ -2724,6 +2845,14 @@ def replay_existing_trace(trace_id: str) -> ReplayResult:
     if trace is None:
         raise HTTPException(status_code=404, detail="Trace not found")
     return replay_trace(trace)
+
+
+@app.post("/api/traces/{trace_id}/replay-gate", response_model=ReplayGateResult)
+def replay_gate_trace(trace_id: str, request: ReplayGateRequest) -> ReplayGateResult:
+    trace = get_scoped_record("traces", trace_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return run_trace_replay_gate(Trace.model_validate(trace), request)
 
 
 @app.post("/api/traces/simulate", response_model=Trace)

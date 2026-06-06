@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
 
 function valueOf(args, flag, fallback = undefined) {
   const index = args.indexOf(flag);
@@ -19,6 +20,9 @@ Commands:
   neuralops send-test-trace [options]
   neuralops release-gate run [options]
   neuralops gate run [options]
+  neuralops replay-gate run --trace <id> [options]
+  neuralops policy validate [options]
+  neuralops policy test --input <text> [options]
 
 Options:
   --base-url <url>             NeuralOps API URL. Defaults to NEURALOPS_API_URL or http://localhost:8000
@@ -35,6 +39,9 @@ Options:
   --require-auth <bool>        Require auth in gate checks. Default: true
   --fail-on warn|fail|review|block
                                Doctor exits non-zero on warn/fail. Release gate exits on review/block.
+  --policy-file <path>         Policy-as-code YAML file. Default: .neuralops/policies.yaml
+  --trace <id>                 Trace id for replay-gate.
+  --input <text>               Input text for policy test.
   --json                       Print raw JSON.
 `);
 }
@@ -382,6 +389,147 @@ async function runGate({ args, env, fetchImpl, stdout }) {
   return failThreshold(result.decision, failOn) ? 1 : 0;
 }
 
+function readPolicy(args) {
+  const policyFile = valueOf(args, "--policy-file", ".neuralops/policies.yaml");
+  const text = readFileSync(policyFile, "utf8");
+  return validatePolicy(parsePolicyYaml(text), policyFile);
+}
+
+function parsePolicyYaml(text) {
+  const policy = {};
+  let listKey = null;
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line.startsWith("- ") && listKey) {
+      policy[listKey].push(coerceScalar(line.slice(2).trim()));
+      continue;
+    }
+    const match = line.match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/);
+    if (!match) {
+      throw new Error(`Invalid policy line: ${rawLine}`);
+    }
+    const key = match[1];
+    const value = match[2];
+    if (value === "") {
+      policy[key] = [];
+      listKey = key;
+    } else {
+      policy[key] = coerceScalar(value);
+      listKey = null;
+    }
+  }
+  return policy;
+}
+
+function coerceScalar(value) {
+  const unquoted = value.replace(/^["']|["']$/g, "");
+  if (/^(true|false)$/i.test(unquoted)) return unquoted.toLowerCase() === "true";
+  if (/^-?\d+(\.\d+)?$/.test(unquoted)) return Number(unquoted);
+  return unquoted;
+}
+
+function validatePolicy(policy, policyFile = "policy") {
+  const errors = [];
+  if (policy.maxLatencyMs !== undefined && (!Number.isFinite(Number(policy.maxLatencyMs)) || Number(policy.maxLatencyMs) < 1)) {
+    errors.push("maxLatencyMs must be a positive number");
+  }
+  if (policy.maxCostUsd !== undefined && (!Number.isFinite(Number(policy.maxCostUsd)) || Number(policy.maxCostUsd) < 0)) {
+    errors.push("maxCostUsd must be zero or positive");
+  }
+  if (policy.minScore !== undefined && (Number(policy.minScore) < 0 || Number(policy.minScore) > 1)) {
+    errors.push("minScore must be between 0 and 1");
+  }
+  if (policy.providerMode !== undefined && !["local", "auto", "live"].includes(String(policy.providerMode))) {
+    errors.push("providerMode must be local, auto, or live");
+  }
+  if (policy.blockedPhrases !== undefined && !Array.isArray(policy.blockedPhrases)) {
+    errors.push("blockedPhrases must be a list");
+  }
+  if (errors.length) {
+    const error = new Error(`Invalid policy ${policyFile}: ${errors.join("; ")}`);
+    error.validationErrors = errors;
+    throw error;
+  }
+  return {
+    maxLatencyMs: Number(policy.maxLatencyMs ?? 2500),
+    maxCostUsd: Number(policy.maxCostUsd ?? 1),
+    minScore: Number(policy.minScore ?? 0.85),
+    providerMode: String(policy.providerMode ?? "local"),
+    blockedPhrases: policy.blockedPhrases || [],
+    requireLiveProvider: Boolean(policy.requireLiveProvider ?? false),
+    policyFile,
+  };
+}
+
+function evaluatePolicyInput(policy, input) {
+  const text = String(input || "").toLowerCase();
+  const matched = [];
+  for (const phrase of policy.blockedPhrases || []) {
+    if (text.includes(String(phrase).toLowerCase())) matched.push(String(phrase));
+  }
+  const builtIn = ["ignore previous", "ignore standard", "api key", "password", "secret", "token", "webhook"];
+  for (const phrase of builtIn) {
+    if (text.includes(phrase) && !matched.includes(phrase)) matched.push(phrase);
+  }
+  const decision = matched.some((phrase) => ["ignore previous", "api key", "password", "secret", "token", "webhook"].includes(phrase.toLowerCase()))
+    ? "block"
+    : matched.length
+      ? "review"
+      : "allow";
+  return { decision, matchedPhrases: matched, policyFile: policy.policyFile };
+}
+
+async function runPolicy({ args, stdout }) {
+  const subcommand = args[1];
+  const policy = readPolicy(args);
+  if (subcommand === "validate") {
+    const result = { valid: true, policy };
+    stdout(has(args, "--json") ? JSON.stringify(result, null, 2) : `Policy valid: ${policy.policyFile}`);
+    return 0;
+  }
+  if (subcommand === "test") {
+    const input = valueOf(args, "--input", "");
+    if (!input) throw new Error("--input is required for policy test");
+    const result = evaluatePolicyInput(policy, input);
+    stdout(has(args, "--json") ? JSON.stringify(result, null, 2) : `Policy decision: ${result.decision.toUpperCase()}`);
+    return result.decision === "block" ? 1 : 0;
+  }
+  throw new Error("policy command must be validate or test");
+}
+
+async function runReplayGate({ args, env, fetchImpl, stdout }) {
+  const traceId = valueOf(args, "--trace");
+  if (!traceId) throw new Error("--trace is required for replay-gate run");
+  const baseUrl = normalizeBaseUrl(args, env);
+  const failOn = valueOf(args, "--fail-on", "block");
+  if (!["review", "block"].includes(failOn)) {
+    throw new Error("--fail-on must be review or block for replay-gate");
+  }
+  let policy = {};
+  try {
+    policy = readPolicy(args);
+  } catch (error) {
+    if (has(args, "--policy-file")) throw error;
+  }
+  const payload = {
+    target: valueOf(args, "--target", "production"),
+    providerMode: valueOf(args, "--provider-mode", policy.providerMode || "local"),
+    maxLatencyMs: Number(valueOf(args, "--max-latency-ms", policy.maxLatencyMs || "2500")),
+    maxCostUsd: Number(valueOf(args, "--max-cost-usd", policy.maxCostUsd || "1")),
+    minScore: Number(valueOf(args, "--min-score", policy.minScore || "0.85")),
+    blockedPhrases: policy.blockedPhrases || [],
+    requireLiveProvider: has(args, "--require-live-provider") || Boolean(policy.requireLiveProvider),
+  };
+  const result = await postJson(fetchImpl, `${baseUrl}/api/traces/${encodeURIComponent(traceId)}/replay-gate`, payload);
+  if (has(args, "--json")) {
+    stdout(JSON.stringify(result, null, 2));
+  } else {
+    printHuman(result, stdout);
+  }
+  return failThreshold(result.decision, failOn) ? 1 : 0;
+}
+
 export async function runCli({
   argv = process.argv.slice(2),
   env = process.env,
@@ -406,6 +554,12 @@ export async function runCli({
     }
     if ((argv[0] === "release-gate" || argv[0] === "gate") && argv[1] === "run") {
       return await runGate({ args: argv, env, fetchImpl, stdout });
+    }
+    if (argv[0] === "replay-gate" && argv[1] === "run") {
+      return await runReplayGate({ args: argv, env, fetchImpl, stdout });
+    }
+    if (argv[0] === "policy") {
+      return await runPolicy({ args: argv, stdout });
     }
     usage(stdout);
     return 2;

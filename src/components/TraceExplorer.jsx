@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { fetchTraceDetail } from '../lib/api';
+import { fetchTraceDetail, runReplayGate } from '../lib/api';
 
 export default function TraceExplorer({
   traces,
@@ -14,6 +14,16 @@ export default function TraceExplorer({
   const [searchQuery, setSearchQuery] = useState('');
   const [drawerTab, setDrawerTab] = useState('spans');
   const [drawerLoading, setDrawerLoading] = useState(false);
+  const [replayGate, setReplayGate] = useState(null);
+  const [replayGateLoading, setReplayGateLoading] = useState(false);
+  const [replayGateError, setReplayGateError] = useState('');
+  const [replayGateForm, setReplayGateForm] = useState({
+    target: 'production',
+    providerMode: 'local',
+    maxLatencyMs: 2500,
+    maxCostUsd: 1,
+    minScore: 0.85,
+  });
   const modelOptions = [...new Set(traces.map((trace) => trace.model).filter(Boolean))].sort();
   const statusOptions = [...new Set(traces.map((trace) => trace.status).filter(Boolean))].sort();
   const environmentOptions = [...new Set(traces.map((trace) => trace.environment).filter(Boolean))].sort();
@@ -33,6 +43,8 @@ export default function TraceExplorer({
     setSelectedTrace(trace);
     setDrawerOpen(true);
     setDrawerLoading(true);
+    setReplayGate(null);
+    setReplayGateError('');
 
     try {
       const detail = await fetchTraceDetail(trace.id);
@@ -42,6 +54,30 @@ export default function TraceExplorer({
     } finally {
       setDrawerLoading(false);
     }
+  };
+
+  const handleRunReplayGate = async () => {
+    if (!selectedTrace?.id) return;
+    setReplayGateLoading(true);
+    setReplayGateError('');
+    try {
+      const result = await runReplayGate(selectedTrace.id, {
+        target: replayGateForm.target,
+        providerMode: replayGateForm.providerMode,
+        maxLatencyMs: Number(replayGateForm.maxLatencyMs),
+        maxCostUsd: Number(replayGateForm.maxCostUsd),
+        minScore: Number(replayGateForm.minScore),
+      });
+      setReplayGate(result);
+    } catch (err) {
+      setReplayGateError(err instanceof Error ? err.message : 'Replay gate failed');
+    } finally {
+      setReplayGateLoading(false);
+    }
+  };
+
+  const updateReplayGateField = (field, value) => {
+    setReplayGateForm((current) => ({ ...current, [field]: value }));
   };
 
   return (
@@ -255,6 +291,12 @@ export default function TraceExplorer({
               >
                 Raw JSON
               </button>
+              <button
+                className={`tab-btn ${drawerTab === 'replay' ? 'active' : ''}`}
+                onClick={() => setDrawerTab('replay')}
+              >
+                Replay Gate
+              </button>
             </div>
 
             {/* Tab Contents */}
@@ -359,6 +401,103 @@ export default function TraceExplorer({
                 <pre className="code-editor-panel" style={{ height: '380px', overflowY: 'auto', fontSize: '11px' }}>
                   {JSON.stringify(selectedTrace, null, 2)}
                 </pre>
+              </div>
+            )}
+
+            {drawerTab === 'replay' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: '10px' }}>
+                  <label>
+                    <span className="metric-label">Target</span>
+                    <select className="filter-select" value={replayGateForm.target} onChange={(event) => updateReplayGateField('target', event.target.value)}>
+                      <option value="production">production</option>
+                      <option value="staging">staging</option>
+                      <option value="ci">ci</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span className="metric-label">Provider Mode</span>
+                    <select className="filter-select" value={replayGateForm.providerMode} onChange={(event) => updateReplayGateField('providerMode', event.target.value)}>
+                      <option value="local">local</option>
+                      <option value="auto">auto</option>
+                      <option value="live">live</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span className="metric-label">Max Latency</span>
+                    <input className="filter-search-input" type="number" min="1" value={replayGateForm.maxLatencyMs} onChange={(event) => updateReplayGateField('maxLatencyMs', event.target.value)} />
+                  </label>
+                  <label>
+                    <span className="metric-label">Max Cost</span>
+                    <input className="filter-search-input" type="number" min="0" step="0.01" value={replayGateForm.maxCostUsd} onChange={(event) => updateReplayGateField('maxCostUsd', event.target.value)} />
+                  </label>
+                  <label>
+                    <span className="metric-label">Min Score</span>
+                    <input className="filter-search-input" type="number" min="0" max="1" step="0.01" value={replayGateForm.minScore} onChange={(event) => updateReplayGateField('minScore', event.target.value)} />
+                  </label>
+                </div>
+
+                <button className="btn-primary" onClick={handleRunReplayGate} disabled={replayGateLoading}>
+                  {replayGateLoading ? 'Running Replay Gate...' : 'Run Replay Gate'}
+                </button>
+
+                {replayGateError && (
+                  <div className="state-container" style={{ alignItems: 'flex-start', textAlign: 'left' }}>
+                    <strong>Replay gate failed</strong>
+                    <span>{replayGateError}</span>
+                  </div>
+                )}
+
+                {replayGate && (
+                  <>
+                    <div className="evidence-gate-card" style={{ alignItems: 'flex-start' }}>
+                      <span className="metric-label">Replay Decision</span>
+                      <span className={`badge ${replayGate.decision === 'block' ? 'badge-error' : replayGate.decision === 'allow' ? 'badge-success' : 'badge-warning'}`}>
+                        {replayGate.decision}
+                      </span>
+                      <strong>{replayGate.score}/100</strong>
+                      <span className="page-subtitle">{replayGate.id}</span>
+                    </div>
+
+                    <table className="dense-table">
+                      <thead>
+                        <tr>
+                          <th>Check</th>
+                          <th>Status</th>
+                          <th>Evidence</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {replayGate.checks.map((check) => (
+                          <tr key={check.id}>
+                            <td>{check.label}</td>
+                            <td>
+                              <span className={`badge ${check.status === 'pass' ? 'badge-success' : check.status === 'warn' ? 'badge-warning' : 'badge-error'}`}>
+                                {check.status}
+                              </span>
+                            </td>
+                            <td>{check.evidence}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                      <div>
+                        <span className="metric-label">Original Output</span>
+                        <div className="code-editor-panel" style={{ marginTop: '6px', maxHeight: '180px', overflowY: 'auto' }}>
+                          {replayGate.originalOutput}
+                        </div>
+                      </div>
+                      <div>
+                        <span className="metric-label">Replay Output</span>
+                        <div className="code-editor-panel" style={{ marginTop: '6px', maxHeight: '180px', overflowY: 'auto' }}>
+                          {replayGate.replayedOutput}
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
             )}
           </div>

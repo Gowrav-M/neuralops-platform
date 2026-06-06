@@ -10,6 +10,16 @@ NeuralOps also includes a Connect workflow so a real app can send traces through
 
 NeuralOps now also exposes an OpenAI-compatible Policy Gateway. A backend service can call `/api/gateway/openai/v1/chat/completions` with a NeuralOps key, and NeuralOps will run pre/post guardrails, forward only to configured live providers, store trace/audit/cost evidence, and return `not_configured` when no provider is connected instead of inventing model output.
 
+NeuralOps also includes a developer Integration Kit and Trace Replay Gate:
+
+```powershell
+node sdk/javascript/bin/neuralops.mjs doctor --check-gateway
+node sdk/javascript/bin/neuralops.mjs policy validate --policy-file .neuralops/policies.yaml
+node sdk/javascript/bin/neuralops.mjs replay-gate run --trace <trace_id> --fail-on review
+```
+
+This is the adoption path: connect one real call, capture the trace, replay a production failure, and block risky releases before deployment.
+
 ![NeuralOps dashboard](docs/assets/desktop-dashboard.png)
 
 ![NeuralOps agent runtime](docs/assets/agent-runtime-studio.png)
@@ -120,6 +130,32 @@ node sdk/javascript/bin/neuralops.mjs doctor --check-gateway
 ```
 
 The doctor checks backend health, writes a real trace when a key is present, and reports gateway `not_configured` as a warning instead of pretending a provider is live.
+
+Wrap an existing OpenAI-compatible JavaScript client without changing your provider:
+
+```js
+import OpenAI from "openai";
+import { NeuralOps, wrapOpenAI } from "./sdk/javascript/index.js";
+
+const neuralops = new NeuralOps({
+  apiKey: process.env.NEURALOPS_API_KEY,
+  baseUrl: process.env.NEURALOPS_API_URL,
+});
+
+const openai = wrapOpenAI(new OpenAI({ apiKey: process.env.OPENAI_API_KEY }), {
+  neuralops,
+  session: "checkout-agent-001",
+  environment: "staging",
+});
+```
+
+Replay a stored failure before promotion:
+
+```powershell
+node sdk/javascript/bin/neuralops.mjs replay-gate run --trace <trace_id> --policy-file .neuralops/policies.yaml --fail-on review
+```
+
+The Replay Lab is also available from Trace Explorer. It stores replay evidence and surfaces the latest replay decision on the Evidence page. See [docs/integration-kit.md](docs/integration-kit.md), [docs/replay-gate.md](docs/replay-gate.md), and [docs/policy-as-code.md](docs/policy-as-code.md).
 
 Route a governed model call through the gateway:
 

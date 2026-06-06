@@ -10,7 +10,7 @@ from urllib.error import HTTPError
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "sdk" / "python"))
 
-from neuralops import NeuralOpsClient, NeuralOpsError  # noqa: E402
+from neuralops import NeuralOpsClient, NeuralOpsError, trace_function, wrap_openai  # noqa: E402
 
 
 class FakeResponse:
@@ -63,3 +63,55 @@ def test_python_sdk_gateway_errors_do_not_include_full_api_key(monkeypatch) -> N
         assert "HTTP 403" in str(exc)
     else:
         raise AssertionError("Expected NeuralOpsError")
+
+
+def test_python_trace_function_fails_open_when_ingest_fails() -> None:
+    class BrokenClient:
+        def ingest_trace(self, **_kwargs):  # noqa: ANN001
+            raise NeuralOpsError("backend down")
+
+    result = trace_function(
+        BrokenClient(),
+        "checkout-agent",
+        lambda: "operation completed",
+        session="sess_py_trace",
+        environment="staging",
+        prompt="Run checkout agent.",
+    )
+
+    assert result == "operation completed"
+
+
+def test_python_wrap_openai_captures_successful_chat_call() -> None:
+    traces: list[dict[str, Any]] = []
+
+    class CaptureClient:
+        def ingest_trace(self, **kwargs):  # noqa: ANN001
+            traces.append(kwargs)
+            return {"trace": {"id": "tr_py_wrap"}}
+
+    class FakeResponse:
+        model = "gpt-test"
+        usage = {"total_tokens": 31}
+        choices = [{"message": {"content": "Safe wrapped output."}}]
+
+    class FakeCompletions:
+        def create(self, **_kwargs):  # noqa: ANN001
+            return FakeResponse()
+
+    class FakeOpenAI:
+        class Chat:
+            completions = FakeCompletions()
+
+        chat = Chat()
+
+    wrapped = wrap_openai(CaptureClient(), FakeOpenAI(), session="sess_py_openai", environment="prod")
+    result = wrapped.chat.completions.create(model="gpt-test", messages=[{"role": "user", "content": "hello"}])
+
+    assert result is not None
+    assert traces[0]["session"] == "sess_py_openai"
+    assert traces[0]["model"] == "gpt-test"
+    assert traces[0]["tokens"] == 31
+    assert traces[0]["status"] == "success"
+    assert "hello" in traces[0]["prompt"]
+    assert traces[0]["output"] == "Safe wrapped output."

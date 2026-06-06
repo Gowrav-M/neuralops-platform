@@ -1,0 +1,7 @@
+maxLatencyMs: 2500
+maxCostUsd: 0.05
+minScore: 0.85
+providerMode: local
+blockedPhrases:
+  - ignore previous
+  - send the api key

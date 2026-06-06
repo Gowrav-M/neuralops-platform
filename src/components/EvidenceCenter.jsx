@@ -142,6 +142,7 @@ export default function EvidenceCenter({ addToast }) {
   };
 
   const latestGate = report?.latestGate;
+  const latestReplayGate = report?.latestReplayGate;
 
   return (
     <div className="main-panel">
@@ -286,6 +287,14 @@ export default function EvidenceCenter({ addToast }) {
               <strong>{latestGate ? `${latestGate.score}/100` : 'Run gate to create evidence'}</strong>
               <span className="page-subtitle">{latestGate?.target || 'production target'}</span>
             </div>
+            <div className="evidence-gate-card">
+              <span className="metric-label">Latest Replay Gate</span>
+              <span className={`badge ${latestReplayGate?.decision === 'block' ? 'badge-error' : latestReplayGate?.decision === 'allow' ? 'badge-success' : 'badge-warning'}`}>
+                {latestReplayGate ? latestReplayGate.decision : 'not run'}
+              </span>
+              <strong>{latestReplayGate ? `${latestReplayGate.score}/100` : 'Replay a trace to create evidence'}</strong>
+              <span className="page-subtitle">{latestReplayGate?.traceId || 'trace replay target'}</span>
+            </div>
           </div>
 
           <div className="evidence-grid">
@@ -356,6 +365,37 @@ export default function EvidenceCenter({ addToast }) {
               </div>
             </div>
           </div>
+
+          {latestReplayGate && (
+            <div className="table-container" style={{ padding: '24px' }}>
+              <span style={{ fontSize: '15px', fontWeight: '600' }}>Trace Replay Gate Checks</span>
+              <p className="page-subtitle" style={{ marginTop: '6px' }}>
+                Trace {latestReplayGate.traceId} replayed for {latestReplayGate.target}; decision {latestReplayGate.decision}.
+              </p>
+              <table className="dense-table" style={{ marginTop: '14px' }}>
+                <thead>
+                  <tr>
+                    <th>Check</th>
+                    <th>Status</th>
+                    <th>Evidence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {latestReplayGate.checks.map((check) => (
+                    <tr key={check.id}>
+                      <td>{check.label}</td>
+                      <td>
+                        <span className={`badge ${check.status === 'pass' ? 'badge-success' : check.status === 'warn' ? 'badge-warning' : 'badge-error'}`}>
+                          {check.status}
+                        </span>
+                      </td>
+                      <td>{check.evidence}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           <div className="code-editor-panel" style={{ whiteSpace: 'pre-wrap' }}>
             {report?.markdown || 'Evidence report will appear after backend status loads.'}

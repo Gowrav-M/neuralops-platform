@@ -339,6 +339,13 @@ export function replayTrace(traceId) {
   return request(`/api/traces/${traceId}/replay`, { method: 'POST' });
 }
 
+export function runReplayGate(traceId, payload = {}) {
+  return request(`/api/traces/${traceId}/replay-gate`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export function fetchDetections() {
   return request('/api/detections');
 }

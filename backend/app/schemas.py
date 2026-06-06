@@ -394,6 +394,7 @@ class EvidenceReport(BaseModel):
     generatedAt: str
     status: SystemStatus
     latestGate: ReleaseGateResult | None = None
+    latestReplayGate: "ReplayGateResult | None" = None
     summary: dict[str, Any]
     markdown: str
 
@@ -885,6 +886,31 @@ class ReplayResult(BaseModel):
     score: float = Field(ge=0, le=1)
     checks: list[ReplayCheck]
     recommendation: str
+
+
+class ReplayGateRequest(BaseModel):
+    target: str = Field(default="production", min_length=1)
+    providerMode: Literal["local", "auto", "live"] = "local"
+    maxLatencyMs: int = Field(default=2500, ge=1)
+    maxCostUsd: float = Field(default=1.0, ge=0)
+    minScore: float = Field(default=0.85, ge=0, le=1)
+    blockedPhrases: list[str] = Field(default_factory=list)
+    requireLiveProvider: bool = False
+
+
+class ReplayGateResult(BaseModel):
+    id: str
+    traceId: str
+    target: str
+    decision: Literal["allow", "review", "block"]
+    score: int = Field(ge=0, le=100)
+    providerMode: Literal["local", "auto", "live"]
+    replay: ReplayResult
+    checks: list[ReleaseGateCheck]
+    originalOutput: str
+    replayedOutput: str
+    recommendations: list[str]
+    generatedAt: str
 
 
 class TraceIngestRequest(BaseModel):

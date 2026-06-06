@@ -144,4 +144,210 @@ class NeuralOpsClient:
             raise NeuralOpsError(f"NeuralOps returned HTTP {exc.code}: {message}") from exc
 
 
-__all__ = ["NeuralOpsClient", "NeuralOpsError"]
+def trace_function(
+    client: Any,
+    name: str,
+    fn: Callable[[], T],
+    *,
+    session: str,
+    environment: Environment = "staging",
+    model: str | None = None,
+    prompt: str = "",
+    tool_calls: str | None = None,
+    strict: bool = False,
+) -> T:
+    start = time.perf_counter()
+    trace_model = model or name
+    trace_prompt = prompt or f"trace_function:{name}"
+    try:
+        result = fn()
+    except Exception as exc:
+        _safe_ingest(
+            client,
+            strict=False,
+            session=session,
+            environment=environment,
+            model=trace_model,
+            tokens=_estimate_tokens(trace_prompt),
+            latency_ms=_elapsed_ms(start),
+            cost_usd=0.0,
+            status="failed",
+            score=0.0,
+            prompt=trace_prompt,
+            output=str(exc),
+            tool_calls=tool_calls,
+            risk_flags=["sdk-captured-error"],
+        )
+        raise
+
+    _safe_ingest(
+        client,
+        strict=strict,
+        session=session,
+        environment=environment,
+        model=trace_model,
+        tokens=_estimate_tokens(f"{trace_prompt}\n{result}"),
+        latency_ms=_elapsed_ms(start),
+        cost_usd=0.0,
+        status="success",
+        score=1.0,
+        prompt=trace_prompt,
+        output=str(result),
+        tool_calls=tool_calls,
+        risk_flags=["sdk-trace-function"],
+    )
+    return result
+
+
+def wrap_openai(
+    neuralops_client: Any,
+    openai_client: Any,
+    *,
+    session: str,
+    environment: Environment = "staging",
+    strict: bool = False,
+) -> Any:
+    original_create = openai_client.chat.completions.create
+
+    class WrappedCompletions:
+        def create(self, **kwargs: Any) -> Any:
+            start = time.perf_counter()
+            prompt = _messages_text(kwargs.get("messages", []))
+            model = str(kwargs.get("model") or "openai-compatible")
+            try:
+                response = original_create(**kwargs)
+            except Exception as exc:
+                _safe_ingest(
+                    neuralops_client,
+                    strict=False,
+                    session=session,
+                    environment=environment,
+                    model=model,
+                    tokens=_estimate_tokens(prompt),
+                    latency_ms=_elapsed_ms(start),
+                    cost_usd=0.0,
+                    status="failed",
+                    score=0.0,
+                    prompt=prompt,
+                    output=str(exc),
+                    risk_flags=["sdk-captured-error"],
+                )
+                raise
+
+            output = _response_text(response)
+            _safe_ingest(
+                neuralops_client,
+                strict=strict,
+                session=session,
+                environment=environment,
+                model=str(getattr(response, "model", model) or model),
+                tokens=_response_tokens(response) or _estimate_tokens(f"{prompt}\n{output}"),
+                latency_ms=_elapsed_ms(start),
+                cost_usd=0.0,
+                status="success",
+                score=1.0,
+                prompt=prompt,
+                output=output,
+                risk_flags=["sdk-openai-wrapper"],
+            )
+            return response
+
+    class WrappedChat:
+        completions = WrappedCompletions()
+
+    class WrappedClient:
+        chat = WrappedChat()
+
+    return WrappedClient()
+
+
+class NeuralOpsFastAPIMiddleware:
+    def __init__(
+        self,
+        app: Any,
+        client: NeuralOpsClient,
+        *,
+        service_name: str = "fastapi-app",
+        environment: Environment = "prod",
+        strict: bool = False,
+    ) -> None:
+        self.app = app
+        self.client = client
+        self.service_name = service_name
+        self.environment = environment
+        self.strict = strict
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        start = time.perf_counter()
+        status_code = 500
+
+        async def send_wrapper(message: dict[str, Any]) -> None:
+            nonlocal status_code
+            if message.get("type") == "http.response.start":
+                status_code = int(message.get("status", 500))
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+        path = str(scope.get("path", "/"))
+        _safe_ingest(
+            self.client,
+            strict=self.strict,
+            session=str(scope.get("headers", []))[:32] or f"req-{int(time.time())}",
+            environment=self.environment,
+            model=self.service_name,
+            tokens=1,
+            latency_ms=_elapsed_ms(start),
+            cost_usd=0.0,
+            status="success" if status_code < 500 else "failed",
+            score=1.0 if status_code < 500 else 0.0,
+            prompt=f"{scope.get('method', 'GET')} {path}",
+            output=f"HTTP {status_code}",
+            tool_calls="fastapi.middleware",
+            risk_flags=["sdk-fastapi-middleware"],
+        )
+
+
+def _safe_ingest(client: Any, strict: bool, **kwargs: Any) -> None:
+    try:
+        client.ingest_trace(**kwargs)
+    except Exception:
+        if strict:
+            raise
+
+
+def _estimate_tokens(text: str) -> int:
+    return max(1, len(str(text).split()) + len(str(text)) // 5)
+
+
+def _elapsed_ms(start: float) -> int:
+    return max(1, int((time.perf_counter() - start) * 1000))
+
+
+def _messages_text(messages: list[dict[str, Any]]) -> str:
+    return "\n".join(f"{message.get('role', 'message')}: {message.get('content', '')}" for message in messages)
+
+
+def _response_text(response: Any) -> str:
+    choices = getattr(response, "choices", None)
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message") if isinstance(choices[0], dict) else getattr(choices[0], "message", None)
+        if isinstance(message, dict) and message.get("content") is not None:
+            return str(message["content"])
+        if getattr(message, "content", None) is not None:
+            return str(message.content)
+    return str(response)
+
+
+def _response_tokens(response: Any) -> int:
+    usage = getattr(response, "usage", None)
+    if isinstance(usage, dict):
+        return int(usage.get("total_tokens", 0) or 0)
+    if usage is not None and getattr(usage, "total_tokens", None):
+        return int(usage.total_tokens)
+    return 0
+
+
+__all__ = ["NeuralOpsClient", "NeuralOpsError", "NeuralOpsFastAPIMiddleware", "trace_function", "wrap_openai"]

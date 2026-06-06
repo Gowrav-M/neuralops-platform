@@ -70,8 +70,21 @@ test('all product tabs render without console errors and Evidence gate runs', as
   await page.locator('.agent-form-grid select').nth(1).selectOption('local');
   const agentRunResponse = page.waitForResponse((response) => response.url().includes('/api/agent-runtime/run'));
   await page.getByRole('button', { name: /Run Agent \+ Create Trace/i }).click();
-  expect((await agentRunResponse).ok()).toBe(true);
+  const agentRun = await agentRunResponse;
+  expect(agentRun.ok()).toBe(true);
+  await agentRun.json();
   await expect(page.getByText(/Agent run created trace/i)).toBeVisible();
+
+  await sidebar.getByRole('button', { name: 'Traces', exact: true }).click();
+  await expect(page.locator('.dense-table tbody tr').first()).toBeVisible();
+  await page.locator('.dense-table tbody tr').first().click();
+  await page.getByRole('button', { name: 'Replay Gate' }).click();
+  const replayResponse = page.waitForResponse((response) => response.url().includes('/replay-gate'));
+  await page.getByRole('button', { name: 'Run Replay Gate' }).click();
+  expect((await replayResponse).ok()).toBe(true);
+  await expect(page.getByText('Replay Decision', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Replay Policy Decision/i)).toBeVisible();
+  await page.locator('.drawer-close-btn').click();
 
   await sidebar.getByRole('button', { name: 'Detection', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Detection & Response' })).toBeVisible();
