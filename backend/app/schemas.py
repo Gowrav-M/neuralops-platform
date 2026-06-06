@@ -310,6 +310,7 @@ class SystemStatus(BaseModel):
 
 class ReleaseGateRequest(BaseModel):
     target: str = Field(default="production", min_length=1)
+    traceEnvironment: Literal["prod", "staging", "dev", "all"] | None = None
     promptId: str | None = None
     maxLatencyMs: int = Field(default=2500, ge=1)
     maxErrorRate: float = Field(default=0.05, ge=0, le=1)
@@ -318,11 +319,13 @@ class ReleaseGateRequest(BaseModel):
     requireAuth: bool = True
     requireSyntheticCanary: bool = False
     syntheticCanaryMaxAgeMinutes: int = Field(default=60, ge=1, le=1440)
+    includeSyntheticTraces: bool = False
 
 
 class ReleaseGateDefinitionCreate(BaseModel):
     name: str = Field(min_length=1)
     target: str = Field(default="production", min_length=1)
+    traceEnvironment: Literal["prod", "staging", "dev", "all"] | None = None
     promptId: str | None = None
     maxLatencyMs: int = Field(default=2500, ge=1)
     maxErrorRate: float = Field(default=0.05, ge=0, le=1)
@@ -331,12 +334,14 @@ class ReleaseGateDefinitionCreate(BaseModel):
     requireAuth: bool = True
     requireSyntheticCanary: bool = False
     syntheticCanaryMaxAgeMinutes: int = Field(default=60, ge=1, le=1440)
+    includeSyntheticTraces: bool = False
     description: str = ""
 
 
 class ReleaseGateDefinitionPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1)
     target: str | None = Field(default=None, min_length=1)
+    traceEnvironment: Literal["prod", "staging", "dev", "all"] | None = None
     promptId: str | None = None
     maxLatencyMs: int | None = Field(default=None, ge=1)
     maxErrorRate: float | None = Field(default=None, ge=0, le=1)
@@ -345,6 +350,7 @@ class ReleaseGateDefinitionPatch(BaseModel):
     requireAuth: bool | None = None
     requireSyntheticCanary: bool | None = None
     syntheticCanaryMaxAgeMinutes: int | None = Field(default=None, ge=1, le=1440)
+    includeSyntheticTraces: bool | None = None
     description: str | None = None
 
 

@@ -734,6 +734,7 @@ def list_release_gate_definitions() -> list[ReleaseGateDefinition]:
 def release_gate_request_from_definition(gate: ReleaseGateDefinition, target_override: str | None = None) -> ReleaseGateRequest:
     return ReleaseGateRequest(
         target=target_override or gate.target,
+        traceEnvironment=gate.traceEnvironment,
         promptId=gate.promptId,
         maxLatencyMs=gate.maxLatencyMs,
         maxErrorRate=gate.maxErrorRate,
@@ -742,6 +743,7 @@ def release_gate_request_from_definition(gate: ReleaseGateDefinition, target_ove
         requireAuth=gate.requireAuth,
         requireSyntheticCanary=gate.requireSyntheticCanary,
         syntheticCanaryMaxAgeMinutes=gate.syntheticCanaryMaxAgeMinutes,
+        includeSyntheticTraces=gate.includeSyntheticTraces,
     )
 
 
@@ -789,8 +791,35 @@ def synthetic_canary_release_gate_check(request: ReleaseGateRequest) -> ReleaseG
     )
 
 
+def trace_environment_for_release_target(request: ReleaseGateRequest) -> str:
+    if request.traceEnvironment is not None:
+        return request.traceEnvironment
+    target = request.target.strip().lower()
+    if target in {"production", "prod", "live"} or "prod" in target:
+        return "prod"
+    if target in {"staging", "stage", "preview"} or "stag" in target:
+        return "staging"
+    if target in {"dev", "development", "local", "ci", "test"} or target.startswith("ci-"):
+        return "dev"
+    return "all"
+
+
+def is_synthetic_trace(trace: Trace) -> bool:
+    return trace.model == "neuralops-synthetic-canary" or "synthetic-canary" in trace.riskFlags
+
+
+def release_gate_metric_traces(request: ReleaseGateRequest, traces: list[Trace]) -> tuple[list[Trace], str, int]:
+    trace_environment = trace_environment_for_release_target(request)
+    scoped = traces if trace_environment == "all" else [trace for trace in traces if trace.environment == trace_environment]
+    scoped_count = len(scoped)
+    if not request.includeSyntheticTraces:
+        scoped = [trace for trace in scoped if not is_synthetic_trace(trace)]
+    return scoped, trace_environment, scoped_count
+
+
 def run_release_gate(request: ReleaseGateRequest) -> ReleaseGateResult:
-    traces = [Trace.model_validate(item) for item in scoped_records("traces")]
+    all_traces = [Trace.model_validate(item) for item in scoped_records("traces")]
+    traces, trace_environment, scoped_trace_count = release_gate_metric_traces(request, all_traces)
     incidents = [Incident.model_validate(item) for item in scoped_records("incidents")]
     prompts = [PromptVersion.model_validate(item) for item in scoped_records("prompts")]
     rag_records = [RagQuery.model_validate(item) for item in scoped_records("rag")]
@@ -806,10 +835,13 @@ def run_release_gate(request: ReleaseGateRequest) -> ReleaseGateResult:
     checks = [
         ReleaseGateCheck(
             id="trace_volume",
-            label="Production Trace Evidence",
+            label="Target Trace Evidence",
             status="pass" if len(traces) >= 3 else "warn" if traces else "fail",
-            reason="Release needs replayable trace evidence.",
-            evidence=f"{len(traces)} trace(s) available",
+            reason="Release needs replayable non-synthetic trace evidence for the selected target.",
+            evidence=(
+                f"{len(traces)} metric trace(s) for {trace_environment}; "
+                f"{scoped_trace_count} total target trace(s); {len(all_traces)} workspace trace(s)"
+            ),
         ),
         ReleaseGateCheck(
             id="error_rate",
@@ -1036,6 +1068,7 @@ def run_release_autopilot(request: ReleaseAutopilotRequest) -> ReleaseAutopilotR
     gate = run_release_gate(
         ReleaseGateRequest(
             target=request.target,
+            traceEnvironment="all",
             maxErrorRate=1.0,
             minEvalPassRate=0,
             requireLiveProvider=request.requireLiveProvider,

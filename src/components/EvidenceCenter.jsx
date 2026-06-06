@@ -30,6 +30,7 @@ export default function EvidenceCenter({ addToast }) {
   const [gateForm, setGateForm] = useState({
     name: 'Production AI Release Gate',
     target: 'production',
+    traceEnvironment: 'auto',
     maxLatencyMs: 2500,
     maxErrorRate: 0.05,
     minEvalPassRate: 0.85,
@@ -37,6 +38,7 @@ export default function EvidenceCenter({ addToast }) {
     requireAuth: true,
     requireSyntheticCanary: true,
     syntheticCanaryMaxAgeMinutes: 60,
+    includeSyntheticTraces: false,
   });
   const [running, setRunning] = useState(false);
   const [error, setError] = useState('');
@@ -71,6 +73,7 @@ export default function EvidenceCenter({ addToast }) {
     try {
       const gate = await runReleaseGate({
         target: gateForm.target,
+        traceEnvironment: gateForm.traceEnvironment === 'auto' ? null : gateForm.traceEnvironment,
         maxLatencyMs: Number(gateForm.maxLatencyMs),
         maxErrorRate: Number(gateForm.maxErrorRate),
         minEvalPassRate: Number(gateForm.minEvalPassRate),
@@ -78,6 +81,7 @@ export default function EvidenceCenter({ addToast }) {
         requireAuth: Boolean(gateForm.requireAuth),
         requireSyntheticCanary: Boolean(gateForm.requireSyntheticCanary),
         syntheticCanaryMaxAgeMinutes: Number(gateForm.syntheticCanaryMaxAgeMinutes),
+        includeSyntheticTraces: Boolean(gateForm.includeSyntheticTraces),
       });
       setReport((currentReport) => ({
         ...(currentReport || {}),
@@ -103,6 +107,7 @@ export default function EvidenceCenter({ addToast }) {
     try {
       const gate = await createReleaseGate({
         ...gateForm,
+        traceEnvironment: gateForm.traceEnvironment === 'auto' ? null : gateForm.traceEnvironment,
         maxLatencyMs: Number(gateForm.maxLatencyMs),
         maxErrorRate: Number(gateForm.maxErrorRate),
         minEvalPassRate: Number(gateForm.minEvalPassRate),
@@ -195,6 +200,16 @@ export default function EvidenceCenter({ addToast }) {
                 </select>
               </label>
               <label>
+                <span className="metric-label">Trace Scope</span>
+                <select className="filter-select" value={gateForm.traceEnvironment} onChange={(event) => updateGateField('traceEnvironment', event.target.value)}>
+                  <option value="auto">auto from target</option>
+                  <option value="prod">prod</option>
+                  <option value="staging">staging</option>
+                  <option value="dev">dev</option>
+                  <option value="all">all</option>
+                </select>
+              </label>
+              <label>
                 <span className="metric-label">Max Latency</span>
                 <input className="filter-search-input" type="number" min="1" value={gateForm.maxLatencyMs} onChange={(event) => updateGateField('maxLatencyMs', event.target.value)} />
               </label>
@@ -222,6 +237,10 @@ export default function EvidenceCenter({ addToast }) {
                 <input type="checkbox" checked={gateForm.requireSyntheticCanary} onChange={(event) => updateGateField('requireSyntheticCanary', event.target.checked)} />
                 <span>Require fresh canary</span>
               </label>
+              <label className="gate-checkbox">
+                <input type="checkbox" checked={gateForm.includeSyntheticTraces} onChange={(event) => updateGateField('includeSyntheticTraces', event.target.checked)} />
+                <span>Include synthetic traces</span>
+              </label>
             </div>
 
             <div className="gate-definition-list">
@@ -231,6 +250,7 @@ export default function EvidenceCenter({ addToast }) {
                     <strong>{gate.name}</strong>
                     <span className="code-font">
                       {gate.id} | {gate.target} | latency {gate.maxLatencyMs}ms | eval {(gate.minEvalPassRate * 100).toFixed(0)}% | canary {gate.requireSyntheticCanary ? `${gate.syntheticCanaryMaxAgeMinutes}m` : 'optional'}
+                      {' '}| trace {gate.traceEnvironment || 'auto'}{gate.includeSyntheticTraces ? ' + synthetic' : ''}
                     </span>
                   </div>
                   <div className="gate-row-actions">
