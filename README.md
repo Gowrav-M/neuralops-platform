@@ -111,6 +111,16 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/connect/verify `
 
 That verification writes a trace and audit event. Full setup notes are in [docs/connect.md](docs/connect.md). Local SDK source lives in [sdk/javascript](sdk/javascript) and [sdk/python](sdk/python).
 
+For a developer or CI job, use the SDK CLI doctor to prove the integration from the terminal:
+
+```powershell
+$env:NEURALOPS_API_URL = "http://localhost:8000"
+$env:NEURALOPS_API_KEY = "<server-side NeuralOps key>"
+node sdk/javascript/bin/neuralops.mjs doctor --check-gateway
+```
+
+The doctor checks backend health, writes a real trace when a key is present, and reports gateway `not_configured` as a warning instead of pretending a provider is live.
+
 Route a governed model call through the gateway:
 
 ```powershell

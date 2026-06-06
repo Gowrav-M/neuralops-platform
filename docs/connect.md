@@ -9,6 +9,30 @@ NeuralOps is useful only when real traces enter the backend. The Connect workflo
 5. Run "Verify Connection + Store Trace" or "Route First LLM Call" to write real trace and audit evidence.
 6. Open Dashboard, Traces, Evaluations, Costs, and Evidence to see the backend state update.
 
+## One-Command Connection Proof
+
+Use the JavaScript SDK CLI when you want a terminal or CI proof that NeuralOps is connected:
+
+```powershell
+$env:NEURALOPS_API_URL = "http://localhost:8000"
+$env:NEURALOPS_API_KEY = "<server-side NeuralOps key>"
+node sdk/javascript/bin/neuralops.mjs doctor --check-gateway
+```
+
+The doctor command:
+
+- checks `/health`
+- writes a real trace through `/api/traces/ingest`
+- optionally probes `/api/gateway/openai/v1/chat/completions`
+- redacts the API key from all output
+- treats `503 not_configured` from the gateway as an honest warning, not a fake success
+
+To only write a connectivity trace:
+
+```powershell
+node sdk/javascript/bin/neuralops.mjs send-test-trace --environment staging
+```
+
 ## API Contract
 
 ```text
