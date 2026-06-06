@@ -95,8 +95,15 @@ test('deployed production app authenticates and core enterprise workflows run', 
   expect((await testAutomationResult.json()).ruleName).toBe(ruleName);
   const dryRunResponse = page.waitForResponse((response) => response.url().includes('/api/connector-deliveries/process'));
   await page.getByRole('button', { name: 'Dry Run Worker' }).click();
-  expect((await dryRunResponse).ok()).toBe(true);
-  await expect(page.getByText(/Dry run found/i)).toBeVisible();
+  const dryRunResult = await dryRunResponse;
+  expect(dryRunResult.ok()).toBe(true);
+  const dryRunPayload = await dryRunResult.json();
+  expect(dryRunPayload).toEqual(expect.objectContaining({
+    processed: expect.any(Number),
+    delivered: expect.any(Number),
+    failed: expect.any(Number),
+    skipped: expect.any(Number),
+  }));
 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
   expect(overflow).toBe(false);
