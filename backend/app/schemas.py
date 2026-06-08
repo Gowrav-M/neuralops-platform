@@ -412,6 +412,32 @@ class EvidenceReport(BaseModel):
     markdown: str
 
 
+class EvidenceExportArtifact(BaseModel):
+    label: str
+    type: Literal["json", "markdown", "api", "ui"]
+    path: str
+    digest: str | None = None
+
+
+class EvidenceExportPack(BaseModel):
+    schemaVersion: Literal["neuralops.evidence-pack.v1"] = "neuralops.evidence-pack.v1"
+    id: str
+    generatedAt: str
+    workspaceId: str
+    subject: str
+    decision: Literal["allow", "review", "block"]
+    score: int = Field(ge=0, le=100)
+    summary: dict[str, Any]
+    artifacts: list[EvidenceExportArtifact]
+    evidence: EvidenceReport
+    readiness: ProductionReadinessReport
+    gateway: dict[str, Any]
+    accessAudit: list[AuditEvent]
+    automation: dict[str, Any]
+    markdown: str
+    digest: str
+
+
 class ReleaseAutopilotRequest(BaseModel):
     candidateName: str = Field(min_length=1)
     candidateInstructions: str = Field(min_length=1)

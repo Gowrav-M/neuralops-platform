@@ -82,6 +82,10 @@ export function fetchEvidenceReport() {
   return request('/api/evidence');
 }
 
+export function fetchEvidenceExportPack() {
+  return request('/api/evidence/export', { method: 'POST' });
+}
+
 export function runReleaseAutopilot(payload) {
   return request('/api/release-autopilot/run', {
     method: 'POST',

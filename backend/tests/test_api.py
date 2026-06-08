@@ -1,5 +1,8 @@
 from collections.abc import Generator
 import os
+from copy import deepcopy
+from hashlib import sha256
+import json
 from pathlib import Path
 from typing import Any
 
@@ -570,6 +573,60 @@ def test_dataset_replay_gate_returns_review_evidence_when_workspace_has_no_trace
     evidence = client.get("/api/evidence").json()
     assert evidence["latestDatasetReplayGate"]["id"] == payload["id"]
     assert evidence["summary"]["latestDatasetReplayGateDecision"] == "review"
+
+
+def test_evidence_export_pack_contains_reviewer_artifacts_without_raw_secrets(client: TestClient) -> None:
+    key_response = client.post(
+        "/api/settings/api-keys",
+        json={"name": "export pack ingest", "role": "Developer", "environment": "all", "scopes": ["trace:ingest"]},
+    )
+    token = key_response.json()["token"]
+    client.post(
+        "/api/traces/ingest",
+        headers={"x-neuralops-key": token},
+        json={
+            "session": "export-pack-session",
+            "environment": "prod",
+            "model": "gpt-export",
+            "tokens": 140,
+            "latencyMs": 420,
+            "status": "success",
+            "score": 0.93,
+            "prompt": "Summarize billing policy.",
+            "output": "Billing is monthly by workspace.",
+        },
+    )
+    client.post(
+        "/api/release-gate/run",
+        json={
+            "target": "production",
+            "traceEnvironment": "prod",
+            "requireAuth": False,
+            "requireLiveProvider": False,
+        },
+    )
+
+    response = client.post("/api/evidence/export")
+
+    assert response.status_code == 200
+    pack = response.json()
+    canonical = deepcopy(pack)
+    digest = canonical.pop("digest")
+    expected_digest = "sha256=" + sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    assert pack["schemaVersion"] == "neuralops.evidence-pack.v1"
+    assert pack["id"].startswith("evidence_pack_")
+    assert digest == expected_digest
+    assert pack["workspaceId"] == "local-workspace"
+    assert pack["summary"]["latestGateDecision"] in {"allow", "review", "block"}
+    assert any(artifact["type"] == "json" and artifact["path"] == "/api/evidence/export" for artifact in pack["artifacts"])
+    assert "NeuralOps Release Evidence Pack" in pack["markdown"]
+    assert "Production Readiness" in pack["markdown"]
+    assert token not in response.text
+
+    audit = client.get("/api/audit").json()
+    assert any(event["type"] == "evidence_pack.export" and event["subject"] == pack["id"] for event in audit)
 
 
 def test_automation_rule_records_blocked_trace_webhook_action(client: TestClient) -> None:

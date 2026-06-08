@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from copy import deepcopy
 from hashlib import sha256
 import hmac
+import json
 import os
 import re
 from secrets import compare_digest, token_hex
@@ -73,6 +74,8 @@ from .schemas import (
     AgentRunResponse,
     DashboardSnapshot,
     Evaluator,
+    EvidenceExportArtifact,
+    EvidenceExportPack,
     EvidenceReport,
     FeatureTruth,
     Incident,
@@ -2204,6 +2207,149 @@ def build_evidence_report() -> EvidenceReport:
     return report
 
 
+def recent_access_audit(limit: int = 20) -> list[AuditEvent]:
+    events = [
+        AuditEvent.model_validate(item)
+        for item in scoped_records("audit")
+        if str(item.get("type", "")).startswith(("access.", "workspace."))
+    ]
+    return sorted(events, key=lambda item: item.createdAt, reverse=True)[:limit]
+
+
+def render_evidence_pack_markdown(pack_id: str, generated_at: str, evidence: EvidenceReport, readiness: ProductionReadinessReport, gateway: dict[str, Any], access_audit: list[AuditEvent], automation: dict[str, Any]) -> str:
+    latest_gate = evidence.latestGate
+    gateway_metrics_payload = gateway.get("metrics", {})
+    lines = [
+        "# NeuralOps Release Evidence Pack",
+        "",
+        f"- Pack ID: `{pack_id}`",
+        f"- Generated: {generated_at}",
+        f"- Workspace: `{evidence.status.workspaceId}`",
+        f"- Decision: **{readiness.decision.upper()}**",
+        f"- Readiness score: `{readiness.score}/100`",
+        f"- Storage: `{evidence.status.storage}`",
+        f"- Auth required: `{evidence.status.authRequired}`",
+        "",
+        "## Executive Summary",
+        f"- Latest release gate: `{latest_gate.decision if latest_gate else 'not_run'}`",
+        f"- Latest dataset replay gate: `{evidence.summary.get('latestDatasetReplayGateDecision', 'not_run')}`",
+        f"- Gateway requests: `{gateway_metrics_payload.get('totalRequests', 0)}` total, `{gateway_metrics_payload.get('routedRequests', 0)}` routed",
+        f"- Automation rules: `{automation.get('rules', 0)}`, delivery attempts: `{automation.get('deliveries', 0)}`",
+        f"- Access audit events: `{len(access_audit)}`",
+        "",
+        "## Production Readiness",
+        *[f"- **{check.label}**: `{check.state}` - {check.detail}" for check in readiness.checks],
+        "",
+        "## Feature Truth",
+        *[f"- **{feature.label}**: `{feature.state}` - {feature.evidence}" for feature in evidence.status.features],
+    ]
+    if latest_gate:
+        lines.extend(
+            [
+                "",
+                "## Release Gate",
+                f"- Gate: `{latest_gate.gateName or latest_gate.gateId or latest_gate.id}`",
+                f"- Decision: `{latest_gate.decision}`",
+                f"- Score: `{latest_gate.score}/100`",
+                *[f"- **{check.label}**: `{check.status}` - {check.evidence}" for check in latest_gate.checks],
+            ]
+        )
+    latest_requests = gateway.get("latestRequests", [])
+    if latest_requests:
+        lines.extend(["", "## Gateway Route Evidence"])
+        for request in latest_requests[:5]:
+            provider = request.get("selectedProvider") or {}
+            lines.append(
+                f"- `{request.get('status')}` {request.get('environment')} via `{provider.get('label', 'none')}` "
+                f"strategy `{request.get('routingStrategy')}`, cache `{request.get('cacheStatus')}`, budget `{request.get('budgetDecision')}`"
+            )
+    if access_audit:
+        lines.extend(["", "## Access Audit"])
+        for event in access_audit[:8]:
+            lines.append(f"- `{event.decision}` {event.actor} -> `{event.subject}`: {event.summary}")
+    lines.extend(
+        [
+            "",
+            "## Digest",
+            "- The JSON pack includes a SHA-256 digest over the generated evidence payload.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def build_evidence_export_pack() -> EvidenceExportPack:
+    evidence = build_evidence_report()
+    readiness = build_production_readiness()
+    generated_at = datetime.now().isoformat()
+    pack_id = f"evidence_pack_{token_hex(6)}"
+    gateway_snapshot = {
+        "metrics": gateway_metrics().model_dump(),
+        "latestRequests": [request.model_dump() for request in gateway_request_logs(limit=10)],
+        "costSuggestions": [suggestion.model_dump() for suggestion in gateway_cost_suggestions()],
+    }
+    access_audit = recent_access_audit()
+    automation_snapshot = {
+        "rules": len(list_automation_rules()),
+        "events": len(list_automation_events()),
+        "deliveries": len(list_connector_deliveries()),
+        "recentEvents": [event.model_dump() for event in list_automation_events()[:10]],
+    }
+    markdown = render_evidence_pack_markdown(
+        pack_id,
+        generated_at,
+        evidence,
+        readiness,
+        gateway_snapshot,
+        access_audit,
+        automation_snapshot,
+    )
+    summary = {
+        "readinessDecision": readiness.decision,
+        "readinessScore": readiness.score,
+        "evidenceDecision": evidence.summary.get("decision", "review"),
+        "latestGateDecision": evidence.latestGate.decision if evidence.latestGate else "not_run",
+        "latestDatasetReplayGateDecision": evidence.summary.get("latestDatasetReplayGateDecision", "not_run"),
+        "gatewayTotalRequests": gateway_snapshot["metrics"]["totalRequests"],
+        "gatewayRoutedRequests": gateway_snapshot["metrics"]["routedRequests"],
+        "accessAuditEvents": len(access_audit),
+        "automationRules": automation_snapshot["rules"],
+        "automationDeliveries": automation_snapshot["deliveries"],
+    }
+    pack_without_digest = {
+        "schemaVersion": "neuralops.evidence-pack.v1",
+        "id": pack_id,
+        "generatedAt": generated_at,
+        "workspaceId": evidence.status.workspaceId,
+        "subject": "production-ai-release",
+        "decision": readiness.decision,
+        "score": readiness.score,
+        "summary": summary,
+        "artifacts": [
+            EvidenceExportArtifact(label="Evidence pack JSON", type="json", path="/api/evidence/export").model_dump(),
+            EvidenceExportArtifact(label="Evidence pack Markdown", type="markdown", path="download:neuralops-evidence-pack.md").model_dump(),
+            EvidenceExportArtifact(label="Live evidence dashboard", type="ui", path="/#Evidence").model_dump(),
+        ],
+        "evidence": evidence.model_dump(),
+        "readiness": readiness.model_dump(),
+        "gateway": gateway_snapshot,
+        "accessAudit": [event.model_dump() for event in access_audit],
+        "automation": automation_snapshot,
+        "markdown": markdown,
+    }
+    digest = "sha256=" + sha256(json.dumps(pack_without_digest, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+    pack_without_digest["digest"] = digest
+    pack = EvidenceExportPack.model_validate(pack_without_digest)
+    save_scoped_record("evidence_packs", pack.id, pack.model_dump())
+    save_audit_event(
+        "evidence_pack.export",
+        current_user_email(),
+        pack.id,
+        pack.decision,
+        f"Exported release evidence pack {pack.id}: {pack.decision} ({pack.score}/100).",
+    )
+    return pack
+
+
 def api_base_url() -> str:
     return os.getenv("NEURALOPS_PUBLIC_API_URL", "http://localhost:8000").rstrip("/")
 
@@ -3578,6 +3724,12 @@ def run_saved_release_gate(gate_id: str, request: ReleaseGateRunRequest | None =
 @app.get("/api/evidence", response_model=EvidenceReport)
 def evidence_report() -> EvidenceReport:
     return build_evidence_report()
+
+
+@app.post("/api/evidence/export", response_model=EvidenceExportPack)
+def evidence_export_pack() -> EvidenceExportPack:
+    require_permission("release:gate", "evidence.export")
+    return build_evidence_export_pack()
 
 
 @app.post("/api/release-autopilot/run", response_model=ReleaseAutopilotResult)

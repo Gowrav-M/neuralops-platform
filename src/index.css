@@ -912,6 +912,7 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
+  gap: 16px;
   margin-bottom: 4px;
 }
 
@@ -1874,6 +1875,8 @@ body {
 .gate-row-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 10px;
   flex-shrink: 0;
 }

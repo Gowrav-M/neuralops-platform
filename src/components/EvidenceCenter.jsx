@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   createReleaseGate,
+  fetchEvidenceExportPack,
   fetchEvidenceReport,
   fetchGatewayMetrics,
   fetchGatewayRequests,
@@ -31,7 +32,9 @@ export default function EvidenceCenter({ addToast }) {
   const [releaseGates, setReleaseGates] = useState([]);
   const [gatewayMetrics, setGatewayMetrics] = useState(null);
   const [gatewayRequests, setGatewayRequests] = useState([]);
+  const [exportPack, setExportPack] = useState(null);
   const [runMessage, setRunMessage] = useState('');
+  const [exporting, setExporting] = useState(false);
   const [gateForm, setGateForm] = useState({
     name: 'Production AI Release Gate',
     target: 'production',
@@ -184,6 +187,34 @@ export default function EvidenceCenter({ addToast }) {
     }
   };
 
+  const handleGenerateExportPack = async () => {
+    setExporting(true);
+    setError('');
+    setRunMessage('');
+    setExportPack(null);
+    try {
+      const pack = await fetchEvidenceExportPack();
+      setExportPack(pack);
+      setRunMessage(`Evidence pack generated: ${pack.id} (${pack.decision.toUpperCase()}, ${pack.score}/100).`);
+      addToast(`Evidence pack ready: ${pack.decision.toUpperCase()} (${pack.score}/100).`, pack.decision === 'block' ? 'error' : 'success');
+    } catch (err) {
+      setExportPack(null);
+      addToast('Evidence pack export failed.', 'error');
+      setError(err instanceof Error ? err.message : 'Evidence pack export failed');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const downloadExportPack = (format) => {
+    if (!exportPack) return;
+    const isMarkdown = format === 'markdown';
+    const content = isMarkdown ? exportPack.markdown : JSON.stringify(exportPack, null, 2);
+    const extension = isMarkdown ? 'md' : 'json';
+    const mimeType = isMarkdown ? 'text/markdown' : 'application/json';
+    downloadTextFile(`neuralops-evidence-pack-${exportPack.id}.${extension}`, content, mimeType);
+  };
+
   const updateGateField = (field, value) => {
     setGateForm((current) => ({ ...current, [field]: value }));
   };
@@ -203,6 +234,15 @@ export default function EvidenceCenter({ addToast }) {
           </p>
         </div>
         <div className="gate-row-actions">
+          <button className="btn-secondary" onClick={handleGenerateExportPack} disabled={exporting}>
+            {exporting ? 'Generating Pack...' : 'Generate Evidence Pack'}
+          </button>
+          <button className="btn-secondary" onClick={() => downloadExportPack('json')} disabled={!exportPack}>
+            Download JSON
+          </button>
+          <button className="btn-secondary" onClick={() => downloadExportPack('markdown')} disabled={!exportPack}>
+            Download Markdown
+          </button>
           <button className="btn-secondary" onClick={handleRunDatasetReplayGate} disabled={running}>
             {running ? 'Running...' : 'Run Dataset Replay'}
           </button>
@@ -216,6 +256,15 @@ export default function EvidenceCenter({ addToast }) {
         <div className="state-container" style={{ alignItems: 'flex-start', textAlign: 'left' }}>
           <strong>{runMessage}</strong>
           <span>Evidence has been persisted. The larger report is refreshing in the background.</span>
+        </div>
+      )}
+
+      {exportPack && (
+        <div className="state-container" style={{ alignItems: 'flex-start', textAlign: 'left' }}>
+          <strong>Release evidence pack ready</strong>
+          <span style={{ overflowWrap: 'anywhere' }}>
+            Digest {exportPack.digest}. Download JSON for machines or Markdown for PR, auditor, and release review notes.
+          </span>
         </div>
       )}
 
@@ -518,4 +567,16 @@ export default function EvidenceCenter({ addToast }) {
       )}
     </div>
   );
+}
+
+function downloadTextFile(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }

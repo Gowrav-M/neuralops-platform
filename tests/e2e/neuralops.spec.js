@@ -63,6 +63,16 @@ test('all product tabs render without console errors and Evidence gate runs', as
   expect((await datasetReplayResponse).ok()).toBe(true);
   await expect(page.getByText(/Dataset replay gate completed/i)).toBeVisible();
   await expect(page.locator('.table-container span', { hasText: 'Dataset Replay Gate Checks' })).toBeVisible();
+  const evidencePackResponse = page.waitForResponse((response) => response.url().includes('/api/evidence/export') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Generate Evidence Pack' }).click();
+  const evidencePack = await evidencePackResponse;
+  expect(evidencePack.ok()).toBe(true);
+  const evidencePackPayload = await evidencePack.json();
+  expect(evidencePackPayload.schemaVersion).toBe('neuralops.evidence-pack.v1');
+  expect(evidencePackPayload.digest).toMatch(/^sha256=/);
+  await expect(page.getByText('Release evidence pack ready')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Download JSON' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Download Markdown' })).toBeEnabled();
 
   await page.locator('input[value="Production AI Release Gate"]').fill('Playwright Release Gate');
   await page.getByRole('button', { name: 'Save Gate Definition' }).click();
