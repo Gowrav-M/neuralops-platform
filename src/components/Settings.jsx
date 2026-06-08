@@ -47,13 +47,23 @@ export default function Settings({ addToast }) {
   const [nextInvoice, setNextInvoice] = useState(null);
   const [dataSource, setDataSource] = useState('loading');
 
-  const mapTeamMembers = (members) => members.map((member) => ({
-    id: member.id,
-    name: member.name,
-    email: member.email,
-    role: member.role,
-    access: member.access || (member.role === 'Viewer' ? 'Read Only' : 'All Workspace')
-  }));
+  const mapTeamMembers = (members = []) => {
+    const seen = new Set();
+    return members
+      .filter((member) => {
+        const key = `${member.id || ''}:${member.email || ''}`.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .map((member) => ({
+        id: member.id,
+        name: member.name,
+        email: member.email,
+        role: member.role,
+        access: member.access || (member.role === 'Viewer' ? 'Read Only' : 'All Workspace')
+      }));
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -267,7 +277,7 @@ export default function Settings({ addToast }) {
         email: newMemberEmail,
         role: newMemberRole,
       });
-      setTeamMembers((current) => [member, ...current]);
+      setTeamMembers((current) => mapTeamMembers([member, ...current]));
       setNewMemberName('');
       setNewMemberEmail('');
       setNewMemberRole('Developer');
@@ -726,8 +736,8 @@ export default function Settings({ addToast }) {
                 </tr>
               </thead>
               <tbody>
-                {teamMembers.map(tm => (
-                  <tr key={tm.id || tm.email}>
+                {teamMembers.map((tm, index) => (
+                  <tr key={`${tm.id || tm.email}-${index}`}>
                     <td style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
                       <span style={{ fontWeight: 600 }}>{tm.name}</span>
                       <span style={{ color: 'var(--text-secondary)', fontSize: '10px' }}>{tm.email}</span>

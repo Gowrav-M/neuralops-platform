@@ -373,6 +373,13 @@ export default function EvidenceCenter({ addToast }) {
             </div>
           </div>
 
+          <div>
+            <h2 className="section-title">Feature Truth Contract</h2>
+            <p className="page-subtitle">
+              Every visible capability is labeled as persisted, live provider, local drill, or not configured from backend evidence.
+            </p>
+          </div>
+
           <div className="evidence-grid">
             {status.features.map((feature) => (
               <div className="evidence-card" key={feature.id}>

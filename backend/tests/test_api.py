@@ -552,6 +552,26 @@ def test_dataset_replay_gate_blocks_when_any_trace_is_unsafe(client: TestClient)
     assert evidence["summary"]["latestDatasetReplayGateDecision"] == "block"
 
 
+def test_dataset_replay_gate_returns_review_evidence_when_workspace_has_no_traces(client: TestClient) -> None:
+    response = client.post(
+        "/api/replay-gate/dataset/run",
+        json={"target": "production", "traceEnvironment": "prod", "minScore": 0.85},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["decision"] == "review"
+    assert payload["traceCount"] == 0
+    assert payload["score"] == 0
+    assert payload["results"] == []
+    assert any(check["id"] == "dataset_trace_coverage" and check["status"] == "warn" for check in payload["checks"])
+    assert "Ingest production traces" in payload["recommendations"][0]
+
+    evidence = client.get("/api/evidence").json()
+    assert evidence["latestDatasetReplayGate"]["id"] == payload["id"]
+    assert evidence["summary"]["latestDatasetReplayGateDecision"] == "review"
+
+
 def test_automation_rule_records_blocked_trace_webhook_action(client: TestClient) -> None:
     webhook = client.post(
         "/api/settings/webhooks",

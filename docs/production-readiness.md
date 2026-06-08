@@ -73,6 +73,18 @@ node sdk/javascript/bin/neuralops.mjs production ready `
 
 The command calls `/api/production/readiness`, prints every deployment check, and exits non-zero when the decision meets the threshold. Use `--fail-on block` to allow review warnings during staging; use `--fail-on review` for final production launch.
 
+The bundled GitHub Action can run the same readiness gate:
+
+```yaml
+- uses: Gowrav-M/neuralops-platform@main
+  with:
+    mode: production-ready
+    base-url: https://<render-service>.onrender.com
+    qa-token: ${{ secrets.NEURALOPS_QA_AUTH_TOKEN }}
+    workspace-id: production-workspace
+    fail-on: review
+```
+
 Before sharing the public URL, open Settings and configure at least one real workspace operator. Workspace profile and member records are persisted through `/api/workspace/*`, and create/update/delete actions write audit events so the deployment has a basic ownership trail.
 
 For live model calls, use Settings -> AI Provider Gateway Connections or inject provider env vars on Render. The product supports OpenRouter, Vercel AI Gateway, Groq, NVIDIA NIM, OpenAI, Together, Fireworks, Mistral, DeepSeek, Ollama, vLLM, LM Studio, and custom OpenAI-compatible endpoints. Provider API keys are encrypted server-side with `NEURALOPS_SECRET_KEY`; rotate keys before public deployment if any were pasted into local tooling or chat.

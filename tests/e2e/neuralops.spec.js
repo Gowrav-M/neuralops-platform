@@ -22,6 +22,10 @@ const tabs = [
   'Settings',
 ];
 
+async function waitForBackend(page) {
+  await expect(page.getByText('API LIVE')).toBeVisible({ timeout: 20_000 });
+}
+
 test('all product tabs render without console errors and Evidence gate runs', async ({ page }) => {
   const errors = [];
   page.on('console', (message) => {
@@ -33,7 +37,7 @@ test('all product tabs render without console errors and Evidence gate runs', as
 
   await page.goto('/');
   await expect(page.getByRole('button', { name: /NeuralOps/i })).toBeVisible();
-  await expect(page.getByText(/API LIVE|API LOADING/i)).toBeVisible();
+  await waitForBackend(page);
   await expect(page.getByLabel('NeuralOps operator workflow')).toBeVisible();
   await expect(page.getByText('Production Readiness Path')).toBeVisible();
   await expect(page.getByRole('button', { name: /Open Evidence Center/i })).toBeVisible();
@@ -47,8 +51,10 @@ test('all product tabs render without console errors and Evidence gate runs', as
     await expect(page.locator('.main-content-panel h2', { hasText: tab })).toBeVisible();
   }
 
+  const evidenceResponse = page.waitForResponse((response) => response.url().includes('/api/evidence'));
   await sidebar.getByRole('button', { name: 'Evidence', exact: true }).click();
-  await expect(page.getByText('Feature Truth Contract')).toBeVisible();
+  expect((await evidenceResponse).ok()).toBe(true);
+  await expect(page.getByRole('heading', { name: 'Feature Truth Contract' })).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('.dark-panel-title', { hasText: 'Saved Release Gates' })).toBeVisible();
   await page.getByRole('button', { name: /Run Current Config/i }).click();
   await expect(page.getByText(/Release gate completed|Deployment Blockers/i)).toBeVisible();
@@ -132,6 +138,7 @@ test('all product tabs render without console errors and Evidence gate runs', as
 
 test('Connect page creates a key and stores a verification trace', async ({ page }) => {
   await page.goto('/');
+  await waitForBackend(page);
   const sidebar = page.locator('.sidebar-container');
   await sidebar.getByRole('button', { name: 'Connect', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Connect Your AI App' })).toBeVisible();
@@ -168,13 +175,13 @@ test('Connect page creates a key and stores a verification trace', async ({ page
   await expect(page.getByRole('cell', { name: 'neuralops-connect-javascript' }).first()).toBeVisible();
 });
 
-test('Settings workspace members persist through backend RBAC API', async ({ page }) => {
+test('Settings workspace members persist through backend RBAC API', async ({ page }, testInfo) => {
   await page.goto('/');
   const sidebar = page.locator('.sidebar-container');
   await sidebar.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByText('Active Team Members & Role RBAC')).toBeVisible();
 
-  const suffix = Date.now();
+  const suffix = `${testInfo.project.name.replace(/\W+/g, '-')}-${Date.now()}`;
   const email = `trust-${suffix}@example.com`;
 
   await page.getByPlaceholder('e.g. Trust Engineering').fill('Trust Engineering');
@@ -184,7 +191,7 @@ test('Settings workspace members persist through backend RBAC API', async ({ pag
   await page.getByRole('button', { name: 'Add Member' }).click();
   expect((await createResponse).ok()).toBe(true);
 
-  const row = page.locator('tr', { hasText: email });
+  const row = page.locator('tr', { hasText: email }).first();
   await expect(row).toBeVisible();
   const patchResponse = page.waitForResponse((response) => response.url().includes('/api/workspace/members/') && response.request().method() === 'PATCH');
   await row.getByLabel(`Role for ${email}`).selectOption('Viewer');

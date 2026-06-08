@@ -394,6 +394,11 @@ export default function App() {
       });
   };
 
+  const handleTraceCreated = useCallback((trace) => {
+    if (!trace?.id) return;
+    setTraces((current) => [trace, ...current.filter((item) => item.id !== trace.id)]);
+  }, []);
+
   const toggleChaosMode = () => {
     const nextChaos = !chaosActive;
     setChaosActive(nextChaos);
@@ -513,7 +518,7 @@ export default function App() {
           />
         );
       case 'Agents':
-        return <Agents addToast={addToast} />;
+        return <Agents addToast={addToast} onTraceCreated={handleTraceCreated} />;
       case 'Labs':
         return <NeuralLabs addToast={addToast} refreshDashboard={refreshDashboard} />;
       case 'Connect':

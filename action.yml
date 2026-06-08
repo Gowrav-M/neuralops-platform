@@ -2,6 +2,10 @@ name: NeuralOps Release Gate
 description: Run a NeuralOps AI release gate and fail CI when safety, eval, latency, auth, or provider checks miss thresholds.
 
 inputs:
+  mode:
+    description: Gate mode to run: release-gate or production-ready.
+    required: false
+    default: release-gate
   base-url:
     description: NeuralOps API base URL.
     required: false
@@ -22,13 +26,40 @@ inputs:
     description: Whether auth must be enabled for the gate to pass.
     required: false
     default: "false"
+  auth-token:
+    description: Supabase/Auth bearer token for production-ready mode.
+    required: false
+    default: ""
+  qa-token:
+    description: Deployment QA token for production-ready mode.
+    required: false
+    default: ""
+  workspace-id:
+    description: Selected workspace id for authenticated readiness checks.
+    required: false
+    default: ""
 
 runs:
   using: composite
   steps:
-    - name: Run NeuralOps release gate
+    - name: Run NeuralOps gate
       shell: bash
       run: |
+        if [ "${{ inputs.mode }}" = "production-ready" ]; then
+          args=(production ready --base-url "${{ inputs.base-url }}" --fail-on "${{ inputs.fail-on }}")
+          if [ -n "${{ inputs.auth-token }}" ]; then
+            args+=(--auth-token "${{ inputs.auth-token }}")
+          fi
+          if [ -n "${{ inputs.qa-token }}" ]; then
+            args+=(--qa-token "${{ inputs.qa-token }}")
+          fi
+          if [ -n "${{ inputs.workspace-id }}" ]; then
+            args+=(--workspace-id "${{ inputs.workspace-id }}")
+          fi
+          node "$GITHUB_ACTION_PATH/sdk/javascript/bin/neuralops.mjs" "${args[@]}"
+          exit $?
+        fi
+
         if [ -n "${{ inputs.gate-id }}" ]; then
           node "$GITHUB_ACTION_PATH/sdk/javascript/bin/neuralops.mjs" release-gate run \
             --base-url "${{ inputs.base-url }}" \
@@ -42,4 +73,3 @@ runs:
             --require-auth "${{ inputs.require-auth }}" \
             --fail-on "${{ inputs.fail-on }}"
         fi
-

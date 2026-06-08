@@ -1,4 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
+import process from 'node:process';
+
+const e2eRunId = process.env.NEURALOPS_E2E_RUN_ID || String(Date.now());
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -15,10 +18,10 @@ export default defineConfig({
     {
       command: 'python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000',
       url: 'http://127.0.0.1:8000/health',
-      reuseExistingServer: true,
+      reuseExistingServer: false,
       timeout: 60_000,
       env: {
-        NEURALOPS_DB_PATH: 'backend/data/neuralops-e2e.sqlite3',
+        NEURALOPS_DB_PATH: `backend/data/neuralops-e2e-${e2eRunId}.sqlite3`,
         NEURALOPS_DATABASE_URL: '',
         SUPABASE_DB_URL: '',
         DATABASE_URL: '',
@@ -32,7 +35,7 @@ export default defineConfig({
     {
       command: 'cmd /c npm run dev -- --host 127.0.0.1 --port 5173',
       url: 'http://127.0.0.1:5173',
-      reuseExistingServer: true,
+      reuseExistingServer: false,
       timeout: 60_000,
       env: {
         VITE_API_BASE_URL: 'http://127.0.0.1:8000',

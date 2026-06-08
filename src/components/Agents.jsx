@@ -14,7 +14,7 @@ import {
   submitAgentJob,
 } from '../lib/api';
 
-export default function Agents({ addToast }) {
+export default function Agents({ addToast, onTraceCreated }) {
   const [agentsList, setAgentsList] = useState([]);
   const [dataSource, setDataSource] = useState('loading');
   const [agentDefinitions, setAgentDefinitions] = useState([]);
@@ -119,6 +119,7 @@ export default function Agents({ addToast }) {
       });
       setActiveRun(response.run);
       setAgentRuns((prev) => [response.run, ...prev.filter((run) => run.id !== response.run.id)].slice(0, 5));
+      onTraceCreated?.(response.trace);
       addToast(`Agent run created trace ${response.trace.id} with decision ${response.run.decision}.`, response.run.decision === 'block' ? 'error' : 'success');
     } catch (error) {
       addToast(`Agent runtime failed: ${error.message}`, 'error');

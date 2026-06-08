@@ -3,6 +3,9 @@
 const apiBaseUrl = process.env.NEURALOPS_DEPLOYED_API_URL;
 const frontendUrl = process.env.NEURALOPS_DEPLOYED_FRONTEND_URL;
 const authToken = process.env.NEURALOPS_AUTH_TOKEN;
+const qaToken = process.env.NEURALOPS_QA_AUTH_TOKEN;
+const workspaceId = process.env.NEURALOPS_WORKSPACE_ID;
+const failOn = process.env.NEURALOPS_DEPLOYED_FAIL_ON || 'review';
 
 if (!apiBaseUrl) {
   console.error('NEURALOPS_DEPLOYED_API_URL is required.');
@@ -12,6 +15,8 @@ if (!apiBaseUrl) {
 const headers = {
   'Content-Type': 'application/json',
   ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+  ...(qaToken ? { 'x-neuralops-qa-token': qaToken } : {}),
+  ...(workspaceId ? { 'x-neuralops-workspace-id': workspaceId } : {}),
 };
 
 async function getJson(path, options = {}) {
@@ -66,6 +71,24 @@ async function main() {
     });
   } else {
     throw new Error(`/api/system/status failed with ${status.response.status}`);
+  }
+
+  const readiness = await getJson('/api/production/readiness');
+  if (readiness.response.status === 401 && !(authToken || qaToken)) {
+    checks.push({ name: 'production-readiness-auth', status: 'pass', detail: 'readiness endpoint is private' });
+  } else if (readiness.response.ok) {
+    if (readiness.payload.decision === 'block' || (failOn === 'review' && readiness.payload.decision === 'review')) {
+      throw new Error(
+        `/api/production/readiness returned ${readiness.payload.decision} score=${readiness.payload.score}; blockers=${(readiness.payload.blockers || []).join('; ') || 'none'}`
+      );
+    }
+    checks.push({
+      name: 'production-readiness',
+      status: 'pass',
+      detail: `decision=${readiness.payload.decision}; score=${readiness.payload.score}; workspace=${readiness.payload.workspaceId}`,
+    });
+  } else {
+    throw new Error(`/api/production/readiness failed with ${readiness.response.status}`);
   }
 
   const dryRun = await getJson('/api/connector-deliveries/process', {

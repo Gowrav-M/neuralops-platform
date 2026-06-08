@@ -1439,7 +1439,41 @@ def select_dataset_replay_traces(request: ReplayDatasetGateRequest) -> list[Trac
 def run_dataset_replay_gate(request: ReplayDatasetGateRequest) -> ReplayDatasetGateResult:
     traces = select_dataset_replay_traces(request)
     if not traces:
-        raise HTTPException(status_code=404, detail="No traces matched the dataset replay gate request")
+        dataset = ReplayDatasetGateResult(
+            id=f"rdg_{token_hex(6)}",
+            target=request.target,
+            decision="review",
+            score=0,
+            providerMode=request.providerMode,
+            traceCount=0,
+            allowed=0,
+            review=0,
+            blocked=0,
+            traceEnvironment=request.traceEnvironment,
+            results=[],
+            checks=[
+                ReleaseGateCheck(
+                    id="dataset_trace_coverage",
+                    label="Replay Dataset Coverage",
+                    status="warn",
+                    reason="Release replay evidence needs at least one stored trace.",
+                    evidence=f"0 trace(s) matched {request.traceEnvironment} scope with limit {request.limit}.",
+                )
+            ],
+            recommendations=[
+                "Ingest production traces or run a synthetic canary before using dataset replay as release evidence."
+            ],
+            generatedAt=datetime.now().isoformat(),
+        )
+        save_scoped_record("dataset_replay_gates", dataset.id, dataset.model_dump())
+        save_audit_event(
+            "trace.dataset_replay_gate",
+            current_workspace_id(),
+            dataset.id,
+            dataset.decision,
+            "Dataset replay gate needs trace evidence before promotion.",
+        )
+        return dataset
 
     replay_request = dataset_replay_request(request)
     results = [run_trace_replay_gate(trace, replay_request) for trace in traces]

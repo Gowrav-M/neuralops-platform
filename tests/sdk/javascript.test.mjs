@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { NeuralOps, traceFunction, wrapFetch, wrapOpenAI } from '../../sdk/javascript/index.js';
 import { runCli } from '../../sdk/javascript/bin/neuralops.mjs';
 
@@ -546,6 +547,25 @@ test('JavaScript CLI gateway routes prints redacted route evidence', async () =>
   assert.equal(code, 0);
   assert.equal(JSON.parse(output.join('\n'))[0].id, 'gr_1');
   assert.equal(output.join('\n').includes('nop_sk_secret_value'), false);
+});
+
+test('GitHub Action exposes production readiness mode and secured auth inputs', () => {
+  const action = readFileSync('action.yml', 'utf8');
+  assert.match(action, /mode:/);
+  assert.match(action, /production-ready/);
+  assert.match(action, /auth-token:/);
+  assert.match(action, /qa-token:/);
+  assert.match(action, /workspace-id:/);
+  assert.match(action, /production ready/);
+});
+
+test('deployment verifier calls production readiness gate before reporting success', () => {
+  const verifier = readFileSync('scripts/verify-deployment.mjs', 'utf8');
+  assert.match(verifier, /NEURALOPS_DEPLOYED_FAIL_ON/);
+  assert.match(verifier, /NEURALOPS_QA_AUTH_TOKEN/);
+  assert.match(verifier, /x-neuralops-qa-token/);
+  assert.match(verifier, /\/api\/production\/readiness/);
+  assert.match(verifier, /readiness\.payload\.decision/);
 });
 
 function jsonResponse(status, body) {
