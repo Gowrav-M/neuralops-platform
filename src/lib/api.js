@@ -1,6 +1,7 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 let authToken = null;
 let qaAuthToken = null;
+let selectedWorkspaceId = typeof window !== 'undefined' ? window.localStorage.getItem('neuralops-workspace-id') : null;
 
 export function setApiAuthToken(token) {
   authToken = token;
@@ -10,6 +11,16 @@ export function setQaAuthToken(token) {
   qaAuthToken = token;
 }
 
+export function setApiWorkspaceId(workspaceId) {
+  selectedWorkspaceId = workspaceId || null;
+  if (typeof window === 'undefined') return;
+  if (selectedWorkspaceId) {
+    window.localStorage.setItem('neuralops-workspace-id', selectedWorkspaceId);
+  } else {
+    window.localStorage.removeItem('neuralops-workspace-id');
+  }
+}
+
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
@@ -17,6 +28,7 @@ async function request(path, options = {}) {
       'Content-Type': 'application/json',
       ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       ...(qaAuthToken ? { 'x-neuralops-qa-token': qaAuthToken } : {}),
+      ...(selectedWorkspaceId ? { 'x-neuralops-workspace-id': selectedWorkspaceId } : {}),
       ...(options.headers || {}),
     },
   });
@@ -138,6 +150,10 @@ export function fetchConnectGuide() {
 
 export function fetchOnboarding() {
   return request('/api/onboarding');
+}
+
+export function fetchProductionReadiness() {
+  return request('/api/production/readiness');
 }
 
 export function fetchConnectivity() {
@@ -452,6 +468,21 @@ export function fetchWorkspace() {
 
 export function fetchWorkspaceMembers() {
   return request('/api/workspace/members');
+}
+
+export function fetchWorkspaceInvites() {
+  return request('/api/workspace/invites');
+}
+
+export function createWorkspaceInvite(payload) {
+  return request('/api/workspace/invites', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function acceptWorkspaceInvite(token) {
+  return request(`/api/workspace/invites/${encodeURIComponent(token)}/accept`, { method: 'POST' });
 }
 
 export function createWorkspaceMember(payload) {

@@ -194,6 +194,78 @@ def test_access_policy_exposes_role_matrix_and_permission_simulation(tmp_path: P
         os.environ.pop("SUPABASE_JWT_SECRET", None)
 
 
+def test_workspace_invites_allow_joining_without_leaking_unaccepted_workspaces(tmp_path: Path) -> None:
+    database.DB_PATH = tmp_path / "neuralops-invite-test.sqlite3"
+    database.POSTGRES_URL = None
+    os.environ["NEURALOPS_DB_PATH"] = str(database.DB_PATH)
+    os.environ["NEURALOPS_AUTH_REQUIRED"] = "true"
+    os.environ["SUPABASE_JWT_SECRET"] = "test-jwt-secret"
+    try:
+        with TestClient(app) as test_client:
+            owner_headers = auth_header("owner@example.com", "owner-workspace")
+            joiner_headers = auth_header("joiner@example.com", "joiner-home")
+            selected_joiner_headers = {**joiner_headers, "x-neuralops-workspace-id": "owner-workspace"}
+
+            owner_workspace = test_client.get("/api/workspace", headers=owner_headers)
+            assert owner_workspace.status_code == 200
+            assert owner_workspace.json()["id"] == "owner-workspace"
+
+            denied_before_invite = test_client.get("/api/workspace", headers=selected_joiner_headers)
+            assert denied_before_invite.status_code == 403
+            assert denied_before_invite.json()["detail"]["code"] == "workspace_access_denied"
+
+            invite = test_client.post(
+                "/api/workspace/invites",
+                headers=owner_headers,
+                json={"email": "joiner@example.com", "role": "Developer", "expiresInHours": 24},
+            )
+            assert invite.status_code == 200
+            invite_payload = invite.json()
+            assert invite_payload["workspaceId"] == "owner-workspace"
+            assert invite_payload["status"] == "pending"
+            assert invite_payload["token"].startswith("wsi_")
+
+            accepted = test_client.post(f"/api/workspace/invites/{invite_payload['token']}/accept", headers=joiner_headers)
+            assert accepted.status_code == 200
+            assert accepted.json()["workspaceId"] == "owner-workspace"
+            assert accepted.json()["member"]["role"] == "Developer"
+
+            joined_workspace = test_client.get("/api/workspace", headers=selected_joiner_headers)
+            assert joined_workspace.status_code == 200
+            assert joined_workspace.json()["id"] == "owner-workspace"
+
+            members = test_client.get("/api/workspace/members", headers=owner_headers)
+            assert any(member["email"] == "joiner@example.com" for member in members.json())
+    finally:
+        os.environ.pop("NEURALOPS_AUTH_REQUIRED", None)
+        os.environ.pop("SUPABASE_JWT_SECRET", None)
+
+
+def test_production_readiness_reports_tenant_controls(tmp_path: Path) -> None:
+    database.DB_PATH = tmp_path / "neuralops-readiness-test.sqlite3"
+    database.POSTGRES_URL = None
+    os.environ["NEURALOPS_DB_PATH"] = str(database.DB_PATH)
+    os.environ["NEURALOPS_AUTH_REQUIRED"] = "true"
+    os.environ["SUPABASE_JWT_SECRET"] = "test-jwt-secret"
+    try:
+        with TestClient(app) as test_client:
+            owner_headers = auth_header("owner@example.com", "owner-workspace")
+            test_client.get("/api/workspace", headers=owner_headers)
+            readiness = test_client.get("/api/production/readiness", headers=owner_headers)
+            assert readiness.status_code == 200
+            payload = readiness.json()
+            checks = {check["id"]: check for check in payload["checks"]}
+            assert checks["auth_required"]["state"] == "pass"
+            assert checks["workspace_isolation"]["state"] == "pass"
+            assert checks["rbac_enforced"]["state"] == "pass"
+            assert checks["database"]["state"] == "review"
+            assert payload["decision"] == "review"
+            assert payload["workspaceId"] == "owner-workspace"
+    finally:
+        os.environ.pop("NEURALOPS_AUTH_REQUIRED", None)
+        os.environ.pop("SUPABASE_JWT_SECRET", None)
+
+
 def test_automation_rule_creates_incident_from_blocked_release_gate(client: TestClient) -> None:
     rule = client.post(
         "/api/automations",

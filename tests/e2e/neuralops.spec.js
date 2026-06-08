@@ -18,6 +18,7 @@ const tabs = [
   'Detection',
   'Automations',
   'Access',
+  'Readiness',
   'Settings',
 ];
 
@@ -203,15 +204,37 @@ test('Access page exposes role matrix and records permission checks', async ({ p
   await expect(page.getByRole('heading', { name: 'Access Control' })).toBeVisible();
   await expect(page.getByText('Role Permission Matrix')).toBeVisible();
   await expect(page.getByText('Permission Simulator')).toBeVisible();
+  await expect(page.getByText('Workspace Invites')).toBeVisible();
 
   await page.locator('.dark-panel-container select').selectOption('settings:write');
-  await page.locator('.dark-panel-container input').fill('settings.api_keys');
+  await page.getByRole('textbox', { name: 'Subject' }).fill('settings.api_keys');
   const checkResponse = page.waitForResponse((response) => response.url().includes('/api/access/check'));
   await page.getByRole('button', { name: 'Run Permission Check' }).click();
   expect((await checkResponse).ok()).toBe(true);
   await expect(page.getByText(/Access check allow|Access check block/i)).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Access Audit' })).toBeVisible();
 
+  await page.getByPlaceholder('engineer@company.com').fill(`join-${Date.now()}@example.com`);
+  const inviteResponse = page.waitForResponse((response) => response.url().includes('/api/workspace/invites') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Create Invite' }).click();
+  expect((await inviteResponse).ok()).toBe(true);
+  await expect(page.getByText(/Invite created for/i)).toBeVisible();
+  await expect(page.locator('.mono-text', { hasText: /^wsi_/ }).first()).toBeVisible();
+
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+  expect(overflow).toBe(false);
+});
+
+test('Production Readiness page reports deployment gate state', async ({ page }) => {
+  await page.goto('/');
+  const sidebar = page.locator('.sidebar-container');
+  await sidebar.getByRole('button', { name: 'Readiness', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Production Readiness' })).toBeVisible();
+  await expect(page.getByText('Deployment Checks')).toBeVisible();
+  const readinessResponse = page.waitForResponse((response) => response.url().includes('/api/production/readiness'));
+  await page.getByRole('button', { name: 'Run Readiness Check' }).click();
+  expect((await readinessResponse).ok()).toBe(true);
+  await expect(page.getByText('Launch Rule')).toBeVisible();
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
   expect(overflow).toBe(false);
 });

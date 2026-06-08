@@ -1,9 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  acceptWorkspaceInvite,
   checkAccessPermission,
+  createWorkspaceInvite,
   fetchAccessAudit,
   fetchAccessPolicy,
+  fetchWorkspaceInvites,
   fetchWorkspaceMembers,
+  setApiWorkspaceId,
 } from '../lib/api';
 
 const permissionLabels = {
@@ -30,7 +34,11 @@ function decisionClass(decision) {
 export default function AccessCenter({ addToast }) {
   const [policy, setPolicy] = useState(null);
   const [members, setMembers] = useState([]);
+  const [invites, setInvites] = useState([]);
   const [audit, setAudit] = useState([]);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState('Developer');
+  const [acceptToken, setAcceptToken] = useState('');
   const [selectedPermission, setSelectedPermission] = useState('settings:write');
   const [subject, setSubject] = useState('settings.api_keys');
   const [checkResult, setCheckResult] = useState(null);
@@ -49,13 +57,15 @@ export default function AccessCenter({ addToast }) {
   const load = async () => {
     setError('');
     try {
-      const [nextPolicy, nextMembers, nextAudit] = await Promise.all([
+      const [nextPolicy, nextMembers, nextInvites, nextAudit] = await Promise.all([
         fetchAccessPolicy(),
         fetchWorkspaceMembers(),
+        fetchWorkspaceInvites(),
         fetchAccessAudit(),
       ]);
       setPolicy(nextPolicy);
       setMembers(nextMembers);
+      setInvites(nextInvites);
       setAudit(nextAudit);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Access control data unavailable');
@@ -64,11 +74,12 @@ export default function AccessCenter({ addToast }) {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchAccessPolicy(), fetchWorkspaceMembers(), fetchAccessAudit()])
-      .then(([nextPolicy, nextMembers, nextAudit]) => {
+    Promise.all([fetchAccessPolicy(), fetchWorkspaceMembers(), fetchWorkspaceInvites(), fetchAccessAudit()])
+      .then(([nextPolicy, nextMembers, nextInvites, nextAudit]) => {
         if (cancelled) return;
         setPolicy(nextPolicy);
         setMembers(nextMembers);
+        setInvites(nextInvites);
         setAudit(nextAudit);
       })
       .catch((err) => {
@@ -94,6 +105,48 @@ export default function AccessCenter({ addToast }) {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Access check failed');
       addToast('Access check failed.', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createInvite = async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      const invite = await createWorkspaceInvite({
+        email: inviteEmail,
+        role: inviteRole,
+        expiresInHours: 72,
+      });
+      setInvites((current) => [invite, ...current.filter((item) => item.id !== invite.id)]);
+      setInviteEmail('');
+      setInviteRole('Developer');
+      addToast(`Invite created for ${invite.email}.`, 'success');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Invite creation failed');
+      addToast('Invite creation failed.', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const acceptInvite = async (event) => {
+    event.preventDefault();
+    if (!acceptToken.trim()) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await acceptWorkspaceInvite(acceptToken.trim());
+      setApiWorkspaceId(result.workspaceId);
+      setAcceptToken('');
+      addToast(`Joined workspace ${result.workspaceId}.`, 'success');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Invite acceptance failed');
+      addToast('Invite acceptance failed.', 'error');
     } finally {
       setBusy(false);
     }
@@ -140,6 +193,67 @@ export default function AccessCenter({ addToast }) {
           <span className="stat-label">Access Audit</span>
           <strong className="stat-value">{audit.length}</strong>
           <span className="stat-trend positive">recent access decisions</span>
+        </div>
+      </div>
+
+      <div className="content-grid two-col">
+        <div className="card-container">
+          <div className="section-header">
+            <div>
+              <h3>Workspace Invites</h3>
+              <p>Invite tokens create membership only after the invited email accepts while authenticated.</p>
+            </div>
+          </div>
+          <form className="form-stack" onSubmit={createInvite}>
+            <label>
+              Invite Email
+              <input type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="engineer@company.com" required />
+            </label>
+            <label>
+              Role
+              <select value={inviteRole} onChange={(event) => setInviteRole(event.target.value)}>
+                <option value="Admin">Admin</option>
+                <option value="Developer">Developer</option>
+                <option value="Security">Security</option>
+                <option value="Viewer">Viewer</option>
+              </select>
+            </label>
+            <button className="btn-primary" type="submit" disabled={busy}>Create Invite</button>
+          </form>
+          <div className="event-list" style={{ marginTop: '14px' }}>
+            {invites.slice(0, 5).map((invite) => (
+              <div className="event-row" key={invite.id}>
+                <span className={`badge ${invite.status === 'pending' ? 'badge-warning' : 'badge-success'}`}>{invite.status}</span>
+                <div>
+                  <strong>{invite.email}</strong>
+                  <p>{invite.role} access expires {new Date(invite.expiresAt).toLocaleString()}</p>
+                </div>
+                <span className="mono-text">{invite.token}</span>
+              </div>
+            ))}
+            {invites.length === 0 && (
+              <div className="state-container compact">
+                <strong>No invites yet</strong>
+                <span>Create an invite to let another authenticated user join this workspace.</span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="dark-panel-container">
+          <div className="section-header">
+            <div>
+              <h3>Accept Invite</h3>
+              <p>Paste a workspace invite token while signed in as the invited email.</p>
+            </div>
+          </div>
+          <form className="form-stack" onSubmit={acceptInvite}>
+            <label>
+              Invite Token
+              <input value={acceptToken} onChange={(event) => setAcceptToken(event.target.value)} placeholder="wsi_..." />
+            </label>
+            <button className="btn-secondary" type="submit" disabled={busy}>Accept Invite + Switch Workspace</button>
+          </form>
         </div>
       </div>
 

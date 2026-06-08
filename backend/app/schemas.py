@@ -781,6 +781,34 @@ class WorkspaceMemberPatchRequest(BaseModel):
     role: WorkspaceRole | None = None
 
 
+WorkspaceInviteStatus = Literal["pending", "accepted", "expired", "revoked"]
+
+
+class WorkspaceInviteCreateRequest(BaseModel):
+    email: str = Field(min_length=3)
+    role: WorkspaceRole = "Developer"
+    expiresInHours: int = Field(default=72, ge=1, le=720)
+
+
+class WorkspaceInvite(BaseModel):
+    id: str
+    workspaceId: str
+    email: str
+    role: WorkspaceRole
+    token: str
+    status: WorkspaceInviteStatus
+    invitedBy: str
+    createdAt: str
+    expiresAt: str
+    acceptedAt: str | None = None
+
+
+class WorkspaceInviteAcceptResult(BaseModel):
+    workspaceId: str
+    member: WorkspaceMember
+    invite: WorkspaceInvite
+
+
 class WorkspaceProfile(BaseModel):
     id: str
     name: str
@@ -1150,6 +1178,22 @@ class AccessCheckResult(BaseModel):
     permission: AccessPermission
     subject: str
     reason: str
+
+
+class ProductionReadinessCheck(BaseModel):
+    id: str
+    label: str
+    state: Literal["pass", "review", "block"]
+    detail: str
+
+
+class ProductionReadinessReport(BaseModel):
+    workspaceId: str
+    decision: Literal["allow", "review", "block"]
+    score: int = Field(ge=0, le=100)
+    checks: list[ProductionReadinessCheck]
+    blockers: list[str]
+    generatedAt: str
 
 
 class ApiEnvelope(BaseModel):

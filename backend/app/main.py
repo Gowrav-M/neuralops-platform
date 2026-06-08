@@ -29,7 +29,18 @@ from .database import (
     update_record,
 )
 from .agent_runtime import AGENT_DEFINITIONS, detect_policy_findings, estimate_tokens, list_providers, run_agent
-from .auth import auth_required, current_claims, public_auth_paths, reset_current_claims, set_current_claims, verify_request_claims, workspace_id_from_claims
+from .auth import (
+    auth_required,
+    current_claims,
+    public_auth_paths,
+    requested_workspace_id,
+    reset_current_claims,
+    reset_requested_workspace_id,
+    set_current_claims,
+    set_requested_workspace_id,
+    verify_request_claims,
+    workspace_id_from_claims,
+)
 from . import seed
 from .job_queue import cancel_job, get_job, list_jobs, process_job, process_next_job, queue_summary, retry_job, submit_job
 from .metrics import build_stats
@@ -79,6 +90,8 @@ from .schemas import (
     PolicyTestRequest,
     PolicyTestResult,
     PolicyViolation,
+    ProductionReadinessCheck,
+    ProductionReadinessReport,
     CostBudgetUpdateRequest,
     ConnectGuide,
     ConnectSnippet,
@@ -148,6 +161,9 @@ from .schemas import (
     WorkspaceMember,
     WorkspaceMemberCreateRequest,
     WorkspaceMemberPatchRequest,
+    WorkspaceInvite,
+    WorkspaceInviteAcceptResult,
+    WorkspaceInviteCreateRequest,
     WorkspaceProfile,
     WorkspaceRole,
 )
@@ -182,6 +198,7 @@ async def auth_gate(request: Request, call_next):
     if not auth_required() or request.method == "OPTIONS" or request.url.path in public_auth_paths():
         return await call_next(request)
     token = None
+    workspace_token = None
     try:
         claims = verify_request_claims(
             request.headers.get("authorization"),
@@ -189,10 +206,14 @@ async def auth_gate(request: Request, call_next):
         )
         request.state.user_claims = claims
         token = set_current_claims(claims)
+        workspace_token = set_requested_workspace_id(request.headers.get("x-neuralops-workspace-id"))
+        authorize_workspace_request(request.url.path)
         return await call_next(request)
     except HTTPException as exc:
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     finally:
+        if workspace_token is not None:
+            reset_requested_workspace_id(workspace_token)
         if token is not None:
             reset_current_claims(token)
 
@@ -351,11 +372,19 @@ def costs_record_id() -> str:
     return "current" if not auth_required() else f"current:{current_workspace_id()}"
 
 
-def current_workspace_id() -> str:
+def home_workspace_id() -> str:
     claim_workspace_id = workspace_id_from_claims(current_claims())
     if claim_workspace_id:
         return claim_workspace_id
     return os.getenv("NEURALOPS_WORKSPACE_ID", "local-workspace")
+
+
+def current_workspace_id() -> str:
+    if auth_required():
+        selected_workspace = requested_workspace_id()
+        if selected_workspace:
+            return selected_workspace
+    return home_workspace_id()
 
 
 def workspace_auth_required() -> bool:
@@ -364,6 +393,38 @@ def workspace_auth_required() -> bool:
 
 def workspace_access_for_role(role: str) -> str:
     return "Read Only" if role == "Viewer" else "All Workspace"
+
+
+def workspace_member_for_email(workspace_id: str, email: str) -> dict[str, Any] | None:
+    normalized_email = email.lower()
+    for member in list_records("workspace_members"):
+        if member.get("workspaceId") == workspace_id and member.get("email", "").lower() == normalized_email:
+            return member
+    return None
+
+
+def workspace_has_members(workspace_id: str) -> bool:
+    return any(member.get("workspaceId") == workspace_id for member in list_records("workspace_members"))
+
+
+def authorize_workspace_request(path: str) -> None:
+    if not auth_required():
+        return
+    if path.startswith("/api/workspace/invites/") and path.endswith("/accept"):
+        return
+    selected_workspace = current_workspace_id()
+    if selected_workspace == home_workspace_id():
+        return
+    if workspace_member_for_email(selected_workspace, current_user_email()) is not None:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "code": "workspace_access_denied",
+            "workspaceId": selected_workspace,
+            "message": "You must be an accepted member before accessing this workspace.",
+        },
+    )
 
 
 ROLE_PERMISSIONS: dict[WorkspaceRole, tuple[AccessPermission, ...]] = {
@@ -428,20 +489,17 @@ def role_permissions(role: str) -> list[AccessPermission]:
 def current_workspace_member_payload() -> dict[str, Any]:
     ensure_workspace_bootstrap()
     email = current_user_email()
-    for member in workspace_members_payload():
-        if member.get("email", "").lower() == email:
-            return member
-    now = datetime.now().isoformat()
-    return {
-        "id": "mem_session_viewer",
-        "workspaceId": current_workspace_id(),
-        "name": current_user_display_name(),
-        "email": email,
-        "role": "Viewer",
-        "access": "Read Only",
-        "createdAt": now,
-        "updatedAt": now,
-    }
+    member = workspace_member_for_email(current_workspace_id(), email)
+    if member is not None:
+        return member
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "code": "workspace_access_denied",
+            "workspaceId": current_workspace_id(),
+            "message": "No workspace membership exists for this authenticated user.",
+        },
+    )
 
 
 def current_access_user() -> AccessCurrentUser:
@@ -579,6 +637,8 @@ def ensure_workspace_bootstrap() -> dict[str, Any]:
         return workspace
     if workspace_members_payload():
         return workspace_profile_payload()
+    if current_workspace_id() != home_workspace_id():
+        return workspace
 
     now = datetime.now().isoformat()
     email = current_user_email()
@@ -632,6 +692,54 @@ def public_workspace_members() -> list[dict[str, Any]]:
             }
         )
     return members
+
+
+def workspace_invites_payload() -> list[dict[str, Any]]:
+    return scoped_records("workspace_invites")
+
+
+def workspace_invite_by_token(invite_token: str) -> dict[str, Any] | None:
+    for invite in list_records("workspace_invites"):
+        if invite.get("token") == invite_token:
+            return invite
+    return None
+
+
+def refresh_invite_status(invite: dict[str, Any]) -> dict[str, Any]:
+    if invite.get("status") != "pending":
+        return invite
+    try:
+        expires_at = datetime.fromisoformat(str(invite.get("expiresAt")))
+    except ValueError:
+        invite["status"] = "expired"
+        save_record("workspace_invites", invite["id"], invite)
+        return invite
+    if expires_at < datetime.now():
+        invite["status"] = "expired"
+        save_record("workspace_invites", invite["id"], invite)
+    return invite
+
+
+def workspace_member_from_invite(invite: WorkspaceInvite) -> WorkspaceMember:
+    now = datetime.now().isoformat()
+    existing = workspace_member_for_email(invite.workspaceId, invite.email)
+    if existing is not None:
+        existing["role"] = invite.role
+        existing["access"] = workspace_access_for_role(invite.role)
+        existing["updatedAt"] = now
+        return WorkspaceMember.model_validate(save_record("workspace_members", existing["id"], existing))
+    member = WorkspaceMember(
+        id=f"mem_{token_hex(4)}",
+        workspaceId=invite.workspaceId,
+        name=invite.email.split("@", 1)[0].replace(".", " ").replace("_", " ").title(),
+        email=invite.email,
+        role=invite.role,
+        access=workspace_access_for_role(invite.role),
+        createdAt=now,
+        updatedAt=now,
+    )
+    save_record("workspace_members", member.id, member.model_dump())
+    return member
 
 
 def onboarding_step(step_id: str, label: str, complete: bool, complete_detail: str, action_detail: str) -> OnboardingStep:
@@ -696,6 +804,77 @@ def build_onboarding_status() -> OnboardingStatus:
         progress=round((completed / len(steps)) * 100),
         nextAction=next_action,
         steps=steps,
+        generatedAt=datetime.now().isoformat(),
+    )
+
+
+def readiness_check(check_id: str, label: str, state: str, detail: str) -> ProductionReadinessCheck:
+    return ProductionReadinessCheck(id=check_id, label=label, state=state, detail=detail)
+
+
+def build_production_readiness() -> ProductionReadinessReport:
+    ensure_workspace_bootstrap()
+    status = build_system_status()
+    member_count = len(workspace_members_payload())
+    provider_count = len(provider_connections(current_workspace_id()))
+    gateway_policy = gateway_routing_policy()
+    access_audit_count = len([item for item in scoped_records("audit") if str(item.get("type", "")).startswith("access.")])
+    checks = [
+        readiness_check(
+            "auth_required",
+            "Authentication required",
+            "pass" if auth_required() else "block",
+            "Supabase/Auth JWT middleware is required." if auth_required() else "Enable NEURALOPS_AUTH_REQUIRED before public deployment.",
+        ),
+        readiness_check(
+            "database",
+            "Production database",
+            "pass" if storage_backend() == "postgres" else "review",
+            "Postgres/Supabase storage is active." if storage_backend() == "postgres" else "SQLite is acceptable for local proof, but deployment should use Supabase Postgres.",
+        ),
+        readiness_check(
+            "workspace_isolation",
+            "Workspace isolation",
+            "pass" if auth_required() and member_count > 0 else "block",
+            f"{member_count} member record(s) are scoped to workspace {current_workspace_id()}.",
+        ),
+        readiness_check(
+            "rbac_enforced",
+            "RBAC enforced",
+            "pass" if "settings:write" not in ROLE_PERMISSIONS["Viewer"] and "provider:write" not in ROLE_PERMISSIONS["Security"] else "block",
+            "Backend permission gates are active for settings, provider, gateway, release, incident, and automation writes.",
+        ),
+        readiness_check(
+            "provider_gateway",
+            "Live provider gateway",
+            "pass" if provider_count > 0 else "review",
+            f"{provider_count} provider connection(s) are configured for this workspace.",
+        ),
+        readiness_check(
+            "gateway_policy",
+            "Gateway routing policy",
+            "pass" if gateway_policy.rateLimitPerMinute > 0 else "block",
+            f"Strategy {gateway_policy.strategy}, rate limit {gateway_policy.rateLimitPerMinute}/minute.",
+        ),
+        readiness_check(
+            "access_audit",
+            "Access audit evidence",
+            "pass" if access_audit_count > 0 else "review",
+            f"{access_audit_count} access decision(s) recorded.",
+        ),
+    ]
+    if status.readinessScore < 50:
+        checks.append(readiness_check("system_truth", "System truth contract", "review", f"System readiness score is {status.readinessScore}."))
+    blockers = [check.detail for check in checks if check.state == "block"]
+    review_count = sum(1 for check in checks if check.state == "review")
+    decision = "block" if blockers else "review" if review_count else "allow"
+    score = max(0, min(100, round((sum(1 for check in checks if check.state == "pass") / len(checks)) * 100)))
+    return ProductionReadinessReport(
+        workspaceId=current_workspace_id(),
+        decision=decision,
+        score=score,
+        checks=checks,
+        blockers=blockers,
         generatedAt=datetime.now().isoformat(),
     )
 
@@ -4812,6 +4991,11 @@ def onboarding_bootstrap() -> OnboardingStatus:
     return build_onboarding_status()
 
 
+@app.get("/api/production/readiness", response_model=ProductionReadinessReport)
+def production_readiness() -> ProductionReadinessReport:
+    return build_production_readiness()
+
+
 @app.get("/api/access/policy", response_model=AccessPolicyMatrix)
 def access_policy() -> AccessPolicyMatrix:
     ensure_workspace_bootstrap()
@@ -4849,6 +5033,72 @@ def access_audit() -> list[AuditEvent]:
 @app.get("/api/workspace", response_model=WorkspaceProfile)
 def workspace_profile() -> WorkspaceProfile:
     return WorkspaceProfile.model_validate(ensure_workspace_bootstrap())
+
+
+@app.get("/api/workspace/invites", response_model=list[WorkspaceInvite])
+def workspace_invites() -> list[WorkspaceInvite]:
+    return [
+        WorkspaceInvite.model_validate(refresh_invite_status(invite))
+        for invite in workspace_invites_payload()
+    ]
+
+
+@app.post("/api/workspace/invites", response_model=WorkspaceInvite)
+def create_workspace_invite(request: WorkspaceInviteCreateRequest) -> WorkspaceInvite:
+    require_permission("workspace:write", "workspace_invites.create")
+    normalized_email = request.email.strip().lower()
+    now = datetime.now()
+    invite = WorkspaceInvite(
+        id=f"wsi_{token_hex(5)}",
+        workspaceId=current_workspace_id(),
+        email=normalized_email,
+        role=request.role,
+        token=f"wsi_{token_hex(18)}",
+        status="pending",
+        invitedBy=current_user_email(),
+        createdAt=now.isoformat(),
+        expiresAt=(now + timedelta(hours=request.expiresInHours)).isoformat(),
+    )
+    save_record("workspace_invites", invite.id, invite.model_dump())
+    save_audit_event(
+        "workspace.invite.create",
+        current_user_email(),
+        normalized_email,
+        "allow",
+        f"Invited {normalized_email} as {request.role}.",
+    )
+    return invite
+
+
+@app.post("/api/workspace/invites/{invite_token}/accept", response_model=WorkspaceInviteAcceptResult)
+def accept_workspace_invite(invite_token: str) -> WorkspaceInviteAcceptResult:
+    payload = workspace_invite_by_token(invite_token)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Workspace invite not found")
+    payload = refresh_invite_status(payload)
+    invite = WorkspaceInvite.model_validate(payload)
+    if invite.status != "pending":
+        raise HTTPException(status_code=409, detail=f"Workspace invite is {invite.status}")
+    if invite.email.lower() != current_user_email():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "invite_email_mismatch",
+                "message": "This invite belongs to a different authenticated email address.",
+            },
+        )
+    member = workspace_member_from_invite(invite)
+    invite.status = "accepted"
+    invite.acceptedAt = datetime.now().isoformat()
+    save_record("workspace_invites", invite.id, invite.model_dump())
+    save_audit_event(
+        "workspace.invite.accept",
+        current_user_email(),
+        invite.workspaceId,
+        "allow",
+        f"Accepted workspace invite for {invite.workspaceId}.",
+    )
+    return WorkspaceInviteAcceptResult(workspaceId=invite.workspaceId, member=member, invite=invite)
 
 
 @app.get("/api/workspace/members", response_model=list[WorkspaceMember])

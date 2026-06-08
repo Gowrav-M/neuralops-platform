@@ -12,6 +12,7 @@ from jwt.exceptions import InvalidTokenError
 
 
 _current_claims: ContextVar[dict[str, Any] | None] = ContextVar("current_claims", default=None)
+_requested_workspace_id: ContextVar[str | None] = ContextVar("requested_workspace_id", default=None)
 
 
 def auth_required() -> bool:
@@ -30,8 +31,21 @@ def reset_current_claims(token) -> None:
     _current_claims.reset(token)
 
 
+def set_requested_workspace_id(workspace_id: str | None):
+    value = workspace_id.strip() if isinstance(workspace_id, str) and workspace_id.strip() else None
+    return _requested_workspace_id.set(value)
+
+
+def reset_requested_workspace_id(token) -> None:
+    _requested_workspace_id.reset(token)
+
+
 def current_claims() -> dict[str, Any] | None:
     return _current_claims.get()
+
+
+def requested_workspace_id() -> str | None:
+    return _requested_workspace_id.get()
 
 
 def workspace_id_from_claims(claims: dict[str, Any] | None) -> str | None:

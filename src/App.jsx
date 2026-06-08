@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import './index.css';
-import { fetchDashboard, fetchSystemStatus, setApiAuthToken, setQaAuthToken } from './lib/api';
+import { fetchDashboard, fetchSystemStatus, setApiAuthToken, setApiWorkspaceId, setQaAuthToken } from './lib/api';
 import { AUTH_ENABLED, supabase } from './lib/supabase';
 
 // Import Screens
@@ -23,6 +23,7 @@ import ReleaseAutopilot from './components/ReleaseAutopilot';
 import DetectionResponse from './components/DetectionResponse';
 import Settings from './components/Settings';
 import AuthGate from './components/AuthGate';
+import ProductionReadiness from './components/ProductionReadiness';
 
 const getNavIcon = (tab) => {
   switch (tab) {
@@ -147,6 +148,13 @@ const getNavIcon = (tab) => {
           <path d="m17 11 2 2 4-4" />
         </svg>
       );
+    case 'Readiness':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M20 6 9 17l-5-5" />
+          <path d="M21 12a9 9 0 1 1-3.4-7" />
+        </svg>
+      );
     case 'Autopilot':
       return (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -191,6 +199,7 @@ const workflowStages = [
   { label: 'Respond', tab: 'Detection', detail: 'ADR cases' },
   { label: 'Act', tab: 'Automations', detail: 'Rules and incidents' },
   { label: 'Access', tab: 'Access', detail: 'RBAC and audit' },
+  { label: 'Ready', tab: 'Readiness', detail: 'Deploy gate' },
   { label: 'Monitor', tab: 'Dashboard', detail: 'Traces and cost' },
   { label: 'Investigate', tab: 'Traces', detail: 'Replay failures' },
   { label: 'Configure', tab: 'Settings', detail: 'Providers and auth' },
@@ -351,6 +360,7 @@ export default function App() {
     }
     setSession(null);
     setApiAuthToken(null);
+    setApiWorkspaceId(null);
     setQaAuthToken(null);
     setSystemStatus(null);
     setTraces([]);
@@ -450,6 +460,7 @@ export default function App() {
     'Detection',
     'Automations',
     'Access',
+    'Readiness',
     'Settings'
   ];
 
@@ -519,6 +530,8 @@ export default function App() {
         return <AutomationCenter addToast={addToast} />;
       case 'Access':
         return <AccessCenter addToast={addToast} />;
+      case 'Readiness':
+        return <ProductionReadiness addToast={addToast} />;
       case 'Settings':
         return <Settings addToast={addToast} />;
       default:
