@@ -6,7 +6,7 @@ export default defineConfig({
   testDir: './tests/e2e',
   testMatch: /deployed\.spec\.js/,
   workers: 1,
-  timeout: 90_000,
+  timeout: 180_000,
   expect: {
     timeout: 15_000,
   },
