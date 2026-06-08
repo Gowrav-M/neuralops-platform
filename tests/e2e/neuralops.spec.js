@@ -49,6 +49,11 @@ test('all product tabs render without console errors and Evidence gate runs', as
   await expect(page.locator('.dark-panel-title', { hasText: 'Saved Release Gates' })).toBeVisible();
   await page.getByRole('button', { name: /Run Current Config/i }).click();
   await expect(page.getByText(/Release gate completed|Deployment Blockers/i)).toBeVisible();
+  const datasetReplayResponse = page.waitForResponse((response) => response.url().includes('/api/replay-gate/dataset/run'));
+  await page.getByRole('button', { name: /Run Dataset Replay/i }).click();
+  expect((await datasetReplayResponse).ok()).toBe(true);
+  await expect(page.getByText(/Dataset replay gate completed/i)).toBeVisible();
+  await expect(page.locator('.table-container span', { hasText: 'Dataset Replay Gate Checks' })).toBeVisible();
 
   await page.locator('input[value="Production AI Release Gate"]').fill('Playwright Release Gate');
   await page.getByRole('button', { name: 'Save Gate Definition' }).click();

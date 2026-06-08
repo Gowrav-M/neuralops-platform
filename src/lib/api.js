@@ -346,6 +346,13 @@ export function runReplayGate(traceId, payload = {}) {
   });
 }
 
+export function runDatasetReplayGate(payload = {}) {
+  return request('/api/replay-gate/dataset/run', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export function fetchDetections() {
   return request('/api/detections');
 }

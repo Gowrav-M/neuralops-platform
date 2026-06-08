@@ -395,6 +395,7 @@ class EvidenceReport(BaseModel):
     status: SystemStatus
     latestGate: ReleaseGateResult | None = None
     latestReplayGate: "ReplayGateResult | None" = None
+    latestDatasetReplayGate: "ReplayDatasetGateResult | None" = None
     summary: dict[str, Any]
     markdown: str
 
@@ -909,6 +910,29 @@ class ReplayGateResult(BaseModel):
     checks: list[ReleaseGateCheck]
     originalOutput: str
     replayedOutput: str
+    recommendations: list[str]
+    generatedAt: str
+
+
+class ReplayDatasetGateRequest(ReplayGateRequest):
+    traceIds: list[str] = Field(default_factory=list, max_length=100)
+    traceEnvironment: Literal["prod", "staging", "dev", "all"] = "all"
+    limit: int = Field(default=25, ge=1, le=100)
+
+
+class ReplayDatasetGateResult(BaseModel):
+    id: str
+    target: str
+    decision: Literal["allow", "review", "block"]
+    score: int = Field(ge=0, le=100)
+    providerMode: Literal["local", "auto", "live"]
+    traceCount: int = Field(ge=0)
+    allowed: int = Field(ge=0)
+    review: int = Field(ge=0)
+    blocked: int = Field(ge=0)
+    traceEnvironment: Literal["prod", "staging", "dev", "all"]
+    results: list[ReplayGateResult]
+    checks: list[ReleaseGateCheck]
     recommendations: list[str]
     generatedAt: str
 

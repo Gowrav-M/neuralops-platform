@@ -4,6 +4,7 @@ import {
   fetchEvidenceReport,
   fetchReleaseGates,
   fetchSystemStatus,
+  runDatasetReplayGate,
   runReleaseGate,
   runSavedReleaseGate,
 } from '../lib/api';
@@ -102,6 +103,44 @@ export default function EvidenceCenter({ addToast }) {
     }
   };
 
+  const handleRunDatasetReplayGate = async () => {
+    setRunning(true);
+    setRunMessage('');
+    setError('');
+    try {
+      const result = await runDatasetReplayGate({
+        target: gateForm.target,
+        traceEnvironment: gateForm.traceEnvironment === 'auto' ? 'all' : gateForm.traceEnvironment,
+        providerMode: gateForm.requireLiveProvider ? 'live' : 'local',
+        maxLatencyMs: Number(gateForm.maxLatencyMs),
+        maxCostUsd: 1,
+        minScore: Number(gateForm.minEvalPassRate),
+        requireLiveProvider: Boolean(gateForm.requireLiveProvider),
+        limit: 25,
+      });
+      setReport((currentReport) => ({
+        ...(currentReport || {}),
+        latestDatasetReplayGate: result,
+        summary: {
+          ...(currentReport?.summary || {}),
+          decision: result.decision,
+          latestDatasetReplayGateDecision: result.decision,
+        },
+      }));
+      setRunMessage(`Dataset replay gate completed: ${result.decision.toUpperCase()} across ${result.traceCount} traces.`);
+      load();
+      addToast(
+        `Dataset replay gate: ${result.decision.toUpperCase()} (${result.blocked} blocked, ${result.review} review).`,
+        result.decision === 'block' ? 'error' : 'success'
+      );
+    } catch (err) {
+      addToast('Dataset replay gate failed to run against the backend.', 'error');
+      setError(err instanceof Error ? err.message : 'Dataset replay gate failed');
+    } finally {
+      setRunning(false);
+    }
+  };
+
   const handleCreateGate = async () => {
     setRunning(true);
     try {
@@ -143,6 +182,7 @@ export default function EvidenceCenter({ addToast }) {
 
   const latestGate = report?.latestGate;
   const latestReplayGate = report?.latestReplayGate;
+  const latestDatasetReplayGate = report?.latestDatasetReplayGate;
 
   return (
     <div className="main-panel">
@@ -153,9 +193,14 @@ export default function EvidenceCenter({ addToast }) {
             Prove which NeuralOps features are persisted, live, local-only, or not configured before production deploy.
           </p>
         </div>
-        <button className="btn-primary" onClick={handleRunGate} disabled={running}>
-          {running ? 'Running Gate...' : 'Run Current Config'}
-        </button>
+        <div className="gate-row-actions">
+          <button className="btn-secondary" onClick={handleRunDatasetReplayGate} disabled={running}>
+            {running ? 'Running...' : 'Run Dataset Replay'}
+          </button>
+          <button className="btn-primary" onClick={handleRunGate} disabled={running}>
+            {running ? 'Running Gate...' : 'Run Current Config'}
+          </button>
+        </div>
       </div>
 
       {runMessage && (
@@ -295,6 +340,16 @@ export default function EvidenceCenter({ addToast }) {
               <strong>{latestReplayGate ? `${latestReplayGate.score}/100` : 'Replay a trace to create evidence'}</strong>
               <span className="page-subtitle">{latestReplayGate?.traceId || 'trace replay target'}</span>
             </div>
+            <div className="evidence-gate-card">
+              <span className="metric-label">Latest Dataset Replay</span>
+              <span className={`badge ${latestDatasetReplayGate?.decision === 'block' ? 'badge-error' : latestDatasetReplayGate?.decision === 'allow' ? 'badge-success' : 'badge-warning'}`}>
+                {latestDatasetReplayGate ? latestDatasetReplayGate.decision : 'not run'}
+              </span>
+              <strong>{latestDatasetReplayGate ? `${latestDatasetReplayGate.score}/100` : 'Replay many traces before deploy'}</strong>
+              <span className="page-subtitle">
+                {latestDatasetReplayGate ? `${latestDatasetReplayGate.traceCount} traces | ${latestDatasetReplayGate.blocked} blocked` : 'dataset replay target'}
+              </span>
+            </div>
           </div>
 
           <div className="evidence-grid">
@@ -382,6 +437,37 @@ export default function EvidenceCenter({ addToast }) {
                 </thead>
                 <tbody>
                   {latestReplayGate.checks.map((check) => (
+                    <tr key={check.id}>
+                      <td>{check.label}</td>
+                      <td>
+                        <span className={`badge ${check.status === 'pass' ? 'badge-success' : check.status === 'warn' ? 'badge-warning' : 'badge-error'}`}>
+                          {check.status}
+                        </span>
+                      </td>
+                      <td>{check.evidence}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {latestDatasetReplayGate && (
+            <div className="table-container" style={{ padding: '24px' }}>
+              <span style={{ fontSize: '15px', fontWeight: '600' }}>Dataset Replay Gate Checks</span>
+              <p className="page-subtitle" style={{ marginTop: '6px' }}>
+                Replayed {latestDatasetReplayGate.traceCount} traces for {latestDatasetReplayGate.target}; decision {latestDatasetReplayGate.decision}.
+              </p>
+              <table className="dense-table" style={{ marginTop: '14px' }}>
+                <thead>
+                  <tr>
+                    <th>Check</th>
+                    <th>Status</th>
+                    <th>Evidence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {latestDatasetReplayGate.checks.map((check) => (
                     <tr key={check.id}>
                       <td>{check.label}</td>
                       <td>

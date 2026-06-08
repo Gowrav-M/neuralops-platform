@@ -21,6 +21,7 @@ Commands:
   neuralops release-gate run [options]
   neuralops gate run [options]
   neuralops replay-gate run --trace <id> [options]
+  neuralops replay-gate dataset [--trace <id,id>] [options]
   neuralops policy validate [options]
   neuralops policy test --input <text> [options]
 
@@ -40,7 +41,9 @@ Options:
   --fail-on warn|fail|review|block
                                Doctor exits non-zero on warn/fail. Release gate exits on review/block.
   --policy-file <path>         Policy-as-code YAML file. Default: .neuralops/policies.yaml
-  --trace <id>                 Trace id for replay-gate.
+  --trace <id>                 Trace id for replay-gate. Use comma-separated ids for replay-gate dataset.
+  --trace-environment <scope>  Dataset replay trace scope: prod, staging, dev, or all. Default: all
+  --limit <number>             Dataset replay trace limit when --trace is omitted. Default: 25
   --input <text>               Input text for policy test.
   --json                       Print raw JSON.
 `);
@@ -530,6 +533,60 @@ async function runReplayGate({ args, env, fetchImpl, stdout }) {
   return failThreshold(result.decision, failOn) ? 1 : 0;
 }
 
+function replayPolicyPayload(args) {
+  let policy = {};
+  try {
+    policy = readPolicy(args);
+  } catch (error) {
+    if (has(args, "--policy-file")) throw error;
+  }
+  return {
+    target: valueOf(args, "--target", "production"),
+    providerMode: valueOf(args, "--provider-mode", policy.providerMode || "local"),
+    maxLatencyMs: Number(valueOf(args, "--max-latency-ms", policy.maxLatencyMs || "2500")),
+    maxCostUsd: Number(valueOf(args, "--max-cost-usd", policy.maxCostUsd || "1")),
+    minScore: Number(valueOf(args, "--min-score", policy.minScore || "0.85")),
+    blockedPhrases: policy.blockedPhrases || [],
+    requireLiveProvider: has(args, "--require-live-provider") || Boolean(policy.requireLiveProvider),
+  };
+}
+
+function traceIdsFromArgs(args) {
+  const traceValue = valueOf(args, "--trace", "");
+  return String(traceValue)
+    .split(",")
+    .map((traceId) => traceId.trim())
+    .filter(Boolean);
+}
+
+async function runDatasetReplayGate({ args, env, fetchImpl, stdout }) {
+  const baseUrl = normalizeBaseUrl(args, env);
+  const failOn = valueOf(args, "--fail-on", "block");
+  if (!["review", "block"].includes(failOn)) {
+    throw new Error("--fail-on must be review or block for replay-gate dataset");
+  }
+  const traceEnvironment = valueOf(args, "--trace-environment", valueOf(args, "--environment", "all"));
+  if (!["prod", "staging", "dev", "all"].includes(traceEnvironment)) {
+    throw new Error("--trace-environment must be prod, staging, dev, or all");
+  }
+  const payload = {
+    ...replayPolicyPayload(args),
+    traceIds: traceIdsFromArgs(args),
+    traceEnvironment,
+    limit: Number(valueOf(args, "--limit", "25")),
+  };
+  const result = await postJson(fetchImpl, `${baseUrl}/api/replay-gate/dataset/run`, payload);
+  if (has(args, "--json")) {
+    stdout(JSON.stringify(result, null, 2));
+  } else {
+    printHuman(result, stdout);
+    stdout("");
+    stdout(`Dataset traces: ${result.traceCount ?? payload.traceIds.length}`);
+    stdout(`Allowed: ${result.allowed ?? 0} | Review: ${result.review ?? 0} | Blocked: ${result.blocked ?? 0}`);
+  }
+  return failThreshold(result.decision, failOn) ? 1 : 0;
+}
+
 export async function runCli({
   argv = process.argv.slice(2),
   env = process.env,
@@ -557,6 +614,9 @@ export async function runCli({
     }
     if (argv[0] === "replay-gate" && argv[1] === "run") {
       return await runReplayGate({ args: argv, env, fetchImpl, stdout });
+    }
+    if (argv[0] === "replay-gate" && argv[1] === "dataset") {
+      return await runDatasetReplayGate({ args: argv, env, fetchImpl, stdout });
     }
     if (argv[0] === "policy") {
       return await runPolicy({ args: argv, stdout });

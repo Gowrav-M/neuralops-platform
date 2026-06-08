@@ -109,6 +109,8 @@ from .schemas import (
     ReleaseAutopilotComparison,
     ReleaseAutopilotRequest,
     ReleaseAutopilotResult,
+    ReplayDatasetGateRequest,
+    ReplayDatasetGateResult,
     ReplayGateRequest,
     ReplayGateResult,
     ReplayResult,
@@ -555,6 +557,7 @@ def build_system_status() -> SystemStatus:
         "automation_events",
         "release_autopilot",
         "replay_gates",
+        "dataset_replay_gates",
         "connector_deliveries",
         "detections",
         "release_gate_definitions",
@@ -601,9 +604,9 @@ def build_system_status() -> SystemStatus:
         FeatureTruth(
             id="release_gates",
             label="Release Gates",
-            state="persisted" if record_counts["release_gate_definitions"] or record_counts["release_gates"] else "not_configured",
-            evidence=f"{record_counts['release_gate_definitions']} saved gate(s), {record_counts['release_gates']} run(s)",
-            action="Create a saved release gate and run it from the Evidence page or CLI before deployment.",
+            state="persisted" if record_counts["release_gate_definitions"] or record_counts["release_gates"] or record_counts["dataset_replay_gates"] else "not_configured",
+            evidence=f"{record_counts['release_gate_definitions']} saved gate(s), {record_counts['release_gates']} run(s), {record_counts['dataset_replay_gates']} dataset replay(s)",
+            action="Create a saved release gate or dataset replay gate and run it from the Evidence page or CLI before deployment.",
         ),
         FeatureTruth(
             id="connect_sdk",
@@ -963,6 +966,13 @@ def latest_replay_gate() -> ReplayGateResult | None:
     return sorted(gates, key=lambda item: item.generatedAt, reverse=True)[0]
 
 
+def latest_dataset_replay_gate() -> ReplayDatasetGateResult | None:
+    gates = [ReplayDatasetGateResult.model_validate(item) for item in scoped_records("dataset_replay_gates")]
+    if not gates:
+        return None
+    return sorted(gates, key=lambda item: item.generatedAt, reverse=True)[0]
+
+
 def run_trace_replay_gate(trace: Trace, request: ReplayGateRequest) -> ReplayGateResult:
     replay = replay_trace(trace.model_dump())
     latency_ms = round(parse_seconds(trace.latency) * 1000)
@@ -1051,6 +1061,112 @@ def run_trace_replay_gate(trace: Trace, request: ReplayGateRequest) -> ReplayGat
         f"Replay gate for trace {trace.id}: {result.decision} ({result.score}/100).",
     )
     return result
+
+
+def dataset_replay_request(request: ReplayDatasetGateRequest) -> ReplayGateRequest:
+    return ReplayGateRequest(
+        target=request.target,
+        providerMode=request.providerMode,
+        maxLatencyMs=request.maxLatencyMs,
+        maxCostUsd=request.maxCostUsd,
+        minScore=request.minScore,
+        blockedPhrases=request.blockedPhrases,
+        requireLiveProvider=request.requireLiveProvider,
+    )
+
+
+def select_dataset_replay_traces(request: ReplayDatasetGateRequest) -> list[Trace]:
+    if request.traceIds:
+        selected: list[Trace] = []
+        for trace_id in request.traceIds:
+            payload = get_scoped_record("traces", trace_id)
+            if payload is None:
+                raise HTTPException(status_code=404, detail=f"Trace not found: {trace_id}")
+            selected.append(Trace.model_validate(payload))
+        return selected[: request.limit]
+
+    traces = [Trace.model_validate(item) for item in scoped_records("traces")]
+    if request.traceEnvironment != "all":
+        traces = [trace for trace in traces if trace.environment == request.traceEnvironment]
+    return list(reversed(traces))[: request.limit]
+
+
+def run_dataset_replay_gate(request: ReplayDatasetGateRequest) -> ReplayDatasetGateResult:
+    traces = select_dataset_replay_traces(request)
+    if not traces:
+        raise HTTPException(status_code=404, detail="No traces matched the dataset replay gate request")
+
+    replay_request = dataset_replay_request(request)
+    results = [run_trace_replay_gate(trace, replay_request) for trace in traces]
+    blocked = sum(1 for result in results if result.decision == "block")
+    review = sum(1 for result in results if result.decision == "review")
+    allowed = sum(1 for result in results if result.decision == "allow")
+    trace_count = len(results)
+    coverage_warn = not request.traceIds and trace_count < min(5, request.limit)
+    decision = "block" if blocked else "review" if review or coverage_warn else "allow"
+    checks = [
+        ReleaseGateCheck(
+            id="dataset_trace_coverage",
+            label="Replay Dataset Coverage",
+            status="warn" if coverage_warn else "pass",
+            reason="Release evidence should cover the selected trace dataset.",
+            evidence=f"{trace_count} trace(s) replayed from {request.traceEnvironment} scope with limit {request.limit}.",
+        ),
+        ReleaseGateCheck(
+            id="dataset_blocked_traces",
+            label="Blocked Trace Replays",
+            status="fail" if blocked else "pass",
+            reason="No trace in the replay dataset should reproduce a blocking policy path.",
+            evidence=f"{blocked} blocked replay(s).",
+        ),
+        ReleaseGateCheck(
+            id="dataset_review_traces",
+            label="Review Trace Replays",
+            status="warn" if review else "pass",
+            reason="Review-only trace paths should be investigated before promotion.",
+            evidence=f"{review} review replay(s).",
+        ),
+        ReleaseGateCheck(
+            id="dataset_average_score",
+            label="Dataset Replay Average Score",
+            status="fail" if sum(result.score for result in results) / trace_count < 60 else "warn" if review else "pass",
+            reason="Dataset replay score should remain healthy across the trace sample.",
+            evidence=f"{sum(result.score for result in results) / trace_count:.1f}/100 average replay score.",
+        ),
+    ]
+    recommendations = [
+        f"Trace {result.traceId}: {result.decision} ({result.score}/100)"
+        for result in results
+        if result.decision != "allow"
+    ]
+    failed = sum(check.status == "fail" for check in checks)
+    warned = sum(check.status == "warn" for check in checks)
+    score = max(0, min(100, round(sum(result.score for result in results) / trace_count) - failed * 10 - warned * 5))
+    dataset = ReplayDatasetGateResult(
+        id=f"rdg_{token_hex(6)}",
+        target=request.target,
+        decision=decision,
+        score=score,
+        providerMode=request.providerMode,
+        traceCount=trace_count,
+        allowed=allowed,
+        review=review,
+        blocked=blocked,
+        traceEnvironment=request.traceEnvironment,
+        results=results,
+        checks=checks,
+        recommendations=recommendations,
+        generatedAt=datetime.now().isoformat(),
+    )
+    save_scoped_record("dataset_replay_gates", dataset.id, dataset.model_dump())
+    save_audit_event(
+        "trace.dataset_replay_gate",
+        current_workspace_id(),
+        dataset.id,
+        dataset.decision,
+        f"Dataset replay gate for {dataset.traceCount} trace(s): {dataset.decision} ({dataset.score}/100).",
+    )
+    return dataset
 
 
 CONTROL_PATTERNS: dict[str, tuple[str, ...]] = {
@@ -1623,14 +1739,22 @@ def build_evidence_report() -> EvidenceReport:
     status = build_system_status()
     gate = latest_release_gate()
     replay_gate = latest_replay_gate()
+    dataset_replay_gate = latest_dataset_replay_gate()
     saved_gates = list_release_gate_definitions()
     summary = {
-        "decision": "block" if replay_gate and replay_gate.decision == "block" else gate.decision if gate else "review",
+        "decision": (
+            "block"
+            if (dataset_replay_gate and dataset_replay_gate.decision == "block") or (replay_gate and replay_gate.decision == "block")
+            else gate.decision
+            if gate
+            else "review"
+        ),
         "readinessScore": status.readinessScore,
         "configuredFeatures": sum(1 for feature in status.features if feature.state != "not_configured"),
         "blockedFeatures": sum(1 for feature in status.features if feature.state == "not_configured"),
         "savedReleaseGates": len(saved_gates),
         "latestReplayGateDecision": replay_gate.decision if replay_gate else "not_run",
+        "latestDatasetReplayGateDecision": dataset_replay_gate.decision if dataset_replay_gate else "not_run",
     }
     markdown_lines = [
         "# NeuralOps Evidence Report",
@@ -1642,6 +1766,7 @@ def build_evidence_report() -> EvidenceReport:
         f"- Saved release gates: {len(saved_gates)}",
         f"- Latest gate decision: {gate.decision if gate else 'not_run'}",
         f"- Latest replay gate decision: {replay_gate.decision if replay_gate else 'not_run'}",
+        f"- Latest dataset replay gate decision: {dataset_replay_gate.decision if dataset_replay_gate else 'not_run'}",
         "",
         "## Feature Truth Contract",
         *[f"- **{feature.label}**: `{feature.state}` - {feature.evidence}" for feature in status.features],
@@ -1664,6 +1789,17 @@ def build_evidence_report() -> EvidenceReport:
                 *[f"- **{check.label}**: `{check.status}` - {check.evidence}" for check in replay_gate.checks],
             ]
         )
+    if dataset_replay_gate:
+        markdown_lines.extend(
+            [
+                "",
+                "## Dataset Replay Gate Checks",
+                f"- Dataset: `{dataset_replay_gate.traceCount}` trace(s)",
+                f"- Decision: `{dataset_replay_gate.decision}` ({dataset_replay_gate.score}/100)",
+                f"- Outcomes: {dataset_replay_gate.allowed} allow, {dataset_replay_gate.review} review, {dataset_replay_gate.blocked} block",
+                *[f"- **{check.label}**: `{check.status}` - {check.evidence}" for check in dataset_replay_gate.checks],
+            ]
+        )
     if saved_gates:
         markdown_lines.extend(
             [
@@ -1681,6 +1817,7 @@ def build_evidence_report() -> EvidenceReport:
         status=status,
         latestGate=gate,
         latestReplayGate=replay_gate,
+        latestDatasetReplayGate=dataset_replay_gate,
         summary=summary,
         markdown="\n".join(markdown_lines),
     )
@@ -2983,6 +3120,11 @@ def replay_gate_trace(trace_id: str, request: ReplayGateRequest) -> ReplayGateRe
     if trace is None:
         raise HTTPException(status_code=404, detail="Trace not found")
     return run_trace_replay_gate(Trace.model_validate(trace), request)
+
+
+@app.post("/api/replay-gate/dataset/run", response_model=ReplayDatasetGateResult)
+def replay_gate_dataset(request: ReplayDatasetGateRequest) -> ReplayDatasetGateResult:
+    return run_dataset_replay_gate(request)
 
 
 @app.post("/api/traces/simulate", response_model=Trace)

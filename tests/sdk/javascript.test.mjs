@@ -339,6 +339,33 @@ test('JavaScript CLI replay-gate posts trace id and exits non-zero on block', as
   assert.equal(JSON.parse(output.join('\n')).decision, 'block');
 });
 
+test('JavaScript CLI dataset replay-gate posts dataset options and exits non-zero on block', async () => {
+  const output = [];
+  const code = await runCli({
+    argv: ['replay-gate', 'dataset', '--base-url', 'https://neuralops.example', '--trace', 'tr_one,tr_two', '--limit', '2', '--fail-on', 'review', '--json'],
+    env: {},
+    stdout: (line) => output.push(line),
+    stderr: (line) => output.push(line),
+    fetchImpl: async (url, options = {}) => {
+      assert.equal(url, 'https://neuralops.example/api/replay-gate/dataset/run');
+      const body = JSON.parse(options.body);
+      assert.deepEqual(body.traceIds, ['tr_one', 'tr_two']);
+      assert.equal(body.limit, 2);
+      return jsonResponse(200, {
+        id: 'rdg_cli',
+        decision: 'block',
+        score: 48,
+        traceCount: 2,
+        checks: [],
+        recommendations: [],
+      });
+    },
+  });
+
+  assert.equal(code, 1);
+  assert.equal(JSON.parse(output.join('\n')).id, 'rdg_cli');
+});
+
 test('JavaScript CLI policy validate and test work from a policy file', async () => {
   const validateOutput = [];
   const testOutput = [];

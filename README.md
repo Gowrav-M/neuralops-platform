@@ -16,9 +16,10 @@ NeuralOps also includes a developer Integration Kit and Trace Replay Gate:
 node sdk/javascript/bin/neuralops.mjs doctor --check-gateway
 node sdk/javascript/bin/neuralops.mjs policy validate --policy-file .neuralops/policies.yaml
 node sdk/javascript/bin/neuralops.mjs replay-gate run --trace <trace_id> --fail-on review
+node sdk/javascript/bin/neuralops.mjs replay-gate dataset --trace-environment prod --limit 25 --fail-on review
 ```
 
-This is the adoption path: connect one real call, capture the trace, replay a production failure, and block risky releases before deployment.
+This is the adoption path: connect one real call, capture the trace, replay production failures as a dataset, and block risky releases before deployment.
 
 ![NeuralOps dashboard](docs/assets/desktop-dashboard.png)
 
@@ -57,6 +58,7 @@ The Evidence page is the deployment control surface. It reads real backend state
 - saved release gate definitions
 - current deployment blockers
 - latest release gate decision
+- latest trace and dataset replay gate decisions
 - Markdown evidence report
 
 Run the gate through the UI or API:
@@ -74,6 +76,8 @@ cmd /c npm run release:gate -- --base-url http://localhost:8000 --target ci --re
 ```
 
 Saved release gates can be created from the Evidence page and reused by ID in GitHub Actions. See [docs/release-gates.md](docs/release-gates.md).
+
+Dataset replay gates rerun stored production traces against the current policy thresholds and persist aggregate allow/review/block evidence. See [docs/replay-gate.md](docs/replay-gate.md).
 
 ## Detection & Response
 

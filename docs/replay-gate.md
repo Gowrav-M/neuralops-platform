@@ -18,6 +18,18 @@ Run it from the SDK CLI:
 node sdk/javascript/bin/neuralops.mjs replay-gate run --trace <trace_id> --fail-on review
 ```
 
+Run the dataset gate before a release:
+
+```powershell
+node sdk/javascript/bin/neuralops.mjs replay-gate dataset --trace-environment prod --limit 25 --fail-on review
+```
+
+Or replay a selected incident set:
+
+```powershell
+node sdk/javascript/bin/neuralops.mjs replay-gate dataset --trace tr_bad001,tr_cost002 --target production --fail-on review
+```
+
 Replay Gate checks:
 
 - deterministic replay policy decision
@@ -31,3 +43,5 @@ Replay Gate checks:
 Local replay is deterministic and does not invent model output. Live replay is blocked as `not_configured` until a real provider connection exists.
 
 Results are persisted under `replay_gates`, written to audit, and included in `/api/evidence`.
+
+Dataset replay gate results are persisted under `dataset_replay_gates`. The Evidence page and `/api/evidence` show the latest dataset decision, aggregate allow/review/block counts, and the release blockers created by replaying many stored traces together.
