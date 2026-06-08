@@ -926,12 +926,25 @@ class TraceIngestRequest(BaseModel):
     output: str = Field(min_length=1)
     toolCalls: str | None = None
     riskFlags: list[str] = Field(default_factory=list)
+    idempotencyKey: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class TraceIngestResponse(BaseModel):
     trace: Trace
     auditId: str
     accepted: bool = True
+    idempotencyKey: str | None = None
+
+
+class TraceBatchIngestRequest(BaseModel):
+    traces: list[TraceIngestRequest] = Field(min_length=1, max_length=100)
+
+
+class TraceBatchIngestResponse(BaseModel):
+    items: list[TraceIngestResponse]
+    accepted: int = Field(ge=0)
+    duplicates: int = Field(ge=0)
+    auditId: str
 
 
 class AuditEvent(BaseModel):

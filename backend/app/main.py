@@ -119,6 +119,8 @@ from .schemas import (
     SyntheticCanaryRequest,
     SyntheticCanaryRun,
     Trace,
+    TraceBatchIngestRequest,
+    TraceBatchIngestResponse,
     TraceIngestRequest,
     TraceIngestResponse,
     TraceSpan,
@@ -1893,6 +1895,35 @@ def build_connect_guide() -> ConnectGuide:
             notes=["Use server-side environment variables only.", "Do not send raw secrets in prompts or outputs."],
         ),
         ConnectSnippet(
+            id="batch-js",
+            label="Node Batch Ingest",
+            language="javascript",
+            command="npm install @neuralops/sdk",
+            code=(
+                "import { NeuralOps } from '@neuralops/sdk';\n\n"
+                "const neuralops = new NeuralOps({\n"
+                "  apiKey: process.env.NEURALOPS_API_KEY,\n"
+                f"  baseUrl: process.env.NEURALOPS_API_URL || '{base_url}'\n"
+                "});\n\n"
+                "await neuralops.ingestTraces([\n"
+                "  {\n"
+                "    session: 'checkout-agent-001',\n"
+                "    environment: 'staging',\n"
+                "    model: 'llama-3.3-70b-versatile',\n"
+                "    tokens: 742,\n"
+                "    latencyMs: 830,\n"
+                "    costUsd: 0.012,\n"
+                "    status: 'success',\n"
+                "    score: 0.93,\n"
+                "    prompt: 'Classify checkout outage ticket',\n"
+                "    output: 'P1 incident routed to payments on-call',\n"
+                "    idempotencyKey: 'checkout-agent-001:span-0001'\n"
+                "  }\n"
+                "]);"
+            ),
+            notes=["Use for production flush/retry loops.", "Repeated idempotency keys do not create duplicate traces."],
+        ),
+        ConnectSnippet(
             id="gateway-js",
             label="Node Gateway Call",
             language="javascript",
@@ -2771,6 +2802,109 @@ def traces() -> list[Trace]:
     return [Trace.model_validate(item) for item in scoped_records("traces")]
 
 
+def build_ingested_trace(request: TraceIngestRequest) -> Trace:
+    now = datetime.now()
+    return Trace(
+        id=f"tr_ing_{token_hex(6)}",
+        timestamp=now.strftime("%H:%M:%S"),
+        session=request.session,
+        environment=request.environment,
+        model=request.model,
+        tokens=request.tokens,
+        latency=f"{request.latencyMs / 1000:.2f}s",
+        cost=f"${request.costUsd:.3f}",
+        status=request.status,
+        score=request.score,
+        prompt=request.prompt,
+        output=request.output,
+        toolCalls=request.toolCalls,
+        source="api",
+        riskFlags=request.riskFlags,
+    )
+
+
+def trace_ingest_decision(trace: Trace) -> str:
+    return "block" if trace.status == "blocked" else "review" if trace.status in {"warning", "failed"} else "allow"
+
+
+def ingest_trace_payload(request: TraceIngestRequest) -> TraceIngestResponse:
+    if request.idempotencyKey:
+        existing = get_scoped_record("trace_idempotency", request.idempotencyKey)
+        if existing is not None:
+            trace_payload = get_scoped_record("traces", existing["traceId"])
+            if trace_payload is not None:
+                return TraceIngestResponse(
+                    trace=Trace.model_validate(trace_payload),
+                    auditId=existing.get("auditId", "duplicate"),
+                    accepted=False,
+                    idempotencyKey=request.idempotencyKey,
+                )
+
+    trace = build_ingested_trace(request)
+    save_scoped_record("traces", trace.id, trace.model_dump())
+    trigger_trace_automations(trace)
+    return TraceIngestResponse(trace=trace, auditId="", accepted=True, idempotencyKey=request.idempotencyKey)
+
+
+@app.post("/api/traces/batch", response_model=TraceBatchIngestResponse)
+def ingest_trace_batch(
+    request: TraceBatchIngestRequest,
+    authorization: str | None = Header(default=None),
+    neuralops_key: str | None = Header(default=None, alias="x-neuralops-key"),
+) -> TraceBatchIngestResponse:
+    api_key = authenticate_api_key(authorization, neuralops_key)
+    items: list[TraceIngestResponse] = []
+    seen_by_key: dict[str, TraceIngestResponse] = {}
+    for trace_request in request.traces:
+        if trace_request.idempotencyKey and trace_request.idempotencyKey in seen_by_key:
+            original = seen_by_key[trace_request.idempotencyKey]
+            items.append(
+                TraceIngestResponse(
+                    trace=original.trace,
+                    auditId=original.auditId,
+                    accepted=False,
+                    idempotencyKey=trace_request.idempotencyKey,
+                )
+            )
+            continue
+        item = ingest_trace_payload(trace_request)
+        items.append(item)
+        if trace_request.idempotencyKey and item.accepted:
+            seen_by_key[trace_request.idempotencyKey] = item
+    accepted = sum(1 for item in items if item.accepted)
+    duplicates = len(items) - accepted
+    worst_decision = "allow"
+    for item in items:
+        decision = trace_ingest_decision(item.trace)
+        if decision == "block":
+            worst_decision = "block"
+            break
+        if decision == "review":
+            worst_decision = "review"
+    audit = save_audit_event(
+        "trace.batch_ingest",
+        api_key.get("name", api_key.get("id", "api-key")),
+        f"{accepted} accepted trace(s), {duplicates} duplicate trace(s)",
+        worst_decision,
+        f"Batch ingested {len(items)} trace envelope(s).",
+    )
+    for item in items:
+        item.auditId = audit.id
+        if item.accepted and item.idempotencyKey:
+            save_scoped_record(
+                "trace_idempotency",
+                item.idempotencyKey,
+                {
+                    "idempotencyKey": item.idempotencyKey,
+                    "traceId": item.trace.id,
+                    "auditId": audit.id,
+                    "workspaceId": current_workspace_id(),
+                    "createdAt": datetime.now().isoformat(),
+                },
+            )
+    return TraceBatchIngestResponse(items=items, accepted=accepted, duplicates=duplicates, auditId=audit.id)
+
+
 @app.get("/api/traces/{trace_id}", response_model=Trace)
 def trace_detail(trace_id: str) -> Trace:
     trace = get_scoped_record("traces", trace_id)
@@ -2808,35 +2942,31 @@ def ingest_trace(
     neuralops_key: str | None = Header(default=None, alias="x-neuralops-key"),
 ) -> TraceIngestResponse:
     api_key = authenticate_api_key(authorization, neuralops_key)
-    now = datetime.now()
-    trace = Trace(
-        id=f"tr_ing_{token_hex(6)}",
-        timestamp=now.strftime("%H:%M:%S"),
-        session=request.session,
-        environment=request.environment,
-        model=request.model,
-        tokens=request.tokens,
-        latency=f"{request.latencyMs / 1000:.2f}s",
-        cost=f"${request.costUsd:.3f}",
-        status=request.status,
-        score=request.score,
-        prompt=request.prompt,
-        output=request.output,
-        toolCalls=request.toolCalls,
-        source="api",
-        riskFlags=request.riskFlags,
-    )
-    save_scoped_record("traces", trace.id, trace.model_dump())
-    trigger_trace_automations(trace)
-    decision = "block" if trace.status == "blocked" else "review" if trace.status in {"warning", "failed"} else "allow"
+    result = ingest_trace_payload(request)
+    decision = trace_ingest_decision(result.trace)
     audit = save_audit_event(
         "trace.ingest",
         api_key.get("name", api_key.get("id", "api-key")),
-        trace.id,
+        result.trace.id,
         decision,
-        f"Ingested {trace.model} trace for session {trace.session}.",
+        f"Ingested {result.trace.model} trace for session {result.trace.session}."
+        if result.accepted
+        else f"Accepted duplicate retry for trace {result.trace.id}.",
     )
-    return TraceIngestResponse(trace=trace, auditId=audit.id)
+    result.auditId = audit.id
+    if result.accepted and request.idempotencyKey:
+        save_scoped_record(
+            "trace_idempotency",
+            request.idempotencyKey,
+            {
+                "idempotencyKey": request.idempotencyKey,
+                "traceId": result.trace.id,
+                "auditId": audit.id,
+                "workspaceId": current_workspace_id(),
+                "createdAt": datetime.now().isoformat(),
+            },
+        )
+    return result
 
 
 @app.post("/api/traces/{trace_id}/replay", response_model=ReplayResult)

@@ -29,6 +29,22 @@ await traceFunction("rerank-documents", async () => rerankDocuments(), {
   session: "checkout-agent-001",
   prompt: "Rerank retrieved support docs.",
 });
+
+await neuralops.ingestTraces([
+  {
+    session: "checkout-agent-001",
+    environment: "staging",
+    model: "gpt-4o-mini",
+    tokens: 320,
+    latencyMs: 180,
+    costUsd: 0.004,
+    status: "success",
+    score: 0.94,
+    prompt: "Rerank retrieved support docs.",
+    output: "Selected policy chunk 3.",
+    idempotencyKey: "checkout-agent-001:rerank-0001",
+  },
+]);
 ```
 
 `wrapOpenAI` and `traceFunction` fail open by default: if NeuralOps is temporarily unavailable, the application keeps running. Use `strict: true` only for CI or controlled release checks.
@@ -62,6 +78,24 @@ trace_function(
     session="checkout-agent-001",
     prompt="Rerank retrieved support docs.",
 )
+
+neuralops.ingest_traces([
+    {
+        "session": "checkout-agent-001",
+        "environment": "staging",
+        "model": "gpt-4o-mini",
+        "tokens": 320,
+        "latencyMs": 180,
+        "costUsd": 0.004,
+        "status": "success",
+        "score": 0.94,
+        "prompt": "Rerank retrieved support docs.",
+        "output": "Selected policy chunk 3.",
+        "idempotencyKey": "checkout-agent-001:rerank-0001",
+    }
+])
 ```
+
+Use batch ingest when a service flushes many traces or retries after a network failure. NeuralOps deduplicates repeated envelopes with the same `idempotencyKey`.
 
 The SDK never logs provider keys or NeuralOps keys. Keys stay server-side.

@@ -261,6 +261,7 @@ NeuralOps supports local SQLite development and deployed Supabase/Postgres produ
 - Detection & Response analyzes stored risky traces, persists cases, and can open a backend incident through containment
 - provider gateway connections are persisted, secret-redacted, testable, and used by live agent/lab runs
 - `/api/traces/ingest` requires a NeuralOps API key and writes a trace plus an audit event
+- `/api/traces/batch` accepts idempotent trace batches so retries do not duplicate production telemetry
 - workspace profile and team RBAC changes are persisted through `/api/workspace/*` and write audit events
 - when Supabase Auth is enabled, workspace settings, members, API keys, webhooks, traces, agent runs, labs, release gates, costs, evidence, and audit events are isolated by trusted JWT `app_metadata`
 - prompt traffic, prompt rollback, policy mode changes, RAG recalculation, retention, webhooks, and settings all call backend endpoints
@@ -365,6 +366,7 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/traces/ingest `
 - `GET /api/traces`
 - `GET /api/traces/{trace_id}`
 - `POST /api/traces/ingest`
+- `POST /api/traces/batch`
 - `GET /api/incidents`
 - `PATCH /api/incidents/{incident_id}`
 - `GET /api/prompts`

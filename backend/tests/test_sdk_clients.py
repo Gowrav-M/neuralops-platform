@@ -48,6 +48,40 @@ def test_python_sdk_routes_chat_completions_through_gateway(monkeypatch) -> None
     assert timeout == 10.0
 
 
+def test_python_sdk_sends_batch_traces_with_idempotency_keys(monkeypatch) -> None:
+    calls: list[Any] = []
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001
+        calls.append((request, timeout))
+        return FakeResponse({"accepted": 1, "duplicates": 1, "items": [{"trace": {"id": "tr_one"}}, {"trace": {"id": "tr_one"}}]})
+
+    monkeypatch.setattr("neuralops.urlopen", fake_urlopen)
+    client = NeuralOpsClient(api_key="nop_sk_secret_value", base_url="https://neuralops.example")
+
+    result = client.ingest_traces(
+        [
+            {
+                "session": "sess_batch",
+                "environment": "prod",
+                "model": "gpt-test",
+                "tokens": 42,
+                "latencyMs": 120,
+                "costUsd": 0,
+                "status": "success",
+                "score": 1,
+                "prompt": "hello",
+                "output": "world",
+                "idempotencyKey": "evt_001",
+            }
+        ]
+    )
+
+    assert result["accepted"] == 1
+    request, _timeout = calls[0]
+    assert request.full_url == "https://neuralops.example/api/traces/batch"
+    assert json.loads(request.data.decode("utf-8"))["traces"][0]["idempotencyKey"] == "evt_001"
+
+
 def test_python_sdk_gateway_errors_do_not_include_full_api_key(monkeypatch) -> None:
     def fake_urlopen(_request, timeout):  # noqa: ANN001
         assert timeout == 10.0

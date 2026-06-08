@@ -28,6 +28,25 @@ export class NeuralOps {
     return response.json();
   }
 
+  async ingestTraces(traces) {
+    if (!Array.isArray(traces) || traces.length === 0) {
+      throw new Error('NeuralOps ingestTraces requires at least one trace');
+    }
+    const response = await this.fetchImpl(`${this.baseUrl}/api/traces/batch`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-neuralops-key': this.apiKey,
+      },
+      body: JSON.stringify({ traces: traces.map((trace) => normalizeTrace(trace)) }),
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(detail || `NeuralOps batch ingest failed with ${response.status}`);
+    }
+    return response.json();
+  }
+
   async chatCompletions(payload) {
     const response = await this.fetchImpl(`${this.baseUrl}/api/gateway/openai/v1/chat/completions`, {
       method: 'POST',
@@ -279,7 +298,7 @@ function normalizeChatCompletion(payload = {}) {
 }
 
 function normalizeTrace(trace) {
-  return {
+  const payload = {
     session: required(trace.session, 'session'),
     environment: trace.environment || 'staging',
     model: required(trace.model, 'model'),
@@ -293,6 +312,10 @@ function normalizeTrace(trace) {
     toolCalls: trace.toolCalls,
     riskFlags: trace.riskFlags || [],
   };
+  if (trace.idempotencyKey) {
+    payload.idempotencyKey = String(trace.idempotencyKey);
+  }
+  return payload;
 }
 
 function required(value, field) {

@@ -4,7 +4,7 @@ NeuralOps is useful only when real traces enter the backend. The Connect workflo
 
 1. Create a key from the Connect page or Settings page with `trace:ingest` and, when routing model calls, `gateway:invoke`.
 2. Store the key in the server environment as `NEURALOPS_API_KEY`.
-3. Send traces through the JavaScript SDK, Python SDK, REST endpoint, or OpenTelemetry endpoint.
+3. Send single traces or idempotent trace batches through the JavaScript SDK, Python SDK, REST endpoint, or OpenTelemetry endpoint.
 4. Route OpenAI-compatible chat calls through the NeuralOps Gateway when you want pre/post policy enforcement.
 5. Run "Verify Connection + Store Trace" or "Route First LLM Call" to write real trace and audit evidence.
 6. Open Dashboard, Traces, Evaluations, Costs, and Evidence to see the backend state update.
@@ -58,6 +58,34 @@ Required trace fields:
 }
 ```
 
+For production services that flush many traces or retry on network failures, use batch ingest with idempotency keys:
+
+```text
+POST /api/traces/batch
+Header: x-neuralops-key: <server-side ingest key>
+Required key scope: trace:ingest
+```
+
+```json
+{
+  "traces": [
+    {
+      "session": "checkout-agent-001",
+      "environment": "staging",
+      "model": "llama-3.3-70b-versatile",
+      "tokens": 742,
+      "latencyMs": 830,
+      "costUsd": 0.012,
+      "status": "success",
+      "score": 0.93,
+      "prompt": "Classify checkout outage ticket",
+      "output": "P1 incident routed to payments on-call",
+      "idempotencyKey": "checkout-agent-001:span-0001"
+    }
+  ]
+}
+```
+
 ## Policy Gateway Contract
 
 ```text
@@ -107,6 +135,22 @@ await neuralops.ingestTrace({
   output: 'P1 incident routed to payments on-call',
 });
 
+await neuralops.ingestTraces([
+  {
+    session: 'checkout-agent-001',
+    environment: 'staging',
+    model: 'llama-3.3-70b-versatile',
+    tokens: 742,
+    latencyMs: 830,
+    costUsd: 0.012,
+    status: 'success',
+    score: 0.93,
+    prompt: 'Classify checkout outage ticket',
+    output: 'P1 incident routed to payments on-call',
+    idempotencyKey: 'checkout-agent-001:span-0001',
+  },
+]);
+
 const completion = await neuralops.chatCompletions({
   model: 'gpt-4o-mini',
   metadata: { environment: 'staging', session: 'checkout-agent-001' },
@@ -144,6 +188,22 @@ client.ingest_trace(
     prompt="Answer billing policy question",
     output="Answered from retrieval context",
 )
+
+client.ingest_traces([
+    {
+        "session": "rag-api-001",
+        "environment": "staging",
+        "model": "gpt-4o-mini",
+        "tokens": 512,
+        "latencyMs": 420,
+        "costUsd": 0.006,
+        "status": "success",
+        "score": 0.91,
+        "prompt": "Answer billing policy question",
+        "output": "Answered from retrieval context",
+        "idempotencyKey": "rag-api-001:span-0001",
+    }
+])
 
 completion = client.chat_completions(
     model="gpt-4o-mini",

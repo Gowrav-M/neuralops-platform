@@ -29,6 +29,42 @@ test('JavaScript SDK routes chat completions through NeuralOps Gateway', async (
   assert.equal(JSON.parse(calls[0].options.body).messages[0].content, 'hello');
 });
 
+test('JavaScript SDK sends batch traces with idempotency keys', async () => {
+  const calls = [];
+  const client = new NeuralOps({
+    apiKey: 'nop_sk_secret_value',
+    baseUrl: 'https://neuralops.example',
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return {
+        ok: true,
+        json: async () => ({ accepted: 1, duplicates: 1, items: [{ trace: { id: 'tr_one' } }, { trace: { id: 'tr_one' } }] }),
+      };
+    },
+  });
+
+  const result = await client.ingestTraces([
+    {
+      session: 'sess_batch',
+      environment: 'prod',
+      model: 'gpt-test',
+      tokens: 42,
+      latencyMs: 120,
+      costUsd: 0,
+      status: 'success',
+      score: 1,
+      prompt: 'hello',
+      output: 'world',
+      idempotencyKey: 'evt_001',
+    },
+  ]);
+
+  assert.equal(result.accepted, 1);
+  assert.equal(calls[0].url, 'https://neuralops.example/api/traces/batch');
+  assert.equal(JSON.parse(calls[0].options.body).traces[0].idempotencyKey, 'evt_001');
+  assert.equal(calls[0].options.headers['x-neuralops-key'], 'nop_sk_secret_value');
+});
+
 test('JavaScript SDK gateway errors do not include full API keys', async () => {
   const client = new NeuralOps({
     apiKey: 'nop_sk_secret_value',

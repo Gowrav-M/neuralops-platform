@@ -295,6 +295,42 @@ def test_release_gate_scopes_metrics_to_target_environment(client: TestClient) -
     assert all_gate["decision"] == "block"
 
 
+def test_trace_batch_ingest_deduplicates_retry_with_idempotency_key(client: TestClient) -> None:
+    token = client.post(
+        "/api/settings/api-keys",
+        json={"name": "batch ingest", "role": "Developer", "environment": "all", "scopes": ["trace:ingest"]},
+    ).json()["token"]
+    trace_payload = {
+        "session": "sess_batch_retry",
+        "environment": "prod",
+        "model": "gpt-batch",
+        "tokens": 120,
+        "latencyMs": 340,
+        "status": "success",
+        "score": 0.97,
+        "prompt": "Summarize the support ticket.",
+        "output": "Customer needs help with billing.",
+        "idempotencyKey": "evt_001",
+    }
+
+    response = client.post(
+        "/api/traces/batch",
+        headers={"x-neuralops-key": token},
+        json={"traces": [trace_payload, trace_payload]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["accepted"] == 1
+    assert payload["duplicates"] == 1
+    assert len(payload["items"]) == 2
+    assert payload["items"][0]["accepted"] is True
+    assert payload["items"][1]["accepted"] is False
+    assert payload["items"][0]["trace"]["id"] == payload["items"][1]["trace"]["id"]
+    traces = client.get("/api/traces").json()
+    assert len([trace for trace in traces if trace["session"] == "sess_batch_retry"]) == 1
+
+
 def test_automation_rule_records_blocked_trace_webhook_action(client: TestClient) -> None:
     webhook = client.post(
         "/api/settings/webhooks",
@@ -1549,6 +1585,7 @@ def test_connect_guide_returns_real_integration_snippets(client: TestClient) -> 
     assert payload["gatewayEndpoint"].endswith("/api/gateway/openai/v1/chat/completions")
     snippet_ids = {snippet["id"] for snippet in payload["snippets"]}
     assert {"javascript", "python", "curl", "otel", "gateway-js", "gateway-python"}.issubset(snippet_ids)
+    assert "batch-js" in snippet_ids
     assert payload["authHeader"] == "x-neuralops-key"
 
 

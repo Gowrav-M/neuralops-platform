@@ -61,6 +61,11 @@ class NeuralOpsClient:
             payload["toolCalls"] = tool_calls
         return self._post("/api/traces/ingest", payload)
 
+    def ingest_traces(self, traces: list[dict[str, Any]]) -> dict[str, Any]:
+        if not traces:
+            raise ValueError("traces is required")
+        return self._post("/api/traces/batch", {"traces": traces})
+
     def chat_completions(
         self,
         *,
