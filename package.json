@@ -13,6 +13,7 @@
     "db:verify-rls": "python backend/scripts/verify_supabase_rls.py",
     "deploy:verify": "node scripts/verify-deployment.mjs",
     "release:gate": "node sdk/javascript/bin/neuralops.mjs release-gate run",
+    "production:ready": "node sdk/javascript/bin/neuralops.mjs production ready",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"

@@ -303,6 +303,89 @@ test('JavaScript CLI release-gate still exits non-zero on blocking decisions', a
   assert.equal(JSON.parse(output.join('\n')).decision, 'block');
 });
 
+test('JavaScript CLI production readiness fails CI on blockers with auth headers', async () => {
+  const output = [];
+  const code = await runCli({
+    argv: [
+      'production',
+      'ready',
+      '--base-url',
+      'https://neuralops.example',
+      '--auth-token',
+      'supabase-session-token',
+      '--workspace-id',
+      'prod-workspace',
+      '--json',
+    ],
+    env: {},
+    stdout: (line) => output.push(line),
+    stderr: (line) => output.push(line),
+    fetchImpl: async (url, options = {}) => {
+      assert.equal(url, 'https://neuralops.example/api/production/readiness');
+      assert.equal(options.headers.Authorization, 'Bearer supabase-session-token');
+      assert.equal(options.headers['x-neuralops-workspace-id'], 'prod-workspace');
+      return jsonResponse(200, {
+        workspaceId: 'prod-workspace',
+        decision: 'block',
+        score: 57,
+        checks: [
+          { id: 'auth_required', label: 'Authentication required', state: 'pass', detail: 'Auth is enabled.' },
+          { id: 'database', label: 'Production database', state: 'block', detail: 'SQLite is not production storage.' },
+        ],
+        blockers: ['SQLite is not production storage.'],
+        generatedAt: '2026-06-08T00:00:00.000Z',
+      });
+    },
+  });
+
+  const result = JSON.parse(output.join('\n'));
+  assert.equal(code, 1);
+  assert.equal(result.decision, 'block');
+  assert.equal(result.blockers.length, 1);
+  assert.equal(output.join('\n').includes('supabase-session-token'), false);
+});
+
+test('JavaScript CLI production readiness can fail or pass on review threshold', async () => {
+  const responseBody = {
+    workspaceId: 'prod-workspace',
+    decision: 'review',
+    score: 86,
+    checks: [
+      { id: 'auth_required', label: 'Authentication required', state: 'pass', detail: 'Auth is enabled.' },
+      { id: 'provider_gateway', label: 'Live provider gateway', state: 'review', detail: 'No live provider configured.' },
+    ],
+    blockers: [],
+    generatedAt: '2026-06-08T00:00:00.000Z',
+  };
+  const passOutput = [];
+  const failOutput = [];
+  const fetchImpl = async (url, options = {}) => {
+    assert.equal(url, 'https://neuralops.example/api/production/readiness');
+    assert.equal(options.headers['x-neuralops-qa-token'], 'qa-token-secret');
+    return jsonResponse(200, responseBody);
+  };
+
+  const passCode = await runCli({
+    argv: ['production', 'ready', '--base-url', 'https://neuralops.example', '--qa-token', 'qa-token-secret', '--fail-on', 'block', '--json'],
+    env: {},
+    stdout: (line) => passOutput.push(line),
+    stderr: (line) => passOutput.push(line),
+    fetchImpl,
+  });
+  const failCode = await runCli({
+    argv: ['production', 'ready', '--base-url', 'https://neuralops.example', '--qa-token', 'qa-token-secret', '--fail-on', 'review', '--json'],
+    env: {},
+    stdout: (line) => failOutput.push(line),
+    stderr: (line) => failOutput.push(line),
+    fetchImpl,
+  });
+
+  assert.equal(passCode, 0);
+  assert.equal(failCode, 1);
+  assert.equal(JSON.parse(failOutput.join('\n')).decision, 'review');
+  assert.equal(failOutput.join('\n').includes('qa-token-secret'), false);
+});
+
 test('JavaScript CLI replay-gate posts trace id and exits non-zero on block', async () => {
   const output = [];
   const code = await runCli({

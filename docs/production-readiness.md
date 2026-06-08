@@ -53,6 +53,26 @@ cmd /c npm run test:e2e
 
 Then open the Evidence page and run **Run Production Gate**. Public deployment is blocked until auth is enabled, CORS is restricted to the Vercel domain, and the backend reports `storage: postgres`.
 
+For CI or a deployment terminal, run the backend readiness gate directly:
+
+```powershell
+$env:NEURALOPS_API_URL = "https://<render-service>.onrender.com"
+$env:NEURALOPS_QA_AUTH_TOKEN = "<deployment-qa-token>"
+cmd /c npm run production:ready -- --fail-on review
+```
+
+You can also use a real Supabase session token:
+
+```powershell
+node sdk/javascript/bin/neuralops.mjs production ready `
+  --base-url "https://<render-service>.onrender.com" `
+  --auth-token "<supabase-session-jwt>" `
+  --workspace-id "<workspace-id>" `
+  --fail-on review
+```
+
+The command calls `/api/production/readiness`, prints every deployment check, and exits non-zero when the decision meets the threshold. Use `--fail-on block` to allow review warnings during staging; use `--fail-on review` for final production launch.
+
 Before sharing the public URL, open Settings and configure at least one real workspace operator. Workspace profile and member records are persisted through `/api/workspace/*`, and create/update/delete actions write audit events so the deployment has a basic ownership trail.
 
 For live model calls, use Settings -> AI Provider Gateway Connections or inject provider env vars on Render. The product supports OpenRouter, Vercel AI Gateway, Groq, NVIDIA NIM, OpenAI, Together, Fireworks, Mistral, DeepSeek, Ollama, vLLM, LM Studio, and custom OpenAI-compatible endpoints. Provider API keys are encrypted server-side with `NEURALOPS_SECRET_KEY`; rotate keys before public deployment if any were pasted into local tooling or chat.

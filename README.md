@@ -17,6 +17,7 @@ node sdk/javascript/bin/neuralops.mjs doctor --check-gateway
 node sdk/javascript/bin/neuralops.mjs gateway doctor
 node sdk/javascript/bin/neuralops.mjs gateway send-test
 node sdk/javascript/bin/neuralops.mjs gateway routes
+node sdk/javascript/bin/neuralops.mjs production ready --fail-on review
 node sdk/javascript/bin/neuralops.mjs policy validate --policy-file .neuralops/policies.yaml
 node sdk/javascript/bin/neuralops.mjs replay-gate run --trace <trace_id> --fail-on review
 node sdk/javascript/bin/neuralops.mjs replay-gate dataset --trace-environment prod --limit 25 --fail-on review
@@ -78,6 +79,16 @@ Run the same gate from CLI/CI:
 ```powershell
 cmd /c npm run release:gate -- --base-url http://localhost:8000 --target ci --require-auth false --fail-on block
 ```
+
+Run the production readiness gate against a secured deployed backend:
+
+```powershell
+$env:NEURALOPS_API_URL = "https://<render-service>.onrender.com"
+$env:NEURALOPS_QA_AUTH_TOKEN = "<deployment-qa-token>"
+cmd /c npm run production:ready -- --fail-on review
+```
+
+This calls `/api/production/readiness` and fails CI on `block`, or on `review` when `--fail-on review` is used. For user-session based checks, pass `--auth-token <supabase-jwt>` and optionally `--workspace-id <workspace-id>`.
 
 Saved release gates can be created from the Evidence page and reused by ID in GitHub Actions. See [docs/release-gates.md](docs/release-gates.md).
 

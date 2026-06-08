@@ -20,6 +20,7 @@ Commands:
   neuralops send-test-trace [options]
   neuralops release-gate run [options]
   neuralops gate run [options]
+  neuralops production ready [options]
   neuralops replay-gate run --trace <id> [options]
   neuralops replay-gate dataset [--trace <id,id>] [options]
   neuralops policy validate [options]
@@ -31,6 +32,9 @@ Commands:
 Options:
   --base-url <url>             NeuralOps API URL. Defaults to NEURALOPS_API_URL or http://localhost:8000
   --api-key <key>              NeuralOps API key. Defaults to NEURALOPS_API_KEY
+  --auth-token <jwt>           Supabase/Auth bearer token. Defaults to NEURALOPS_AUTH_TOKEN
+  --qa-token <token>           Deployment QA token. Defaults to NEURALOPS_QA_AUTH_TOKEN
+  --workspace-id <id>          Selected workspace id for authenticated checks.
   --environment <name>         Environment for test traces. Default: staging
   --check-gateway              Doctor also checks the OpenAI-compatible Policy Gateway
   --no-send-test-trace         Doctor skips writing a connectivity trace
@@ -99,12 +103,42 @@ async function requestJson(fetchImpl, url, { method = "GET", payload, apiKey } =
   return parseResponse(response);
 }
 
+function requestHeaders({ apiKey, authToken, qaToken, workspaceId } = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) headers["x-neuralops-key"] = apiKey;
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+  if (qaToken) headers["x-neuralops-qa-token"] = qaToken;
+  if (workspaceId) headers["x-neuralops-workspace-id"] = workspaceId;
+  return headers;
+}
+
+async function requestJsonWithHeaders(fetchImpl, url, { method = "GET", payload, apiKey, authToken, qaToken, workspaceId } = {}) {
+  const response = await fetchImpl(url, {
+    method,
+    headers: requestHeaders({ apiKey, authToken, qaToken, workspaceId }),
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  });
+  return parseResponse(response);
+}
+
 async function postJson(fetchImpl, url, payload, apiKey) {
   const result = await requestJson(fetchImpl, url, { method: "POST", payload, apiKey });
   if (!result.ok) {
     throw new Error(errorMessage(result));
   }
   return result.body;
+}
+
+function readAuthToken(args, env) {
+  return valueOf(args, "--auth-token") || env.NEURALOPS_AUTH_TOKEN || "";
+}
+
+function readQaToken(args, env) {
+  return valueOf(args, "--qa-token") || env.NEURALOPS_QA_AUTH_TOKEN || "";
+}
+
+function readWorkspaceId(args, env) {
+  return valueOf(args, "--workspace-id") || env.NEURALOPS_WORKSPACE_ID || "";
 }
 
 function errorMessage(result) {
@@ -364,6 +398,28 @@ function printHuman(result, stdout = console.log) {
   }
 }
 
+function printProductionReadiness(result, stdout = console.log) {
+  stdout(`NeuralOps production readiness: ${result.decision.toUpperCase()} (${result.score}/100)`);
+  stdout(`Workspace: ${result.workspaceId}`);
+  stdout("");
+  for (const check of result.checks || []) {
+    const marker = check.state === "pass" ? "PASS" : check.state === "review" ? "REVIEW" : "BLOCK";
+    stdout(`[${marker}] ${check.label}: ${check.detail}`);
+    if (check.state === "block" && process.env.GITHUB_ACTIONS) {
+      stdout(`::error title=${check.label}::${check.detail}`);
+    } else if (check.state === "review" && process.env.GITHUB_ACTIONS) {
+      stdout(`::warning title=${check.label}::${check.detail}`);
+    }
+  }
+  if (result.blockers?.length) {
+    stdout("");
+    stdout("Blockers:");
+    for (const blocker of result.blockers) {
+      stdout(`- ${blocker}`);
+    }
+  }
+}
+
 async function runGate({ args, env, fetchImpl, stdout }) {
   const baseUrl = normalizeBaseUrl(args, env);
   const gateId = valueOf(args, "--gate-id");
@@ -393,6 +449,28 @@ async function runGate({ args, env, fetchImpl, stdout }) {
     printHuman(result, stdout);
   }
   return failThreshold(result.decision, failOn) ? 1 : 0;
+}
+
+async function runProductionReady({ args, env, fetchImpl, stdout }) {
+  const baseUrl = normalizeBaseUrl(args, env);
+  const failOn = valueOf(args, "--fail-on", "block");
+  if (!["review", "block"].includes(failOn)) {
+    throw new Error("--fail-on must be review or block for production ready");
+  }
+  const result = await requestJsonWithHeaders(fetchImpl, `${baseUrl}/api/production/readiness`, {
+    authToken: readAuthToken(args, env),
+    qaToken: readQaToken(args, env),
+    workspaceId: readWorkspaceId(args, env),
+  });
+  if (!result.ok) {
+    throw new Error(errorMessage(result));
+  }
+  if (has(args, "--json")) {
+    stdout(JSON.stringify(result.body, null, 2));
+  } else {
+    printProductionReadiness(result.body, stdout);
+  }
+  return failThreshold(result.body.decision, failOn) ? 1 : 0;
 }
 
 function readPolicy(args) {
@@ -708,6 +786,9 @@ export async function runCli({
     }
     if ((argv[0] === "release-gate" || argv[0] === "gate") && argv[1] === "run") {
       return await runGate({ args: argv, env, fetchImpl, stdout });
+    }
+    if (argv[0] === "production" && argv[1] === "ready") {
+      return await runProductionReady({ args: argv, env, fetchImpl, stdout });
     }
     if (argv[0] === "replay-gate" && argv[1] === "run") {
       return await runReplayGate({ args: argv, env, fetchImpl, stdout });
