@@ -12,6 +12,7 @@ const tabs = [
   'Agents',
   'Labs',
   'Connect',
+  'Gateway',
   'Autopilot',
   'Evidence',
   'Detection',
@@ -221,6 +222,40 @@ test('Settings provider gateway connection persists and reports missing key trut
   expect((await testResponse).ok()).toBe(true);
   await expect(row.getByText('not_configured')).toBeVisible();
   await expect(page.getByText(/Provider test failed/i)).toBeVisible();
+});
+
+test('Gateway page manages routing policy budgets and cache controls', async ({ page }) => {
+  await page.goto('/');
+  const sidebar = page.locator('.sidebar-container');
+  await sidebar.getByRole('button', { name: 'Gateway', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Intelligent Gateway' })).toBeVisible();
+  await expect(page.getByText('Routing Policy', { exact: true })).toBeVisible();
+
+  const policyCard = page.locator('.card-container', { hasText: 'Routing Policy' });
+  await policyCard.locator('select').first().selectOption('balanced');
+  await policyCard.locator('input[type="number"]').first().fill('2');
+  const policyResponse = page.waitForResponse((response) => response.url().includes('/api/gateway/routing-policy') && response.request().method() === 'PUT');
+  await policyCard.getByRole('button', { name: 'Save Routing Policy' }).click();
+  expect((await policyResponse).ok()).toBe(true);
+  await expect(page.getByText('Gateway routing policy saved.')).toBeVisible();
+
+  const budgetCard = page.locator('.card-container', { hasText: 'Budgets' });
+  await budgetCard.locator('select').first().selectOption('dev');
+  await budgetCard.locator('input[type="number"]').nth(0).fill('12');
+  await budgetCard.locator('input[type="number"]').nth(1).fill('9');
+  const budgetResponse = page.waitForResponse((response) => response.url().includes('/api/gateway/budgets') && response.request().method() === 'POST');
+  await budgetCard.getByRole('button', { name: 'Save Budget' }).click();
+  expect((await budgetResponse).ok()).toBe(true);
+  await expect(page.getByText('Gateway budget saved for dev.')).toBeVisible();
+  await expect(budgetCard.locator('.gateway-budget-row', { hasText: 'dev' }).first()).toBeVisible();
+
+  const cacheResponse = page.waitForResponse((response) => response.url().includes('/api/gateway/cache/clear'));
+  await page.getByRole('button', { name: 'Clear Exact Cache' }).click();
+  expect((await cacheResponse).ok()).toBe(true);
+  await expect(page.getByText(/Cleared .* gateway cache entries/i)).toBeVisible();
+
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+  expect(overflow).toBe(false);
 });
 
 test('dark mode remains readable and uptime clock is contained', async ({ page }) => {

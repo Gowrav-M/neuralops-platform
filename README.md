@@ -8,18 +8,21 @@ NeuralOps now includes a deploy-readiness and response layer: `/api/system/statu
 
 NeuralOps also includes a Connect workflow so a real app can send traces through SDK, REST, or OpenTelemetry instead of relying on sample dashboard records.
 
-NeuralOps now also exposes an OpenAI-compatible Policy Gateway. A backend service can call `/api/gateway/openai/v1/chat/completions` with a NeuralOps key, and NeuralOps will run pre/post guardrails, route across configured providers with failover evidence, store trace/audit/cost evidence, and return `not_configured` when no provider is connected instead of inventing model output.
+NeuralOps now also exposes an OpenAI-compatible Intelligent Gateway. A backend service can call `/api/gateway/openai/v1/chat/completions` with a NeuralOps key, and NeuralOps will run pre/post guardrails, route across configured providers by priority, cost, latency, or balanced health, enforce budgets/rate limits, use exact-match cache when enabled, store trace/audit/cost evidence, and return `not_configured` when no provider is connected instead of inventing model output.
 
 NeuralOps also includes a developer Integration Kit and Trace Replay Gate:
 
 ```powershell
 node sdk/javascript/bin/neuralops.mjs doctor --check-gateway
+node sdk/javascript/bin/neuralops.mjs gateway doctor
+node sdk/javascript/bin/neuralops.mjs gateway send-test
+node sdk/javascript/bin/neuralops.mjs gateway routes
 node sdk/javascript/bin/neuralops.mjs policy validate --policy-file .neuralops/policies.yaml
 node sdk/javascript/bin/neuralops.mjs replay-gate run --trace <trace_id> --fail-on review
 node sdk/javascript/bin/neuralops.mjs replay-gate dataset --trace-environment prod --limit 25 --fail-on review
 ```
 
-This is the adoption path: connect one real call, capture the trace, replay production failures as a dataset, and block risky releases before deployment.
+This is the adoption path: route one real LLM call, capture the trace, replay production failures as a dataset, and block risky releases before deployment.
 
 ![NeuralOps dashboard](docs/assets/desktop-dashboard.png)
 
@@ -40,7 +43,8 @@ flowchart LR
   C["Neural Labs Experiments"] --> F
   D["GenAI / OTEL Traces"] --> F
   K["JavaScript / Python SDK"] --> F
-  M["OpenAI-Compatible Policy Gateway"] --> F
+  M["OpenAI-Compatible Intelligent Gateway"] --> N["Cost/Latency/Policy Router"]
+  N --> F
   E["Evaluations + Policy"] --> F
   I["Cost + Incidents"] --> F
   J["Release Gate + Evidence"] --> F
@@ -171,6 +175,33 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/gateway/openai/v1/chat/
 ```
 
 If no live provider is configured, this returns `503 not_configured`. If policy blocks the input or output, NeuralOps stores a blocked gateway trace and returns a policy error with the trace ID.
+
+## Intelligent Gateway
+
+The Gateway page is the operational control surface for production AI traffic. It shows provider health, total routed calls, failures, cache hits, estimated and actual spend, budget remaining, routing decisions, and evidence-based cost suggestions.
+
+The router supports:
+
+- `priority`: use configured provider priority.
+- `lowest_cost`: prefer the lowest known local price estimate for the model.
+- `lowest_latency`: prefer providers with better observed latency.
+- `balanced`: combine cost, latency, health, success rate, and priority.
+
+Gateway management APIs:
+
+```text
+GET  /api/gateway/metrics
+GET  /api/gateway/requests
+GET  /api/gateway/cost-suggestions
+GET  /api/gateway/routing-policy
+PUT  /api/gateway/routing-policy
+GET  /api/gateway/budgets
+POST /api/gateway/budgets
+PATCH /api/gateway/budgets/{budget_id}
+POST /api/gateway/cache/clear
+```
+
+Unknown model pricing is marked unknown internally and is not turned into fake savings. Cache hits still write traces, route logs, and audit evidence.
 
 ## Agent Runtime
 

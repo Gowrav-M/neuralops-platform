@@ -15,6 +15,7 @@ import IncidentTimeline from './components/IncidentTimeline';
 import Agents from './components/Agents';
 import NeuralLabs from './components/NeuralLabs';
 import ConnectCenter from './components/ConnectCenter';
+import GatewayCenter from './components/GatewayCenter';
 import EvidenceCenter from './components/EvidenceCenter';
 import AutomationCenter from './components/AutomationCenter';
 import ReleaseAutopilot from './components/ReleaseAutopilot';
@@ -108,6 +109,17 @@ const getNavIcon = (tab) => {
           <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
         </svg>
       );
+    case 'Gateway':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M3 12h5" />
+          <path d="M16 12h5" />
+          <path d="M8 12a4 4 0 0 1 8 0" />
+          <path d="M8 12a4 4 0 0 0 8 0" />
+          <path d="M12 4v4" />
+          <path d="M12 16v4" />
+        </svg>
+      );
     case 'Evidence':
       return (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -161,6 +173,7 @@ const getNavIcon = (tab) => {
 
 const workflowStages = [
   { label: 'Ingest', tab: 'Connect', detail: 'SDK, REST, OTEL' },
+  { label: 'Route', tab: 'Gateway', detail: 'Cost and policy' },
   { label: 'Test', tab: 'Labs', detail: 'Agents and evals' },
   { label: 'Replay', tab: 'Autopilot', detail: 'Regression proof' },
   { label: 'Gate', tab: 'Evidence', detail: 'Release proof' },
@@ -419,6 +432,7 @@ export default function App() {
     'Agents',
     'Labs',
     'Connect',
+    'Gateway',
     'Autopilot',
     'Evidence',
     'Detection',
@@ -480,6 +494,8 @@ export default function App() {
         return <NeuralLabs addToast={addToast} refreshDashboard={refreshDashboard} />;
       case 'Connect':
         return <ConnectCenter addToast={addToast} refreshDashboard={refreshDashboard} />;
+      case 'Gateway':
+        return <GatewayCenter addToast={addToast} />;
       case 'Autopilot':
         return <ReleaseAutopilot addToast={addToast} />;
       case 'Evidence':

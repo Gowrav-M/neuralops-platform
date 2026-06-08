@@ -922,10 +922,11 @@ def test_gateway_routes_across_provider_failover_and_records_attempts(client: Te
 
     assert response.status_code == 200
     payload = response.json()
-    assert calls == ["Primary Gateway", "Fallback Gateway"]
+    assert calls == ["Primary Gateway", "Primary Gateway", "Primary Gateway", "Fallback Gateway"]
     assert payload["neuralops"]["provider"]["label"] == "Fallback Gateway"
     assert payload["neuralops"]["router"]["attempts"][0]["status"] == "failed"
-    assert payload["neuralops"]["router"]["attempts"][1]["status"] == "succeeded"
+    assert payload["neuralops"]["router"]["attempts"][3]["status"] == "succeeded"
+    assert payload["neuralops"]["router"]["retryCount"] == 3
     assert "provider-secret" not in str(payload)
 
     routes = client.get("/api/gateway/routes")
@@ -933,10 +934,170 @@ def test_gateway_routes_across_provider_failover_and_records_attempts(client: Te
     latest = routes.json()[0]
     assert latest["traceId"] == payload["neuralops"]["traceId"]
     assert latest["selectedProvider"]["label"] == "Fallback Gateway"
-    assert [attempt["provider"]["label"] for attempt in latest["attempts"]] == ["Primary Gateway", "Fallback Gateway"]
+    assert [attempt["provider"]["label"] for attempt in latest["attempts"]] == [
+        "Primary Gateway",
+        "Primary Gateway",
+        "Primary Gateway",
+        "Fallback Gateway",
+    ]
     assert latest["attempts"][0]["status"] == "failed"
     assert latest["attempts"][0]["error"] == "primary unavailable api_key=[redacted]"
+    assert latest["retryCount"] == 3
     assert "primary-provider-secret" not in str(latest)
+
+
+def test_gateway_lowest_cost_routing_cache_and_metrics(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    token = client.post(
+        "/api/settings/api-keys",
+        json={"name": "gateway cost router", "role": "Developer", "environment": "all", "scopes": ["gateway:invoke"]},
+    ).json()["token"]
+    client.put(
+        "/api/gateway/routing-policy",
+        json={
+            "strategy": "lowest_cost",
+            "retryAttempts": 1,
+            "cacheEnabled": True,
+            "cacheTtlSeconds": 1800,
+            "rateLimitPerMinute": 20,
+        },
+    )
+    for label, model, priority in [
+        ("Expensive Gateway", "gpt-4o", 1),
+        ("Cheap Gateway", "llama-3.3-70b-versatile", 2),
+    ]:
+        client.post(
+            "/api/providers/connections",
+            json={
+                "providerId": "custom",
+                "label": label,
+                "baseUrl": f"https://{label.lower().replace(' ', '-')}.example.test/v1",
+                "defaultModel": model,
+                "apiKey": f"{label.lower().replace(' ', '-')}-secret",
+                "environment": "staging",
+                "priority": priority,
+            },
+        )
+    calls: list[str] = []
+
+    def fake_provider_chat_completion(provider: Any, request: Any) -> dict[str, Any]:
+        calls.append(provider.label)
+        return {
+            "id": f"chatcmpl_{provider.id}",
+            "choices": [{"message": {"content": f"{provider.label} answered."}}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
+        }
+
+    monkeypatch.setattr("app.main.provider_chat_completion", fake_provider_chat_completion)
+    payload = {
+        "messages": [{"role": "user", "content": "Summarize gateway cost routing."}],
+        "metadata": {"environment": "staging", "session": "cost-router-test"},
+    }
+
+    first = client.post("/api/gateway/openai/v1/chat/completions", headers={"x-neuralops-key": token}, json=payload)
+    second = client.post("/api/gateway/openai/v1/chat/completions", headers={"x-neuralops-key": token}, json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert calls == ["Cheap Gateway"]
+    assert first.json()["neuralops"]["router"]["routingStrategy"] == "lowest_cost"
+    assert first.json()["neuralops"]["router"]["selectedReason"] == "lowest_cost"
+    assert first.json()["neuralops"]["router"]["cacheStatus"] == "miss"
+    assert second.json()["neuralops"]["router"]["cacheStatus"] == "hit"
+
+    metrics = client.get("/api/gateway/metrics")
+    assert metrics.status_code == 200
+    assert metrics.json()["totalRequests"] == 2
+    assert metrics.json()["cacheHits"] == 1
+    assert metrics.json()["routedRequests"] == 1
+    assert metrics.json()["providerBreakdown"][0]["label"] == "Cheap Gateway"
+
+
+def test_gateway_budget_and_rate_limit_blocks_before_provider_call(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    token = client.post(
+        "/api/settings/api-keys",
+        json={"name": "gateway budget", "role": "Developer", "environment": "all", "scopes": ["gateway:invoke"]},
+    ).json()["token"]
+    client.post(
+        "/api/providers/connections",
+        json={
+            "providerId": "custom",
+            "label": "Budget Gateway",
+            "baseUrl": "https://budget.example.test/v1",
+            "defaultModel": "gpt-4o",
+            "apiKey": "budget-provider-secret",
+            "environment": "staging",
+            "priority": 1,
+        },
+    )
+    budget = client.post(
+        "/api/gateway/budgets",
+        json={"environment": "staging", "limitUsd": 0.000001, "softLimitUsd": 0.000001, "hardLimitEnabled": True},
+    )
+    assert budget.status_code == 200
+    calls: list[str] = []
+    monkeypatch.setattr("app.main.provider_chat_completion", lambda provider, request: calls.append(provider.label) or {})
+
+    blocked = client.post(
+        "/api/gateway/openai/v1/chat/completions",
+        headers={"x-neuralops-key": token},
+        json={"messages": [{"role": "user", "content": "This call should exceed the budget."}], "metadata": {"environment": "staging"}},
+    )
+
+    assert blocked.status_code == 402
+    assert blocked.json()["detail"]["code"] == "budget_exceeded"
+    assert calls == []
+
+    client.patch(f"/api/gateway/budgets/{budget.json()['id']}", json={"limitUsd": 10, "softLimitUsd": 9, "hardLimitEnabled": True})
+    client.put("/api/gateway/routing-policy", json={"strategy": "priority", "rateLimitPerMinute": 1, "cacheEnabled": False})
+
+    monkeypatch.setattr(
+        "app.main.provider_chat_completion",
+        lambda provider, request: {
+            "id": "chatcmpl_rate_ok",
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"total_tokens": 5},
+        },
+    )
+    first = client.post(
+        "/api/gateway/openai/v1/chat/completions",
+        headers={"x-neuralops-key": token},
+        json={"messages": [{"role": "user", "content": "first"}], "metadata": {"environment": "staging"}},
+    )
+    limited = client.post(
+        "/api/gateway/openai/v1/chat/completions",
+        headers={"x-neuralops-key": token},
+        json={"messages": [{"role": "user", "content": "second"}], "metadata": {"environment": "staging"}},
+    )
+
+    assert first.status_code == 200
+    assert limited.status_code == 429
+    assert limited.json()["detail"]["code"] == "rate_limited"
+
+
+def test_gateway_management_apis_return_policy_budget_requests_and_suggestions(client: TestClient) -> None:
+    policy = client.get("/api/gateway/routing-policy")
+    assert policy.status_code == 200
+    assert policy.json()["strategy"] == "priority"
+
+    updated = client.put("/api/gateway/routing-policy", json={"strategy": "balanced", "retryAttempts": 2, "cacheEnabled": False})
+    assert updated.status_code == 200
+    assert updated.json()["strategy"] == "balanced"
+    assert updated.json()["retryAttempts"] == 2
+
+    budget = client.post("/api/gateway/budgets", json={"environment": "prod", "limitUsd": 25, "softLimitUsd": 20})
+    assert budget.status_code == 200
+    assert budget.json()["remainingUsd"] == 25
+
+    budgets = client.get("/api/gateway/budgets")
+    assert budgets.status_code == 200
+    assert budgets.json()[0]["environment"] == "prod"
+
+    requests = client.get("/api/gateway/requests")
+    suggestions = client.get("/api/gateway/cost-suggestions")
+    assert requests.status_code == 200
+    assert suggestions.status_code == 200
+    assert isinstance(requests.json(), list)
+    assert isinstance(suggestions.json(), list)
 
 
 def test_synthetic_canary_run_records_blockers_and_latest_result(client: TestClient) -> None:

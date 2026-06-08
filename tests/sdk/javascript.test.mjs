@@ -398,6 +398,73 @@ test('JavaScript CLI policy validate and test work from a policy file', async ()
   assert.equal(JSON.parse(testOutput.join('\n')).decision, 'block');
 });
 
+test('JavaScript CLI gateway doctor checks policy, metrics, and routes without leaking keys', async () => {
+  const output = [];
+  const code = await runCli({
+    argv: ['gateway', 'doctor', '--base-url', 'https://neuralops.example', '--api-key', 'nop_sk_secret_value', '--json'],
+    env: {},
+    stdout: (line) => output.push(line),
+    stderr: (line) => output.push(line),
+    fetchImpl: async (url) => {
+      if (url.endsWith('/api/gateway/routing-policy')) {
+        return jsonResponse(200, { strategy: 'lowest_cost', cacheEnabled: true, rateLimitPerMinute: 20 });
+      }
+      if (url.endsWith('/api/gateway/metrics')) {
+        return jsonResponse(200, { totalRequests: 2, routedRequests: 1, cacheHits: 1, providerBreakdown: [] });
+      }
+      if (url.endsWith('/api/gateway/routes')) {
+        return jsonResponse(200, [{ id: 'gr_1', selectedReason: 'lowest_cost', cacheStatus: 'hit' }]);
+      }
+      return jsonResponse(404, { detail: 'not found' });
+    },
+  });
+
+  const result = JSON.parse(output.join('\n'));
+  assert.equal(code, 0);
+  assert.equal(result.status, 'pass');
+  assert.equal(result.policy.strategy, 'lowest_cost');
+  assert.equal(result.metrics.cacheHits, 1);
+  assert.equal(output.join('\n').includes('nop_sk_secret_value'), false);
+});
+
+test('JavaScript CLI gateway send-test posts a governed gateway probe', async () => {
+  const output = [];
+  const code = await runCli({
+    argv: ['gateway', 'send-test', '--base-url', 'https://neuralops.example', '--api-key', 'nop_sk_secret_value', '--json'],
+    env: {},
+    stdout: (line) => output.push(line),
+    stderr: (line) => output.push(line),
+    fetchImpl: async (url, options = {}) => {
+      assert.equal(url, 'https://neuralops.example/api/gateway/openai/v1/chat/completions');
+      assert.equal(options.headers['x-neuralops-key'], 'nop_sk_secret_value');
+      return jsonResponse(200, { id: 'chatcmpl_probe', neuralops: { traceId: 'tr_gateway_probe', router: { selectedReason: 'priority' } } });
+    },
+  });
+
+  const result = JSON.parse(output.join('\n'));
+  assert.equal(code, 0);
+  assert.equal(result.neuralops.traceId, 'tr_gateway_probe');
+  assert.equal(output.join('\n').includes('nop_sk_secret_value'), false);
+});
+
+test('JavaScript CLI gateway routes prints redacted route evidence', async () => {
+  const output = [];
+  const code = await runCli({
+    argv: ['gateway', 'routes', '--base-url', 'https://neuralops.example', '--api-key', 'nop_sk_secret_value', '--json'],
+    env: {},
+    stdout: (line) => output.push(line),
+    stderr: (line) => output.push(line),
+    fetchImpl: async (url) => {
+      assert.equal(url, 'https://neuralops.example/api/gateway/routes');
+      return jsonResponse(200, [{ id: 'gr_1', selectedReason: 'priority', attempts: [{ error: 'api_key=[redacted]' }] }]);
+    },
+  });
+
+  assert.equal(code, 0);
+  assert.equal(JSON.parse(output.join('\n'))[0].id, 'gr_1');
+  assert.equal(output.join('\n').includes('nop_sk_secret_value'), false);
+});
+
 function jsonResponse(status, body) {
   return {
     ok: status >= 200 && status < 300,

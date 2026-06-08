@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import {
   createReleaseGate,
   fetchEvidenceReport,
+  fetchGatewayMetrics,
+  fetchGatewayRequests,
   fetchReleaseGates,
   fetchSystemStatus,
   runDatasetReplayGate,
@@ -27,6 +29,8 @@ export default function EvidenceCenter({ addToast }) {
   const [status, setStatus] = useState(null);
   const [report, setReport] = useState(null);
   const [releaseGates, setReleaseGates] = useState([]);
+  const [gatewayMetrics, setGatewayMetrics] = useState(null);
+  const [gatewayRequests, setGatewayRequests] = useState([]);
   const [runMessage, setRunMessage] = useState('');
   const [gateForm, setGateForm] = useState({
     name: 'Production AI Release Gate',
@@ -47,14 +51,18 @@ export default function EvidenceCenter({ addToast }) {
   const load = async () => {
     setError('');
     try {
-      const [nextStatus, nextReport, nextGates] = await Promise.all([
+      const [nextStatus, nextReport, nextGates, nextGatewayMetrics, nextGatewayRequests] = await Promise.all([
         fetchSystemStatus(),
         fetchEvidenceReport(),
         fetchReleaseGates(),
+        fetchGatewayMetrics(),
+        fetchGatewayRequests(),
       ]);
       setStatus(nextStatus);
       setReport(nextReport);
       setReleaseGates(nextGates);
+      setGatewayMetrics(nextGatewayMetrics);
+      setGatewayRequests(nextGatewayRequests);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Evidence API unavailable');
     }
@@ -183,6 +191,7 @@ export default function EvidenceCenter({ addToast }) {
   const latestGate = report?.latestGate;
   const latestReplayGate = report?.latestReplayGate;
   const latestDatasetReplayGate = report?.latestDatasetReplayGate;
+  const latestGatewayRequest = gatewayRequests[0];
 
   return (
     <div className="main-panel">
@@ -348,6 +357,18 @@ export default function EvidenceCenter({ addToast }) {
               <strong>{latestDatasetReplayGate ? `${latestDatasetReplayGate.score}/100` : 'Replay many traces before deploy'}</strong>
               <span className="page-subtitle">
                 {latestDatasetReplayGate ? `${latestDatasetReplayGate.traceCount} traces | ${latestDatasetReplayGate.blocked} blocked` : 'dataset replay target'}
+              </span>
+            </div>
+            <div className="evidence-gate-card">
+              <span className="metric-label">Gateway Readiness</span>
+              <span className={`badge ${gatewayMetrics?.routedRequests ? 'badge-success' : 'badge-warning'}`}>
+                {gatewayMetrics?.routedRequests ? 'routed' : 'waiting'}
+              </span>
+              <strong>{gatewayMetrics ? `${gatewayMetrics.routedRequests}/${gatewayMetrics.totalRequests}` : '0/0'}</strong>
+              <span className="page-subtitle">
+                {latestGatewayRequest
+                  ? `${latestGatewayRequest.status} via ${latestGatewayRequest.selectedProvider?.label || 'no provider'}`
+                  : 'route first LLM call to create proof'}
               </span>
             </div>
           </div>

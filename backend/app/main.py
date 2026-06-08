@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from copy import deepcopy
 from hashlib import sha256
 import hmac
@@ -9,7 +9,7 @@ import os
 import re
 from secrets import compare_digest, token_hex
 from threading import Lock
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Any
 
 import httpx
@@ -88,10 +88,17 @@ from .schemas import (
     DetectionCase,
     DetectionCaseCreateRequest,
     GatewayChatCompletionRequest,
+    GatewayBudget,
+    GatewayCacheEntry,
+    GatewayCostSuggestion,
+    GatewayMetrics,
     GatewayPolicyDecision,
+    GatewayProviderMetric,
+    GatewayRequestLog,
     GatewayRouteAttempt,
     GatewayRouteEvent,
     GatewayRouteProvider,
+    GatewayRoutingPolicy,
     GitHubPrCommentRequest,
     GitHubPrCommentResult,
     PromptTrafficUpdate,
@@ -1873,6 +1880,261 @@ def gateway_providers_for_environment(environment: str) -> list[RuntimeProvider]
     ]
 
 
+GATEWAY_PRICE_TABLE: dict[str, tuple[float, float]] = {
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4o-mini": (0.15, 0.60),
+    "claude": (3.00, 15.00),
+    "gemini": (0.35, 1.05),
+    "llama-3.3-70b-versatile": (0.59, 0.79),
+    "llama-3.1-70b": (0.59, 0.79),
+    "qwen": (0.30, 0.30),
+    "deepseek": (0.27, 1.10),
+    "mistral": (2.00, 6.00),
+    "local": (0.0, 0.0),
+}
+
+
+def now_iso() -> str:
+    return datetime.now().isoformat()
+
+
+def default_gateway_routing_policy() -> GatewayRoutingPolicy:
+    return GatewayRoutingPolicy(id="default", updatedAt=now_iso())
+
+
+def gateway_routing_policy() -> GatewayRoutingPolicy:
+    record = get_scoped_record("gateway_routing_policies", "default")
+    if record is None:
+        policy = default_gateway_routing_policy()
+        save_scoped_record("gateway_routing_policies", "default", policy.model_dump())
+        return policy
+    return GatewayRoutingPolicy.model_validate(record)
+
+
+def save_gateway_routing_policy(payload: dict[str, Any]) -> GatewayRoutingPolicy:
+    current = gateway_routing_policy().model_dump()
+    current.update({key: value for key, value in payload.items() if value is not None})
+    current["id"] = "default"
+    current["updatedAt"] = now_iso()
+    policy = GatewayRoutingPolicy.model_validate(current)
+    save_scoped_record("gateway_routing_policies", "default", policy.model_dump())
+    return policy
+
+
+def model_price(model: str | None) -> tuple[float, float] | None:
+    normalized = (model or "").lower()
+    for marker, price in GATEWAY_PRICE_TABLE.items():
+        if marker in normalized:
+            return price
+    return None
+
+
+def estimate_gateway_cost_usd(model: str | None, prompt: str, request: GatewayChatCompletionRequest) -> float | None:
+    price = model_price(model)
+    if price is None:
+        return None
+    input_tokens = estimate_tokens(prompt)
+    output_tokens = request.max_tokens or max(32, min(512, input_tokens))
+    return round((input_tokens * price[0] + output_tokens * price[1]) / 1_000_000, 6)
+
+
+def actual_gateway_cost_usd(model: str | None, usage: dict[str, Any] | None) -> float | None:
+    price = model_price(model)
+    if price is None or not usage:
+        return None
+    input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    total_tokens = int(usage.get("total_tokens") or 0)
+    if input_tokens == 0 and output_tokens == 0 and total_tokens:
+        input_tokens = total_tokens
+    return round((input_tokens * price[0] + output_tokens * price[1]) / 1_000_000, 6)
+
+
+def provider_latency_score(provider: RuntimeProvider) -> int:
+    logs = [
+        GatewayRequestLog.model_validate(item)
+        for item in scoped_records("gateway_request_logs")
+        if item.get("selectedProvider", {}).get("id") == provider.id and item.get("status") == "routed"
+    ]
+    if not logs:
+        return 1_000 + provider.priority
+    return max(1, int(sum(item.latencyMs for item in logs) / len(logs)))
+
+
+def provider_success_rate(provider: RuntimeProvider) -> float:
+    logs = [
+        GatewayRequestLog.model_validate(item)
+        for item in scoped_records("gateway_request_logs")
+        if item.get("selectedProvider", {}).get("id") == provider.id
+    ]
+    if not logs:
+        return 1.0
+    successes = sum(1 for item in logs if item.status == "routed")
+    return successes / len(logs)
+
+
+def route_candidates(
+    providers: list[RuntimeProvider],
+    request: GatewayChatCompletionRequest,
+    prompt: str,
+    policy: GatewayRoutingPolicy,
+) -> list[RuntimeProvider]:
+    if policy.strategy == "priority":
+        return sorted(providers, key=lambda item: (item.priority, item.label.lower()))
+    if policy.strategy == "lowest_cost":
+        return sorted(
+            providers,
+            key=lambda item: (
+                estimate_gateway_cost_usd(request.model or item.default_model, prompt, request) is None,
+                estimate_gateway_cost_usd(request.model or item.default_model, prompt, request) or 999_999,
+                item.priority,
+            ),
+        )
+    if policy.strategy == "lowest_latency":
+        return sorted(providers, key=lambda item: (provider_latency_score(item), item.priority))
+    return sorted(
+        providers,
+        key=lambda item: (
+            (estimate_gateway_cost_usd(request.model or item.default_model, prompt, request) or 1) * 1000
+            + provider_latency_score(item) / 1000
+            + (1 - provider_success_rate(item)) * 100,
+            item.priority,
+        ),
+    )
+
+
+def gateway_selected_reason(policy: GatewayRoutingPolicy, selected: RuntimeProvider) -> str:
+    if policy.strategy == "lowest_cost":
+        return "lowest_cost"
+    if policy.strategy == "lowest_latency":
+        return "lowest_latency"
+    if policy.strategy == "balanced":
+        return "balanced_score"
+    return "priority"
+
+
+def gateway_cache_key(request: GatewayChatCompletionRequest, environment: str, prompt: str, policy: GatewayRoutingPolicy) -> str:
+    material = f"{environment}|{request.model or ''}|{policy.strategy}|{prompt}|{request.temperature}|{request.max_tokens}"
+    return sha256(material.encode("utf-8")).hexdigest()
+
+
+def gateway_cache_hit(cache_key: str) -> GatewayCacheEntry | None:
+    record = get_scoped_record("gateway_cache_entries", cache_key)
+    if record is None:
+        return None
+    entry = GatewayCacheEntry.model_validate(record)
+    if datetime.fromisoformat(entry.expiresAt) <= datetime.now():
+        delete_scoped_record("gateway_cache_entries", cache_key)
+        return None
+    entry.hitCount += 1
+    save_scoped_record("gateway_cache_entries", cache_key, entry.model_dump())
+    return entry
+
+
+def save_gateway_cache_entry(
+    cache_key: str,
+    environment: str,
+    model: str | None,
+    payload: dict[str, Any],
+    usage: dict[str, Any] | None,
+    cost_usd: float | None,
+    policy: GatewayRoutingPolicy,
+) -> GatewayCacheEntry:
+    entry = GatewayCacheEntry(
+        id=cache_key,
+        cacheKey=cache_key,
+        environment=environment,  # type: ignore[arg-type]
+        model=model,
+        responsePayload=payload,
+        promptTokens=int((usage or {}).get("prompt_tokens") or (usage or {}).get("input_tokens") or 0),
+        completionTokens=int((usage or {}).get("completion_tokens") or (usage or {}).get("output_tokens") or 0),
+        costUsd=cost_usd or 0,
+        expiresAt=(datetime.now() + timedelta(seconds=policy.cacheTtlSeconds)).isoformat(),
+        createdAt=now_iso(),
+    )
+    save_scoped_record("gateway_cache_entries", cache_key, entry.model_dump())
+    return entry
+
+
+def gateway_budgets() -> list[GatewayBudget]:
+    budgets = [GatewayBudget.model_validate(item) for item in scoped_records("gateway_budgets")]
+    return sorted(budgets, key=lambda item: (item.environment, item.createdAt))
+
+
+def active_gateway_budget(environment: str) -> GatewayBudget | None:
+    candidates = [budget for budget in gateway_budgets() if budget.environment in ("all", environment)]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: (item.environment != environment, item.createdAt), reverse=False)[0]
+
+
+def save_gateway_budget(payload: dict[str, Any]) -> GatewayBudget:
+    now = now_iso()
+    budget_id = f"gb_{token_hex(5)}"
+    limit = float(payload.get("limitUsd", 0))
+    budget = GatewayBudget(
+        id=budget_id,
+        environment=payload.get("environment", "staging"),
+        limitUsd=limit,
+        softLimitUsd=payload.get("softLimitUsd"),
+        hardLimitEnabled=bool(payload.get("hardLimitEnabled", True)),
+        period=payload.get("period", "monthly"),
+        createdAt=now,
+        updatedAt=now,
+        remainingUsd=limit,
+    )
+    save_scoped_record("gateway_budgets", budget.id, budget.model_dump())
+    return budget
+
+
+def patch_gateway_budget(budget_id: str, payload: dict[str, Any]) -> GatewayBudget:
+    existing = get_scoped_record("gateway_budgets", budget_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Gateway budget not found")
+    existing.update({key: value for key, value in payload.items() if value is not None})
+    existing["updatedAt"] = now_iso()
+    existing["remainingUsd"] = max(0, float(existing.get("limitUsd", 0)) - float(existing.get("spentUsd", 0)))
+    budget = GatewayBudget.model_validate(existing)
+    save_scoped_record("gateway_budgets", budget.id, budget.model_dump())
+    return budget
+
+
+def gateway_budget_decision(environment: str, estimated_cost: float | None) -> tuple[str, GatewayBudget | None]:
+    budget = active_gateway_budget(environment)
+    if budget is None or estimated_cost is None:
+        return "allow", budget
+    projected = budget.spentUsd + estimated_cost
+    if budget.hardLimitEnabled and projected > budget.limitUsd:
+        return "hard_limit", budget
+    if budget.softLimitUsd is not None and projected > budget.softLimitUsd:
+        return "soft_limit", budget
+    return "allow", budget
+
+
+def add_gateway_budget_spend(budget: GatewayBudget | None, amount: float | None) -> None:
+    if budget is None or amount is None:
+        return
+    budget.spentUsd = round(budget.spentUsd + amount, 6)
+    budget.remainingUsd = max(0, round(budget.limitUsd - budget.spentUsd, 6))
+    budget.updatedAt = now_iso()
+    save_scoped_record("gateway_budgets", budget.id, budget.model_dump())
+
+
+def gateway_rate_limit_key(api_key: dict[str, Any], environment: str) -> str:
+    minute = datetime.now().strftime("%Y%m%d%H%M")
+    return f"{api_key.get('id', 'unknown')}:{environment}:{minute}"
+
+
+def check_gateway_rate_limit(api_key: dict[str, Any], environment: str, policy: GatewayRoutingPolicy) -> tuple[bool, int]:
+    key = gateway_rate_limit_key(api_key, environment)
+    record = get_scoped_record("gateway_rate_limit_events", key) or {"id": key, "count": 0, "environment": environment, "createdAt": now_iso()}
+    count = int(record.get("count", 0)) + 1
+    record["count"] = count
+    record["updatedAt"] = now_iso()
+    save_scoped_record("gateway_rate_limit_events", key, record)
+    return count <= policy.rateLimitPerMinute, count
+
+
 def gateway_route_provider(provider: RuntimeProvider) -> GatewayRouteProvider:
     return GatewayRouteProvider(id=provider.id, label=provider.label, source=provider.source, priority=provider.priority)
 
@@ -1914,6 +2176,12 @@ def save_gateway_route_event(
     selected_provider: RuntimeProvider | None = None,
     trace_id: str | None = None,
     findings: list[str] | None = None,
+    routing_strategy: str = "priority",
+    selected_reason: str = "priority",
+    cache_status: str = "disabled",
+    budget_decision: str = "allow",
+    estimated_cost_usd: float | None = None,
+    actual_cost_usd: float | None = None,
 ) -> GatewayRouteEvent:
     event = GatewayRouteEvent(
         id=f"gr_{token_hex(6)}",
@@ -1924,6 +2192,13 @@ def save_gateway_route_event(
         status=status,  # type: ignore[arg-type]
         decision=decision,  # type: ignore[arg-type]
         attempts=attempts,
+        routingStrategy=routing_strategy,  # type: ignore[arg-type]
+        selectedReason=selected_reason,
+        retryCount=max(0, len(attempts) - 1),
+        cacheStatus=cache_status,  # type: ignore[arg-type]
+        budgetDecision=budget_decision,  # type: ignore[arg-type]
+        estimatedCostUsd=estimated_cost_usd,
+        actualCostUsd=actual_cost_usd,
         policyFindings=findings or [],
         generatedAt=datetime.now().isoformat(),
     )
@@ -1936,22 +2211,140 @@ def gateway_route_events(limit: int = 25) -> list[GatewayRouteEvent]:
     return sorted(events, key=lambda item: item.generatedAt, reverse=True)[:limit]
 
 
+def save_gateway_request_log(
+    *,
+    environment: str,
+    requested_model: str | None,
+    routing_policy: GatewayRoutingPolicy,
+    selected_reason: str,
+    cache_status: str,
+    budget_decision: str,
+    status: str,
+    latency_ms: int,
+    selected_provider: RuntimeProvider | None = None,
+    trace_id: str | None = None,
+    route_event_id: str | None = None,
+    estimated_cost_usd: float | None = None,
+    actual_cost_usd: float | None = None,
+) -> GatewayRequestLog:
+    log = GatewayRequestLog(
+        id=f"greq_{token_hex(6)}",
+        traceId=trace_id,
+        routeEventId=route_event_id,
+        environment=environment,  # type: ignore[arg-type]
+        requestedModel=requested_model,
+        selectedProvider=gateway_route_provider(selected_provider) if selected_provider else None,
+        routingStrategy=routing_policy.strategy,
+        selectedReason=selected_reason,
+        cacheStatus=cache_status,  # type: ignore[arg-type]
+        budgetDecision=budget_decision,  # type: ignore[arg-type]
+        estimatedCostUsd=estimated_cost_usd,
+        actualCostUsd=actual_cost_usd,
+        latencyMs=max(0, latency_ms),
+        status=status,  # type: ignore[arg-type]
+        generatedAt=now_iso(),
+    )
+    save_scoped_record("gateway_request_logs", log.id, log.model_dump())
+    return log
+
+
+def gateway_request_logs(limit: int = 100) -> list[GatewayRequestLog]:
+    logs = [GatewayRequestLog.model_validate(item) for item in scoped_records("gateway_request_logs")]
+    return sorted(logs, key=lambda item: item.generatedAt, reverse=True)[:limit]
+
+
+def gateway_metrics() -> GatewayMetrics:
+    logs = gateway_request_logs(limit=10_000)
+    routed = [log for log in logs if log.status == "routed" and log.cacheStatus != "hit"]
+    failures = [log for log in logs if log.status in {"failed", "not_configured"}]
+    blocked = [log for log in logs if log.status in {"blocked", "rate_limited", "budget_exceeded"}]
+    provider_rows: dict[str, dict[str, Any]] = {}
+    for log in logs:
+        provider = log.selectedProvider
+        if provider is None:
+            continue
+        row = provider_rows.setdefault(
+            provider.id,
+            {"id": provider.id, "label": provider.label, "requests": 0, "failures": 0, "latency": [], "spendUsd": 0.0},
+        )
+        row["requests"] += 1
+        if log.status != "routed":
+            row["failures"] += 1
+        row["latency"].append(log.latencyMs)
+        row["spendUsd"] += log.actualCostUsd or log.estimatedCostUsd or 0
+    provider_breakdown = [
+        GatewayProviderMetric(
+            id=row["id"],
+            label=row["label"],
+            requests=row["requests"],
+            failures=row["failures"],
+            avgLatencyMs=int(sum(row["latency"]) / max(1, len(row["latency"]))),
+            spendUsd=round(row["spendUsd"], 6),
+        )
+        for row in provider_rows.values()
+    ]
+    provider_breakdown.sort(key=lambda item: item.requests, reverse=True)
+    return GatewayMetrics(
+        totalRequests=len(logs),
+        routedRequests=len(routed),
+        failedRequests=len(failures),
+        blockedRequests=len(blocked),
+        cacheHits=sum(1 for log in logs if log.cacheStatus == "hit"),
+        estimatedSpendUsd=round(sum(log.estimatedCostUsd or 0 for log in logs), 6),
+        actualSpendUsd=round(sum(log.actualCostUsd or 0 for log in logs), 6),
+        providerBreakdown=provider_breakdown,
+        latestRoutes=gateway_route_events(limit=10),
+    )
+
+
+def gateway_cost_suggestions() -> list[GatewayCostSuggestion]:
+    logs = gateway_request_logs(limit=1_000)
+    suggestions: list[GatewayCostSuggestion] = []
+    if any(log.cacheStatus == "miss" for log in logs) and not any(log.cacheStatus == "hit" for log in logs):
+        suggestions.append(
+            GatewayCostSuggestion(
+                id="enable_cache",
+                severity="info",
+                title="Enable exact-match cache for repeated safe prompts",
+                detail="Repeated gateway calls can avoid provider spend when cache is enabled and policy allows the response.",
+            )
+        )
+    providers = gateway_providers_for_environment("staging")
+    if len(providers) >= 2:
+        cheapest = sorted(providers, key=lambda item: estimate_gateway_cost_usd(item.default_model, "sample prompt", GatewayChatCompletionRequest(messages=[{"role": "user", "content": "sample"}])) or 999_999)[0]
+        suggestions.append(
+            GatewayCostSuggestion(
+                id="route_low_cost",
+                severity="review",
+                title=f"Use {cheapest.label} for low-risk staging traffic",
+                detail=f"{cheapest.default_model} has the lowest known local price estimate among configured staging providers.",
+            )
+        )
+    return suggestions
+
+
 def route_gateway_provider(
     providers: list[RuntimeProvider],
     request: GatewayChatCompletionRequest,
+    prompt: str,
+    policy: GatewayRoutingPolicy,
 ) -> tuple[RuntimeProvider | None, dict[str, Any] | None, list[GatewayRouteAttempt]]:
     attempts: list[GatewayRouteAttempt] = []
-    for provider in providers:
-        attempt_started = datetime.now()
-        try:
-            payload = provider_chat_completion(provider, request)
-        except Exception as exc:  # noqa: BLE001 - provider failures are runtime route evidence.
+    for provider in route_candidates(providers, request, prompt, policy):
+        for attempt_number in range(policy.retryAttempts):
+            attempt_started = datetime.now()
+            try:
+                payload = provider_chat_completion(provider, request)
+            except Exception as exc:  # noqa: BLE001 - provider failures are runtime route evidence.
+                latency_ms = max(1, int((datetime.now() - attempt_started).total_seconds() * 1000))
+                attempts.append(gateway_route_attempt(provider, "failed", latency_ms, str(exc)))
+                if attempt_number < policy.retryAttempts - 1:
+                    backoff_ms = policy.retryBackoffMs[min(attempt_number, len(policy.retryBackoffMs) - 1)]
+                    sleep(backoff_ms / 1000)
+                continue
             latency_ms = max(1, int((datetime.now() - attempt_started).total_seconds() * 1000))
-            attempts.append(gateway_route_attempt(provider, "failed", latency_ms, str(exc)))
-            continue
-        latency_ms = max(1, int((datetime.now() - attempt_started).total_seconds() * 1000))
-        attempts.append(gateway_route_attempt(provider, "succeeded", latency_ms))
-        return provider, payload, attempts
+            attempts.append(gateway_route_attempt(provider, "succeeded", latency_ms))
+            return provider, payload, attempts
     return None, None, attempts
 
 
@@ -2959,8 +3352,11 @@ def gateway_chat_completions(
     environment = gateway_environment(request)
     prompt = gateway_messages_text(request.messages)
     started = datetime.now()
-    pre_policy = evaluate_gateway_policy("pre_policy", prompt)
+    routing_policy = gateway_routing_policy()
+    requested_model = request.model
+    estimated_cost = estimate_gateway_cost_usd(requested_model, prompt, request)
     actor = api_key.get("name", api_key.get("id", "gateway-key"))
+    pre_policy = evaluate_gateway_policy("pre_policy", prompt)
     if pre_policy.decision == "block":
         trace = gateway_trace(
             request=request,
@@ -2981,30 +3377,210 @@ def gateway_chat_completions(
             attempts=[],
             trace_id=trace.id,
             findings=pre_policy.findings,
+            routing_strategy=routing_policy.strategy,
+            selected_reason="pre_policy",
+            cache_status="disabled",
+            budget_decision="allow",
+            estimated_cost_usd=estimated_cost,
+        )
+        save_gateway_request_log(
+            environment=environment,
+            requested_model=requested_model,
+            routing_policy=routing_policy,
+            selected_reason="pre_policy",
+            cache_status="disabled",
+            budget_decision="allow",
+            status="blocked",
+            latency_ms=1,
+            trace_id=trace.id,
+            estimated_cost_usd=estimated_cost,
         )
         raise HTTPException(status_code=403, detail={"decision": pre_policy.decision, "stage": pre_policy.stage, "findings": pre_policy.findings, "reason": pre_policy.reason, "traceId": trace.id})
 
     providers = gateway_providers_for_environment(environment)
     if not providers:
-        save_gateway_route_event(
+        route_event = save_gateway_route_event(
             environment=environment,
-            requested_model=request.model,
+            requested_model=requested_model,
             status="not_configured",
             decision="review",
             attempts=[],
             findings=[],
+            routing_strategy=routing_policy.strategy,
+            selected_reason="not_configured",
+            cache_status="disabled",
+            budget_decision="allow",
+            estimated_cost_usd=estimated_cost,
+        )
+        save_gateway_request_log(
+            environment=environment,
+            requested_model=requested_model,
+            routing_policy=routing_policy,
+            selected_reason="not_configured",
+            cache_status="disabled",
+            budget_decision="allow",
+            status="not_configured",
+            latency_ms=1,
+            route_event_id=route_event.id,
+            estimated_cost_usd=estimated_cost,
         )
         raise HTTPException(status_code=503, detail={"code": "not_configured", "message": "No configured live provider is available for the NeuralOps Gateway."})
 
-    provider, provider_payload, route_attempts = route_gateway_provider(providers, request)
-    if provider is None or provider_payload is None:
-        save_gateway_route_event(
+    ordered_providers = route_candidates(providers, request, prompt, routing_policy)
+    if ordered_providers:
+        estimated_cost = estimate_gateway_cost_usd(requested_model or ordered_providers[0].default_model, prompt, request)
+    budget_decision, budget = gateway_budget_decision(environment, estimated_cost)
+    if budget_decision == "hard_limit":
+        route_event = save_gateway_route_event(
             environment=environment,
-            requested_model=request.model,
+            requested_model=requested_model,
+            status="budget_exceeded",
+            decision="block",
+            attempts=[],
+            routing_strategy=routing_policy.strategy,
+            selected_reason="budget_hard_limit",
+            cache_status="disabled",
+            budget_decision=budget_decision,
+            estimated_cost_usd=estimated_cost,
+            findings=[],
+        )
+        save_gateway_request_log(
+            environment=environment,
+            requested_model=requested_model,
+            routing_policy=routing_policy,
+            selected_reason="budget_hard_limit",
+            cache_status="disabled",
+            budget_decision=budget_decision,
+            status="budget_exceeded",
+            latency_ms=1,
+            route_event_id=route_event.id,
+            estimated_cost_usd=estimated_cost,
+        )
+        raise HTTPException(status_code=402, detail={"code": "budget_exceeded", "message": "Gateway budget hard limit would be exceeded before this provider call."})
+
+    rate_allowed, rate_count = check_gateway_rate_limit(api_key, environment, routing_policy)
+    if not rate_allowed:
+        route_event = save_gateway_route_event(
+            environment=environment,
+            requested_model=requested_model,
+            status="rate_limited",
+            decision="block",
+            attempts=[],
+            routing_strategy=routing_policy.strategy,
+            selected_reason="rate_limit",
+            cache_status="disabled",
+            budget_decision=budget_decision,
+            estimated_cost_usd=estimated_cost,
+            findings=[],
+        )
+        save_gateway_request_log(
+            environment=environment,
+            requested_model=requested_model,
+            routing_policy=routing_policy,
+            selected_reason="rate_limit",
+            cache_status="disabled",
+            budget_decision=budget_decision,
+            status="rate_limited",
+            latency_ms=1,
+            route_event_id=route_event.id,
+            estimated_cost_usd=estimated_cost,
+        )
+        raise HTTPException(status_code=429, detail={"code": "rate_limited", "message": "Gateway rate limit exceeded.", "count": rate_count})
+
+    cache_key = gateway_cache_key(request, environment, prompt, routing_policy)
+    cache_entry = gateway_cache_hit(cache_key) if routing_policy.cacheEnabled else None
+    if cache_entry is not None:
+        cached_payload = deepcopy(cache_entry.responsePayload)
+        latency_ms = max(1, int((datetime.now() - started).total_seconds() * 1000))
+        post_policy = evaluate_gateway_policy("post_policy", prompt, gateway_response_text(cached_payload))
+        effective_policy = post_policy if post_policy.decision != "allow" else pre_policy
+        trace = gateway_trace(
+            request=request,
+            environment=environment,
+            provider=None,
+            prompt=prompt,
+            output=gateway_response_text(cached_payload) or "Cached provider response returned no text content.",
+            policy_decision=effective_policy,
+            latency_ms=latency_ms,
+            usage={"total_tokens": cache_entry.promptTokens + cache_entry.completionTokens},
+        )
+        trace.toolCalls = "gateway.openai_chat -> exact_cache"
+        persist_gateway_trace(trace, effective_policy, actor)
+        route_event = save_gateway_route_event(
+            environment=environment,
+            requested_model=requested_model,
+            status="routed",
+            decision=effective_policy.decision,
+            attempts=[],
+            trace_id=trace.id,
+            findings=effective_policy.findings,
+            routing_strategy=routing_policy.strategy,
+            selected_reason="cache_hit",
+            cache_status="hit",
+            budget_decision=budget_decision,
+            estimated_cost_usd=0,
+            actual_cost_usd=0,
+        )
+        save_gateway_request_log(
+            environment=environment,
+            requested_model=requested_model,
+            routing_policy=routing_policy,
+            selected_reason="cache_hit",
+            cache_status="hit",
+            budget_decision=budget_decision,
+            status="routed",
+            latency_ms=latency_ms,
+            trace_id=trace.id,
+            route_event_id=route_event.id,
+            estimated_cost_usd=0,
+            actual_cost_usd=0,
+        )
+        cached_payload["neuralops"] = {
+            "decision": effective_policy.decision,
+            "stage": effective_policy.stage,
+            "findings": effective_policy.findings,
+            "traceId": trace.id,
+            "provider": {"id": "cache", "label": "Exact Gateway Cache", "source": "cache"},
+            "router": {
+                "routeEventId": route_event.id,
+                "attempts": [],
+                "retryCount": 0,
+                "routingStrategy": routing_policy.strategy,
+                "selectedReason": "cache_hit",
+                "cacheStatus": "hit",
+                "budgetDecision": budget_decision,
+                "estimatedCostUsd": 0,
+                "actualCostUsd": 0,
+            },
+        }
+        return cached_payload
+
+    provider, provider_payload, route_attempts = route_gateway_provider(providers, request, prompt, routing_policy)
+    if provider is None or provider_payload is None:
+        route_event = save_gateway_route_event(
+            environment=environment,
+            requested_model=requested_model,
             status="failed",
             decision="review",
             attempts=route_attempts,
             findings=[],
+            routing_strategy=routing_policy.strategy,
+            selected_reason="provider_route_failed",
+            cache_status="miss" if routing_policy.cacheEnabled else "disabled",
+            budget_decision=budget_decision,
+            estimated_cost_usd=estimated_cost,
+        )
+        save_gateway_request_log(
+            environment=environment,
+            requested_model=requested_model,
+            routing_policy=routing_policy,
+            selected_reason="provider_route_failed",
+            cache_status="miss" if routing_policy.cacheEnabled else "disabled",
+            budget_decision=budget_decision,
+            status="failed",
+            latency_ms=max(1, int((datetime.now() - started).total_seconds() * 1000)),
+            route_event_id=route_event.id,
+            estimated_cost_usd=estimated_cost,
         )
         raise HTTPException(
             status_code=502,
@@ -3019,6 +3595,7 @@ def gateway_chat_completions(
     latency_ms = max(1, int((datetime.now() - started).total_seconds() * 1000))
     post_policy = evaluate_gateway_policy("post_policy", prompt, output)
     usage = provider_payload.get("usage") if isinstance(provider_payload.get("usage"), dict) else None
+    actual_cost = actual_gateway_cost_usd(requested_model or provider.default_model, usage)
     trace = gateway_trace(
         request=request,
         environment=environment,
@@ -3031,16 +3608,41 @@ def gateway_chat_completions(
     )
     effective_policy = post_policy if post_policy.decision != "allow" else pre_policy
     persist_gateway_trace(trace, effective_policy, actor)
+    selected_reason = gateway_selected_reason(routing_policy, provider)
     route_event = save_gateway_route_event(
         environment=environment,
-        requested_model=request.model,
+        requested_model=requested_model,
         status="routed",
         decision=effective_policy.decision,
         attempts=route_attempts,
         selected_provider=provider,
         trace_id=trace.id,
         findings=effective_policy.findings,
+        routing_strategy=routing_policy.strategy,
+        selected_reason=selected_reason,
+        cache_status="miss" if routing_policy.cacheEnabled else "disabled",
+        budget_decision=budget_decision,
+        estimated_cost_usd=estimated_cost,
+        actual_cost_usd=actual_cost,
     )
+    save_gateway_request_log(
+        environment=environment,
+        requested_model=requested_model,
+        routing_policy=routing_policy,
+        selected_reason=selected_reason,
+        cache_status="miss" if routing_policy.cacheEnabled else "disabled",
+        budget_decision=budget_decision,
+        status="routed",
+        latency_ms=latency_ms,
+        selected_provider=provider,
+        trace_id=trace.id,
+        route_event_id=route_event.id,
+        estimated_cost_usd=estimated_cost,
+        actual_cost_usd=actual_cost,
+    )
+    add_gateway_budget_spend(budget, actual_cost if actual_cost is not None else estimated_cost)
+    if routing_policy.cacheEnabled and effective_policy.decision == "allow":
+        save_gateway_cache_entry(cache_key, environment, requested_model or provider.default_model, provider_payload, usage, actual_cost, routing_policy)
     if post_policy.decision == "block":
         raise HTTPException(status_code=403, detail={"decision": post_policy.decision, "stage": post_policy.stage, "findings": post_policy.findings, "reason": post_policy.reason, "traceId": trace.id})
 
@@ -3053,6 +3655,13 @@ def gateway_chat_completions(
         "router": {
             "routeEventId": route_event.id,
             "attempts": [gateway_route_response_attempt(attempt) for attempt in route_attempts],
+            "retryCount": route_event.retryCount,
+            "routingStrategy": routing_policy.strategy,
+            "selectedReason": selected_reason,
+            "cacheStatus": "miss" if routing_policy.cacheEnabled else "disabled",
+            "budgetDecision": budget_decision,
+            "estimatedCostUsd": estimated_cost,
+            "actualCostUsd": actual_cost,
         },
     }
     return provider_payload
@@ -3061,6 +3670,55 @@ def gateway_chat_completions(
 @app.get("/api/gateway/routes", response_model=list[GatewayRouteEvent])
 def gateway_routes() -> list[GatewayRouteEvent]:
     return gateway_route_events()
+
+
+@app.get("/api/gateway/metrics", response_model=GatewayMetrics)
+def gateway_metrics_endpoint() -> GatewayMetrics:
+    return gateway_metrics()
+
+
+@app.get("/api/gateway/requests", response_model=list[GatewayRequestLog])
+def gateway_requests() -> list[GatewayRequestLog]:
+    return gateway_request_logs()
+
+
+@app.get("/api/gateway/cost-suggestions", response_model=list[GatewayCostSuggestion])
+def gateway_cost_suggestions_endpoint() -> list[GatewayCostSuggestion]:
+    return gateway_cost_suggestions()
+
+
+@app.get("/api/gateway/routing-policy", response_model=GatewayRoutingPolicy)
+def get_gateway_routing_policy() -> GatewayRoutingPolicy:
+    return gateway_routing_policy()
+
+
+@app.put("/api/gateway/routing-policy", response_model=GatewayRoutingPolicy)
+def update_gateway_routing_policy(request: dict[str, Any]) -> GatewayRoutingPolicy:
+    return save_gateway_routing_policy(request)
+
+
+@app.get("/api/gateway/budgets", response_model=list[GatewayBudget])
+def get_gateway_budgets() -> list[GatewayBudget]:
+    return gateway_budgets()
+
+
+@app.post("/api/gateway/budgets", response_model=GatewayBudget)
+def create_gateway_budget(request: dict[str, Any]) -> GatewayBudget:
+    return save_gateway_budget(request)
+
+
+@app.patch("/api/gateway/budgets/{budget_id}", response_model=GatewayBudget)
+def update_gateway_budget(budget_id: str, request: dict[str, Any]) -> GatewayBudget:
+    return patch_gateway_budget(budget_id, request)
+
+
+@app.post("/api/gateway/cache/clear")
+def clear_gateway_cache() -> dict[str, Any]:
+    entries = scoped_records("gateway_cache_entries")
+    for entry in entries:
+        delete_scoped_record("gateway_cache_entries", str(entry.get("id")))
+    save_audit_event("gateway.cache.clear", "operator", "gateway_cache_entries", "allow", f"Cleared {len(entries)} gateway cache entrie(s).")
+    return {"cleared": len(entries)}
 
 
 @app.get("/api/dashboard", response_model=DashboardSnapshot)

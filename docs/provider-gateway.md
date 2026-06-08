@@ -66,7 +66,7 @@ Local/private providers can be enabled with:
 
 Every successful run stores an agent run, trace, eval checks, cost estimate, and audit evidence.
 
-## OpenAI-Compatible Policy Gateway Routing
+## OpenAI-Compatible Intelligent Gateway Routing
 
 Server apps can send OpenAI-compatible chat completion calls to:
 
@@ -74,22 +74,56 @@ Server apps can send OpenAI-compatible chat completion calls to:
 POST /api/gateway/openai/v1/chat/completions
 ```
 
-NeuralOps now routes those calls through configured providers in priority order for the requested environment. For each call it records:
+NeuralOps routes those calls through configured providers for the requested environment. The routing policy can use:
+
+- `priority`: configured provider priority.
+- `lowest_cost`: the lowest known local price estimate.
+- `lowest_latency`: observed gateway request latency.
+- `balanced`: cost, latency, success rate, provider health, and priority.
+
+For each call it records:
 
 - pre-policy decision
+- routing strategy and selected reason
+- estimated cost before the provider call
+- budget decision
+- cache status
 - provider attempts and latencies
 - failed provider route attempts
 - selected provider
 - post-policy decision
 - trace ID and audit evidence
 
-If the first provider fails, NeuralOps tries the next eligible provider instead of failing immediately. If every provider fails, it returns `502 provider_route_failed` with redacted attempt metadata. If no provider exists, it returns `503 not_configured`.
+If the first provider fails, NeuralOps retries with backoff and then tries the next eligible provider instead of failing immediately. If every provider fails, it returns `502 provider_route_failed` with redacted attempt metadata. If no provider exists, it returns `503 not_configured`.
 
-Recent route evidence is available in Settings under **Recent Gateway Route Evidence** and through:
+Honest failure behavior:
+
+- `503 not_configured`: no eligible live provider is configured.
+- `429 rate_limited`: the NeuralOps API key exceeded the rolling per-minute gateway limit.
+- `402 budget_exceeded`: a hard environment budget would be exceeded before provider spend.
+- `502 provider_route_failed`: all configured provider attempts failed.
+
+Recent route evidence is available on the **Gateway** page and through:
 
 ```text
 GET /api/gateway/routes
 ```
+
+Gateway operating APIs:
+
+```text
+GET  /api/gateway/metrics
+GET  /api/gateway/requests
+GET  /api/gateway/cost-suggestions
+GET  /api/gateway/routing-policy
+PUT  /api/gateway/routing-policy
+GET  /api/gateway/budgets
+POST /api/gateway/budgets
+PATCH /api/gateway/budgets/{budget_id}
+POST /api/gateway/cache/clear
+```
+
+Exact-match cache is disabled by default. When enabled, it caches only safe successful responses and still writes a trace, request log, route evidence, and audit event for every cache hit. Semantic cache and Redis-backed rate limits are future production upgrades after the exact-cache path is proven.
 
 ## Security
 

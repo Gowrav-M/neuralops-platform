@@ -183,6 +183,51 @@ export function fetchGatewayRoutes() {
   return request('/api/gateway/routes');
 }
 
+export function fetchGatewayMetrics() {
+  return request('/api/gateway/metrics');
+}
+
+export function fetchGatewayRequests() {
+  return request('/api/gateway/requests');
+}
+
+export function fetchGatewayCostSuggestions() {
+  return request('/api/gateway/cost-suggestions');
+}
+
+export function fetchGatewayRoutingPolicy() {
+  return request('/api/gateway/routing-policy');
+}
+
+export function updateGatewayRoutingPolicy(payload) {
+  return request('/api/gateway/routing-policy', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchGatewayBudgets() {
+  return request('/api/gateway/budgets');
+}
+
+export function createGatewayBudget(payload) {
+  return request('/api/gateway/budgets', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateGatewayBudget(budgetId, patch) {
+  return request(`/api/gateway/budgets/${budgetId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function clearGatewayCache() {
+  return request('/api/gateway/cache/clear', { method: 'POST' });
+}
+
 export function fetchTraces() {
   return request('/api/traces');
 }

@@ -24,6 +24,9 @@ Commands:
   neuralops replay-gate dataset [--trace <id,id>] [options]
   neuralops policy validate [options]
   neuralops policy test --input <text> [options]
+  neuralops gateway doctor [options]
+  neuralops gateway send-test [options]
+  neuralops gateway routes [options]
 
 Options:
   --base-url <url>             NeuralOps API URL. Defaults to NEURALOPS_API_URL or http://localhost:8000
@@ -587,6 +590,100 @@ async function runDatasetReplayGate({ args, env, fetchImpl, stdout }) {
   return failThreshold(result.decision, failOn) ? 1 : 0;
 }
 
+async function runGatewayDoctor({ args, env, fetchImpl, stdout }) {
+  const baseUrl = normalizeBaseUrl(args, env);
+  const apiKey = readApiKey(args, env);
+  const [policy, metrics, routes] = await Promise.all([
+    requestJson(fetchImpl, `${baseUrl}/api/gateway/routing-policy`, { apiKey }),
+    requestJson(fetchImpl, `${baseUrl}/api/gateway/metrics`, { apiKey }),
+    requestJson(fetchImpl, `${baseUrl}/api/gateway/routes`, { apiKey }),
+  ]);
+  const checks = [
+    {
+      id: "routing_policy",
+      label: "Routing policy",
+      status: policy.ok ? "pass" : "fail",
+      evidence: policy.ok ? `strategy=${policy.body.strategy} cache=${Boolean(policy.body.cacheEnabled)}` : `HTTP ${policy.status}`,
+      reason: policy.ok ? undefined : errorMessage(policy),
+    },
+    {
+      id: "gateway_metrics",
+      label: "Gateway metrics",
+      status: metrics.ok ? "pass" : "fail",
+      evidence: metrics.ok ? `${metrics.body.totalRequests ?? 0} request(s), ${metrics.body.cacheHits ?? 0} cache hit(s)` : `HTTP ${metrics.status}`,
+      reason: metrics.ok ? undefined : errorMessage(metrics),
+    },
+    {
+      id: "route_evidence",
+      label: "Route evidence",
+      status: routes.ok ? "pass" : "fail",
+      evidence: routes.ok ? `${Array.isArray(routes.body) ? routes.body.length : 0} route event(s)` : `HTTP ${routes.status}`,
+      reason: routes.ok ? undefined : errorMessage(routes),
+    },
+  ];
+  const summary = summarizeChecks({ baseUrl, apiKey, checks });
+  const result = {
+    ...summary,
+    command: "gateway doctor",
+    policy: policy.ok ? policy.body : null,
+    metrics: metrics.ok ? metrics.body : null,
+    latestRoutes: routes.ok ? routes.body : [],
+  };
+  if (has(args, "--json")) {
+    stdout(JSON.stringify(result, null, 2));
+  } else {
+    printChecks(summary, stdout);
+  }
+  return doctorShouldFail(summary, valueOf(args, "--fail-on", "fail")) ? 1 : 0;
+}
+
+async function runGatewaySendTest({ args, env, fetchImpl, stdout }) {
+  const baseUrl = normalizeBaseUrl(args, env);
+  const apiKey = readApiKey(args, env);
+  if (!apiKey) {
+    throw new Error("NEURALOPS_API_KEY or --api-key is required for gateway send-test");
+  }
+  const result = await postJson(fetchImpl, `${baseUrl}/api/gateway/openai/v1/chat/completions`, gatewayProbePayload(args), apiKey);
+  if (has(args, "--json")) {
+    stdout(JSON.stringify(result, null, 2));
+  } else {
+    stdout(`NeuralOps gateway trace: ${result.neuralops?.traceId || "accepted"}`);
+    stdout(`Route: ${result.neuralops?.router?.selectedReason || "unknown"}`);
+  }
+  return 0;
+}
+
+async function runGatewayRoutes({ args, env, fetchImpl, stdout }) {
+  const baseUrl = normalizeBaseUrl(args, env);
+  const apiKey = readApiKey(args, env);
+  const result = await requestJson(fetchImpl, `${baseUrl}/api/gateway/routes`, { apiKey });
+  if (!result.ok) {
+    throw new Error(errorMessage(result));
+  }
+  if (has(args, "--json")) {
+    stdout(JSON.stringify(result.body, null, 2));
+  } else {
+    for (const route of result.body || []) {
+      stdout(`${route.id} ${route.status || "unknown"} ${route.selectedReason || "unknown"} ${route.cacheStatus || "unknown"}`);
+    }
+  }
+  return 0;
+}
+
+async function runGateway({ args, env, fetchImpl, stdout }) {
+  const subcommand = args[1];
+  if (subcommand === "doctor") {
+    return runGatewayDoctor({ args, env, fetchImpl, stdout });
+  }
+  if (subcommand === "send-test") {
+    return runGatewaySendTest({ args, env, fetchImpl, stdout });
+  }
+  if (subcommand === "routes") {
+    return runGatewayRoutes({ args, env, fetchImpl, stdout });
+  }
+  throw new Error("gateway command must be doctor, send-test, or routes");
+}
+
 export async function runCli({
   argv = process.argv.slice(2),
   env = process.env,
@@ -620,6 +717,9 @@ export async function runCli({
     }
     if (argv[0] === "policy") {
       return await runPolicy({ args: argv, stdout });
+    }
+    if (argv[0] === "gateway") {
+      return await runGateway({ args: argv, env, fetchImpl, stdout });
     }
     usage(stdout);
     return 2;

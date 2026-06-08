@@ -875,6 +875,97 @@ class GatewayPolicyDecision(BaseModel):
     reason: str
 
 
+GatewayRoutingStrategy = Literal["priority", "lowest_cost", "lowest_latency", "balanced"]
+GatewayCacheStatus = Literal["disabled", "miss", "hit", "stored"]
+GatewayBudgetDecision = Literal["allow", "soft_limit", "hard_limit"]
+
+
+class GatewayRoutingPolicy(BaseModel):
+    id: str = "default"
+    strategy: GatewayRoutingStrategy = "priority"
+    retryAttempts: int = Field(default=3, ge=1, le=5)
+    retryBackoffMs: list[int] = Field(default_factory=lambda: [100, 400, 1600])
+    cacheEnabled: bool = False
+    cacheTtlSeconds: int = Field(default=1800, ge=60, le=86_400)
+    rateLimitPerMinute: int = Field(default=60, ge=1, le=100_000)
+    maxEstimatedCostUsd: float | None = Field(default=None, ge=0)
+    updatedAt: str | None = None
+
+
+class GatewayBudget(BaseModel):
+    id: str
+    environment: Literal["prod", "staging", "dev", "all"] = "staging"
+    limitUsd: float = Field(ge=0)
+    softLimitUsd: float | None = Field(default=None, ge=0)
+    spentUsd: float = Field(default=0, ge=0)
+    hardLimitEnabled: bool = True
+    period: Literal["daily", "weekly", "monthly"] = "monthly"
+    createdAt: str
+    updatedAt: str
+    remainingUsd: float = Field(ge=0)
+
+
+class GatewayRequestLog(BaseModel):
+    id: str
+    traceId: str | None = None
+    routeEventId: str | None = None
+    environment: Literal["prod", "staging", "dev"]
+    requestedModel: str | None = None
+    selectedProvider: GatewayRouteProvider | None = None
+    routingStrategy: GatewayRoutingStrategy
+    selectedReason: str
+    cacheStatus: GatewayCacheStatus
+    budgetDecision: GatewayBudgetDecision
+    estimatedCostUsd: float | None = Field(default=None, ge=0)
+    actualCostUsd: float | None = Field(default=None, ge=0)
+    latencyMs: int = Field(ge=0)
+    status: Literal["routed", "blocked", "not_configured", "failed", "rate_limited", "budget_exceeded"]
+    generatedAt: str
+
+
+class GatewayCacheEntry(BaseModel):
+    id: str
+    cacheKey: str
+    environment: Literal["prod", "staging", "dev"]
+    model: str | None = None
+    responsePayload: dict[str, Any]
+    promptTokens: int = Field(default=0, ge=0)
+    completionTokens: int = Field(default=0, ge=0)
+    costUsd: float = Field(default=0, ge=0)
+    expiresAt: str
+    createdAt: str
+    hitCount: int = Field(default=0, ge=0)
+
+
+class GatewayProviderMetric(BaseModel):
+    id: str
+    label: str
+    requests: int = Field(ge=0)
+    failures: int = Field(ge=0)
+    avgLatencyMs: int = Field(ge=0)
+    spendUsd: float = Field(ge=0)
+
+
+class GatewayMetrics(BaseModel):
+    totalRequests: int = Field(ge=0)
+    routedRequests: int = Field(ge=0)
+    failedRequests: int = Field(ge=0)
+    blockedRequests: int = Field(ge=0)
+    cacheHits: int = Field(ge=0)
+    estimatedSpendUsd: float = Field(ge=0)
+    actualSpendUsd: float = Field(ge=0)
+    providerBreakdown: list[GatewayProviderMetric]
+    latestRoutes: list["GatewayRouteEvent"]
+
+
+class GatewayCostSuggestion(BaseModel):
+    id: str
+    severity: Literal["info", "review", "high"]
+    title: str
+    detail: str
+    estimatedSavingsUsd: float | None = Field(default=None, ge=0)
+
+
 class GatewayRouteProvider(BaseModel):
     id: str
     label: str
@@ -895,9 +986,16 @@ class GatewayRouteEvent(BaseModel):
     environment: Literal["prod", "staging", "dev"]
     requestedModel: str | None = None
     selectedProvider: GatewayRouteProvider | None = None
-    status: Literal["routed", "blocked", "not_configured", "failed"]
+    status: Literal["routed", "blocked", "not_configured", "failed", "rate_limited", "budget_exceeded"]
     decision: Literal["allow", "review", "block"]
     attempts: list[GatewayRouteAttempt]
+    routingStrategy: GatewayRoutingStrategy = "priority"
+    selectedReason: str = "priority"
+    retryCount: int = Field(default=0, ge=0)
+    cacheStatus: GatewayCacheStatus = "disabled"
+    budgetDecision: GatewayBudgetDecision = "allow"
+    estimatedCostUsd: float | None = Field(default=None, ge=0)
+    actualCostUsd: float | None = Field(default=None, ge=0)
     policyFindings: list[str] = Field(default_factory=list)
     generatedAt: str
 
