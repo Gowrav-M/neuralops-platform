@@ -8,7 +8,7 @@ NeuralOps now includes a deploy-readiness and response layer: `/api/system/statu
 
 NeuralOps also includes a Connect workflow so a real app can send traces through SDK, REST, or OpenTelemetry instead of relying on sample dashboard records.
 
-NeuralOps now also exposes an OpenAI-compatible Policy Gateway. A backend service can call `/api/gateway/openai/v1/chat/completions` with a NeuralOps key, and NeuralOps will run pre/post guardrails, forward only to configured live providers, store trace/audit/cost evidence, and return `not_configured` when no provider is connected instead of inventing model output.
+NeuralOps now also exposes an OpenAI-compatible Policy Gateway. A backend service can call `/api/gateway/openai/v1/chat/completions` with a NeuralOps key, and NeuralOps will run pre/post guardrails, route across configured providers with failover evidence, store trace/audit/cost evidence, and return `not_configured` when no provider is connected instead of inventing model output.
 
 NeuralOps also includes a developer Integration Kit and Trace Replay Gate:
 

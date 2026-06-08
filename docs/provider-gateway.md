@@ -66,6 +66,31 @@ Local/private providers can be enabled with:
 
 Every successful run stores an agent run, trace, eval checks, cost estimate, and audit evidence.
 
+## OpenAI-Compatible Policy Gateway Routing
+
+Server apps can send OpenAI-compatible chat completion calls to:
+
+```text
+POST /api/gateway/openai/v1/chat/completions
+```
+
+NeuralOps now routes those calls through configured providers in priority order for the requested environment. For each call it records:
+
+- pre-policy decision
+- provider attempts and latencies
+- failed provider route attempts
+- selected provider
+- post-policy decision
+- trace ID and audit evidence
+
+If the first provider fails, NeuralOps tries the next eligible provider instead of failing immediately. If every provider fails, it returns `502 provider_route_failed` with redacted attempt metadata. If no provider exists, it returns `503 not_configured`.
+
+Recent route evidence is available in Settings under **Recent Gateway Route Evidence** and through:
+
+```text
+GET /api/gateway/routes
+```
+
 ## Security
 
 Set `NEURALOPS_SECRET_KEY` in production. Provider keys are encrypted at rest using this server-side key and are never exposed in API responses.

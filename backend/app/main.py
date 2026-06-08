@@ -6,6 +6,7 @@ from copy import deepcopy
 from hashlib import sha256
 import hmac
 import os
+import re
 from secrets import compare_digest, token_hex
 from threading import Lock
 from time import perf_counter
@@ -88,6 +89,9 @@ from .schemas import (
     DetectionCaseCreateRequest,
     GatewayChatCompletionRequest,
     GatewayPolicyDecision,
+    GatewayRouteAttempt,
+    GatewayRouteEvent,
+    GatewayRouteProvider,
     GitHubPrCommentRequest,
     GitHubPrCommentResult,
     PromptTrafficUpdate,
@@ -558,6 +562,7 @@ def build_system_status() -> SystemStatus:
         "release_autopilot",
         "replay_gates",
         "dataset_replay_gates",
+        "gateway_route_events",
         "connector_deliveries",
         "detections",
         "release_gate_definitions",
@@ -576,6 +581,7 @@ def build_system_status() -> SystemStatus:
     api_key_count = len(settings_payload.get("apiKeys", []))
     gateway_key_count = sum(1 for api_key in settings_payload.get("apiKeys", []) if "gateway:invoke" in api_key.get("scopes", []) or "admin" in api_key.get("scopes", []))
     gateway_trace_count = sum(1 for trace in scoped_records("traces") if str(trace.get("id", "")).startswith("tr_gateway_"))
+    gateway_route_count = record_counts["gateway_route_events"]
     member_count = record_counts["workspace_members"]
     blockers: list[str] = []
 
@@ -618,8 +624,8 @@ def build_system_status() -> SystemStatus:
         FeatureTruth(
             id="policy_gateway",
             label="OpenAI-Compatible Policy Gateway",
-            state="persisted" if gateway_trace_count else "live_provider" if live_configured and gateway_key_count else "not_configured",
-            evidence=f"{gateway_key_count} gateway key(s), {gateway_trace_count} gateway trace(s)",
+            state="persisted" if gateway_trace_count or gateway_route_count else "live_provider" if live_configured and gateway_key_count else "not_configured",
+            evidence=f"{gateway_key_count} gateway key(s), {gateway_trace_count} gateway trace(s), {gateway_route_count} route event(s)",
             action="Route LLM calls through /api/gateway/openai/v1/chat/completions to enforce policy and store evidence.",
         ),
         FeatureTruth(
@@ -1867,6 +1873,88 @@ def gateway_providers_for_environment(environment: str) -> list[RuntimeProvider]
     ]
 
 
+def gateway_route_provider(provider: RuntimeProvider) -> GatewayRouteProvider:
+    return GatewayRouteProvider(id=provider.id, label=provider.label, source=provider.source, priority=provider.priority)
+
+
+def sanitize_gateway_error(error: str) -> str:
+    sanitized = re.sub(r"(?i)(bearer|authorization|api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+", r"\1=[redacted]", error)
+    sanitized = re.sub(r"\b(sk|gsk|sb_secret|sb_publishable|nop_sk)_[A-Za-z0-9_\-]{8,}\b", "[redacted-key]", sanitized)
+    return sanitized[:240]
+
+
+def gateway_route_attempt(provider: RuntimeProvider, status: str, latency_ms: int, error: str | None = None) -> GatewayRouteAttempt:
+    return GatewayRouteAttempt(
+        provider=gateway_route_provider(provider),
+        status=status,  # type: ignore[arg-type]
+        latencyMs=max(0, latency_ms),
+        error=sanitize_gateway_error(error) if error else None,
+    )
+
+
+def gateway_route_response_attempt(attempt: GatewayRouteAttempt) -> dict[str, Any]:
+    return {
+        "id": attempt.provider.id,
+        "label": attempt.provider.label,
+        "source": attempt.provider.source,
+        "priority": attempt.provider.priority,
+        "status": attempt.status,
+        "latencyMs": attempt.latencyMs,
+        "error": attempt.error,
+    }
+
+
+def save_gateway_route_event(
+    *,
+    environment: str,
+    requested_model: str | None,
+    status: str,
+    decision: str,
+    attempts: list[GatewayRouteAttempt],
+    selected_provider: RuntimeProvider | None = None,
+    trace_id: str | None = None,
+    findings: list[str] | None = None,
+) -> GatewayRouteEvent:
+    event = GatewayRouteEvent(
+        id=f"gr_{token_hex(6)}",
+        traceId=trace_id,
+        environment=environment,  # type: ignore[arg-type]
+        requestedModel=requested_model,
+        selectedProvider=gateway_route_provider(selected_provider) if selected_provider else None,
+        status=status,  # type: ignore[arg-type]
+        decision=decision,  # type: ignore[arg-type]
+        attempts=attempts,
+        policyFindings=findings or [],
+        generatedAt=datetime.now().isoformat(),
+    )
+    save_scoped_record("gateway_route_events", event.id, event.model_dump())
+    return event
+
+
+def gateway_route_events(limit: int = 25) -> list[GatewayRouteEvent]:
+    events = [GatewayRouteEvent.model_validate(item) for item in scoped_records("gateway_route_events")]
+    return sorted(events, key=lambda item: item.generatedAt, reverse=True)[:limit]
+
+
+def route_gateway_provider(
+    providers: list[RuntimeProvider],
+    request: GatewayChatCompletionRequest,
+) -> tuple[RuntimeProvider | None, dict[str, Any] | None, list[GatewayRouteAttempt]]:
+    attempts: list[GatewayRouteAttempt] = []
+    for provider in providers:
+        attempt_started = datetime.now()
+        try:
+            payload = provider_chat_completion(provider, request)
+        except Exception as exc:  # noqa: BLE001 - provider failures are runtime route evidence.
+            latency_ms = max(1, int((datetime.now() - attempt_started).total_seconds() * 1000))
+            attempts.append(gateway_route_attempt(provider, "failed", latency_ms, str(exc)))
+            continue
+        latency_ms = max(1, int((datetime.now() - attempt_started).total_seconds() * 1000))
+        attempts.append(gateway_route_attempt(provider, "succeeded", latency_ms))
+        return provider, payload, attempts
+    return None, None, attempts
+
+
 def gateway_policy_mode(policy_id: str) -> str:
     policy = next((item for item in scoped_records("policies") if item.get("id") == policy_id), None)
     if not policy or not policy.get("enabled", True):
@@ -2885,17 +2973,47 @@ def gateway_chat_completions(
             usage=None,
         )
         persist_gateway_trace(trace, pre_policy, actor)
+        save_gateway_route_event(
+            environment=environment,
+            requested_model=request.model,
+            status="blocked",
+            decision=pre_policy.decision,
+            attempts=[],
+            trace_id=trace.id,
+            findings=pre_policy.findings,
+        )
         raise HTTPException(status_code=403, detail={"decision": pre_policy.decision, "stage": pre_policy.stage, "findings": pre_policy.findings, "reason": pre_policy.reason, "traceId": trace.id})
 
     providers = gateway_providers_for_environment(environment)
     if not providers:
+        save_gateway_route_event(
+            environment=environment,
+            requested_model=request.model,
+            status="not_configured",
+            decision="review",
+            attempts=[],
+            findings=[],
+        )
         raise HTTPException(status_code=503, detail={"code": "not_configured", "message": "No configured live provider is available for the NeuralOps Gateway."})
 
-    provider = providers[0]
-    try:
-        provider_payload = provider_chat_completion(provider, request)
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail={"code": "provider_error", "message": str(exc)}) from exc
+    provider, provider_payload, route_attempts = route_gateway_provider(providers, request)
+    if provider is None or provider_payload is None:
+        save_gateway_route_event(
+            environment=environment,
+            requested_model=request.model,
+            status="failed",
+            decision="review",
+            attempts=route_attempts,
+            findings=[],
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "provider_route_failed",
+                "message": "All configured NeuralOps Gateway providers failed.",
+                "attempts": [gateway_route_response_attempt(attempt) for attempt in route_attempts],
+            },
+        )
 
     output = gateway_response_text(provider_payload)
     latency_ms = max(1, int((datetime.now() - started).total_seconds() * 1000))
@@ -2913,6 +3031,16 @@ def gateway_chat_completions(
     )
     effective_policy = post_policy if post_policy.decision != "allow" else pre_policy
     persist_gateway_trace(trace, effective_policy, actor)
+    route_event = save_gateway_route_event(
+        environment=environment,
+        requested_model=request.model,
+        status="routed",
+        decision=effective_policy.decision,
+        attempts=route_attempts,
+        selected_provider=provider,
+        trace_id=trace.id,
+        findings=effective_policy.findings,
+    )
     if post_policy.decision == "block":
         raise HTTPException(status_code=403, detail={"decision": post_policy.decision, "stage": post_policy.stage, "findings": post_policy.findings, "reason": post_policy.reason, "traceId": trace.id})
 
@@ -2922,8 +3050,17 @@ def gateway_chat_completions(
         "findings": effective_policy.findings,
         "traceId": trace.id,
         "provider": {"id": provider.id, "label": provider.label, "source": provider.source},
+        "router": {
+            "routeEventId": route_event.id,
+            "attempts": [gateway_route_response_attempt(attempt) for attempt in route_attempts],
+        },
     }
     return provider_payload
+
+
+@app.get("/api/gateway/routes", response_model=list[GatewayRouteEvent])
+def gateway_routes() -> list[GatewayRouteEvent]:
+    return gateway_route_events()
 
 
 @app.get("/api/dashboard", response_model=DashboardSnapshot)

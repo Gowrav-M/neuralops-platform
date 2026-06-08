@@ -875,6 +875,33 @@ class GatewayPolicyDecision(BaseModel):
     reason: str
 
 
+class GatewayRouteProvider(BaseModel):
+    id: str
+    label: str
+    source: str
+    priority: int
+
+
+class GatewayRouteAttempt(BaseModel):
+    provider: GatewayRouteProvider
+    status: Literal["failed", "succeeded"]
+    latencyMs: int = Field(ge=0)
+    error: str | None = None
+
+
+class GatewayRouteEvent(BaseModel):
+    id: str
+    traceId: str | None = None
+    environment: Literal["prod", "staging", "dev"]
+    requestedModel: str | None = None
+    selectedProvider: GatewayRouteProvider | None = None
+    status: Literal["routed", "blocked", "not_configured", "failed"]
+    decision: Literal["allow", "review", "block"]
+    attempts: list[GatewayRouteAttempt]
+    policyFindings: list[str] = Field(default_factory=list)
+    generatedAt: str
+
+
 class ReplayCheck(BaseModel):
     name: str
     status: Literal["pass", "warn", "fail"]

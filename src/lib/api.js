@@ -179,6 +179,10 @@ export function routeGatewayChatCompletion(payload, apiKey) {
   });
 }
 
+export function fetchGatewayRoutes() {
+  return request('/api/gateway/routes');
+}
+
 export function fetchTraces() {
   return request('/api/traces');
 }

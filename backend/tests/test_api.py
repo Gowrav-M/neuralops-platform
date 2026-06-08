@@ -868,6 +868,77 @@ def test_connectivity_map_tracks_ingest_webhook_and_automation_state(client: Tes
     assert "gateway:invoke" in checks["ingest_key"]["evidence"]
 
 
+def test_gateway_routes_across_provider_failover_and_records_attempts(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    token = client.post(
+        "/api/settings/api-keys",
+        json={"name": "gateway router", "role": "Developer", "environment": "all", "scopes": ["gateway:invoke"]},
+    ).json()["token"]
+    client.post(
+        "/api/providers/connections",
+        json={
+            "providerId": "custom",
+            "label": "Primary Gateway",
+            "baseUrl": "https://primary.example.test/v1",
+            "defaultModel": "primary-model",
+            "apiKey": "primary-provider-secret",
+            "environment": "staging",
+            "priority": 1,
+        },
+    )
+    client.post(
+        "/api/providers/connections",
+        json={
+            "providerId": "custom",
+            "label": "Fallback Gateway",
+            "baseUrl": "https://fallback.example.test/v1",
+            "defaultModel": "fallback-model",
+            "apiKey": "fallback-provider-secret",
+            "environment": "staging",
+            "priority": 2,
+        },
+    )
+    calls: list[str] = []
+
+    def fake_provider_chat_completion(provider: Any, request: Any) -> dict[str, Any]:
+        calls.append(provider.label)
+        if provider.label == "Primary Gateway":
+            raise RuntimeError("primary unavailable api_key=primary-provider-secret")
+        return {
+            "id": "chatcmpl_router_ok",
+            "choices": [{"message": {"content": "Fallback provider answered."}}],
+            "usage": {"total_tokens": 44},
+        }
+
+    monkeypatch.setattr("app.main.provider_chat_completion", fake_provider_chat_completion)
+
+    response = client.post(
+        "/api/gateway/openai/v1/chat/completions",
+        headers={"x-neuralops-key": token},
+        json={
+            "messages": [{"role": "user", "content": "Summarize cost controls."}],
+            "metadata": {"environment": "staging", "session": "router-test"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert calls == ["Primary Gateway", "Fallback Gateway"]
+    assert payload["neuralops"]["provider"]["label"] == "Fallback Gateway"
+    assert payload["neuralops"]["router"]["attempts"][0]["status"] == "failed"
+    assert payload["neuralops"]["router"]["attempts"][1]["status"] == "succeeded"
+    assert "provider-secret" not in str(payload)
+
+    routes = client.get("/api/gateway/routes")
+    assert routes.status_code == 200
+    latest = routes.json()[0]
+    assert latest["traceId"] == payload["neuralops"]["traceId"]
+    assert latest["selectedProvider"]["label"] == "Fallback Gateway"
+    assert [attempt["provider"]["label"] for attempt in latest["attempts"]] == ["Primary Gateway", "Fallback Gateway"]
+    assert latest["attempts"][0]["status"] == "failed"
+    assert latest["attempts"][0]["error"] == "primary unavailable api_key=[redacted]"
+    assert "primary-provider-secret" not in str(latest)
+
+
 def test_synthetic_canary_run_records_blockers_and_latest_result(client: TestClient) -> None:
     response = client.post("/api/synthetic/run", json={"target": "production"})
 
