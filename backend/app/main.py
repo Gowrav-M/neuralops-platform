@@ -36,6 +36,12 @@ from .metrics import build_stats
 from .otel import normalize_otel_payload, replay_trace
 from .provider_catalog import RuntimeProvider, create_provider_connection, list_provider_presets, provider_connections, runtime_providers, test_provider_connection
 from .schemas import (
+    AccessCheckRequest,
+    AccessCheckResult,
+    AccessCurrentUser,
+    AccessPermission,
+    AccessPolicyMatrix,
+    AccessRolePolicy,
     AgentJob,
     AgentJobProcessResponse,
     AgentJobSubmitRequest,
@@ -143,6 +149,7 @@ from .schemas import (
     WorkspaceMemberCreateRequest,
     WorkspaceMemberPatchRequest,
     WorkspaceProfile,
+    WorkspaceRole,
 )
 
 
@@ -357,6 +364,152 @@ def workspace_auth_required() -> bool:
 
 def workspace_access_for_role(role: str) -> str:
     return "Read Only" if role == "Viewer" else "All Workspace"
+
+
+ROLE_PERMISSIONS: dict[WorkspaceRole, tuple[AccessPermission, ...]] = {
+    "Owner": (
+        "workspace:read",
+        "workspace:write",
+        "settings:read",
+        "settings:write",
+        "provider:write",
+        "policy:write",
+        "gateway:operate",
+        "release:gate",
+        "incident:write",
+        "automation:write",
+    ),
+    "Admin": (
+        "workspace:read",
+        "workspace:write",
+        "settings:read",
+        "settings:write",
+        "provider:write",
+        "policy:write",
+        "gateway:operate",
+        "release:gate",
+        "incident:write",
+        "automation:write",
+    ),
+    "Developer": (
+        "workspace:read",
+        "settings:read",
+        "gateway:operate",
+        "release:gate",
+    ),
+    "Security": (
+        "workspace:read",
+        "settings:read",
+        "policy:write",
+        "release:gate",
+        "incident:write",
+        "automation:write",
+    ),
+    "Viewer": (
+        "workspace:read",
+        "settings:read",
+    ),
+}
+
+ROLE_DESCRIPTIONS: dict[WorkspaceRole, str] = {
+    "Owner": "Full workspace administration, credentials, policy, gateway, and audit authority.",
+    "Admin": "Operational administrator for settings, providers, gateway policy, releases, and incidents.",
+    "Developer": "Can run releases and gateway drills, but cannot mutate credentials or workspace membership.",
+    "Security": "Can manage policy, incidents, and automation evidence without changing provider secrets.",
+    "Viewer": "Read-only visibility for reports, traces, settings metadata, and evidence.",
+}
+
+
+def role_permissions(role: str) -> list[AccessPermission]:
+    typed_role = role if role in ROLE_PERMISSIONS else "Viewer"
+    return list(ROLE_PERMISSIONS[typed_role])  # type: ignore[index]
+
+
+def current_workspace_member_payload() -> dict[str, Any]:
+    ensure_workspace_bootstrap()
+    email = current_user_email()
+    for member in workspace_members_payload():
+        if member.get("email", "").lower() == email:
+            return member
+    now = datetime.now().isoformat()
+    return {
+        "id": "mem_session_viewer",
+        "workspaceId": current_workspace_id(),
+        "name": current_user_display_name(),
+        "email": email,
+        "role": "Viewer",
+        "access": "Read Only",
+        "createdAt": now,
+        "updatedAt": now,
+    }
+
+
+def current_access_user() -> AccessCurrentUser:
+    if not auth_required():
+        return AccessCurrentUser(
+            email=current_user_email(),
+            role="Owner",
+            permissions=role_permissions("Owner"),
+            workspaceId=current_workspace_id(),
+        )
+    member = current_workspace_member_payload()
+    role = member.get("role", "Viewer")
+    return AccessCurrentUser(
+        email=member.get("email", current_user_email()),
+        role=role if role in ROLE_PERMISSIONS else "Viewer",
+        permissions=role_permissions(role),
+        workspaceId=current_workspace_id(),
+    )
+
+
+def access_check_result(permission: AccessPermission, subject: str) -> AccessCheckResult:
+    user = current_access_user()
+    allowed = permission in user.permissions
+    decision = "allow" if allowed else "block"
+    reason = (
+        f"{user.role} can perform {permission}."
+        if allowed
+        else f"{user.role} does not include {permission}."
+    )
+    save_audit_event(
+        "access.check",
+        user.email,
+        permission,
+        decision,
+        f"{decision.upper()}: {permission} on {subject or 'manual-check'}. {reason}",
+    )
+    return AccessCheckResult(
+        allowed=allowed,
+        decision=decision,
+        role=user.role,
+        permission=permission,
+        subject=subject or permission,
+        reason=reason,
+    )
+
+
+def require_permission(permission: AccessPermission, subject: str) -> AccessCheckResult:
+    if not auth_required():
+        return AccessCheckResult(
+            allowed=True,
+            decision="allow",
+            role="Owner",
+            permission=permission,
+            subject=subject,
+            reason="Local development mode grants owner-equivalent permissions.",
+        )
+    result = access_check_result(permission, subject)
+    if result.allowed:
+        return result
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "code": "permission_denied",
+            "requiredPermission": permission,
+            "role": result.role,
+            "message": result.reason,
+        },
+    )
 
 
 def claim_text(*keys: str) -> str | None:
@@ -3119,6 +3272,7 @@ def synthetic_canary_latest() -> SyntheticCanaryRun | None:
 
 @app.post("/api/release-gate/run", response_model=ReleaseGateResult)
 def release_gate(request: ReleaseGateRequest) -> ReleaseGateResult:
+    require_permission("release:gate", "release_gate.run")
     return run_release_gate(request)
 
 
@@ -3134,6 +3288,7 @@ def release_gates() -> list[ReleaseGateDefinition]:
 
 @app.post("/api/release-gates", response_model=ReleaseGateDefinition)
 def create_release_gate(request: ReleaseGateDefinitionCreate) -> ReleaseGateDefinition:
+    require_permission("release:gate", "release_gate_definitions.create")
     now = datetime.now().isoformat()
     gate = ReleaseGateDefinition(
         id=f"rg_{token_hex(5)}",
@@ -3164,6 +3319,7 @@ def release_gate_definition(gate_id: str) -> ReleaseGateDefinition:
 
 @app.patch("/api/release-gates/{gate_id}", response_model=ReleaseGateDefinition)
 def patch_release_gate(gate_id: str, patch: ReleaseGateDefinitionPatch) -> ReleaseGateDefinition:
+    require_permission("release:gate", gate_id)
     existing = get_scoped_record("release_gate_definitions", gate_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Release gate definition not found")
@@ -3177,6 +3333,7 @@ def patch_release_gate(gate_id: str, patch: ReleaseGateDefinitionPatch) -> Relea
 
 @app.delete("/api/release-gates/{gate_id}")
 def delete_release_gate(gate_id: str) -> dict[str, Any]:
+    require_permission("release:gate", gate_id)
     if get_scoped_record("release_gate_definitions", gate_id) is None:
         raise HTTPException(status_code=404, detail="Release gate definition not found")
     delete_scoped_record("release_gate_definitions", gate_id)
@@ -3198,6 +3355,7 @@ def release_gate_runs(gate_id: str) -> list[ReleaseGateResult]:
 
 @app.post("/api/release-gates/{gate_id}/run", response_model=ReleaseGateResult)
 def run_saved_release_gate(gate_id: str, request: ReleaseGateRunRequest | None = None) -> ReleaseGateResult:
+    require_permission("release:gate", gate_id)
     payload = get_scoped_record("release_gate_definitions", gate_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="Release gate definition not found")
@@ -3211,6 +3369,7 @@ def evidence_report() -> EvidenceReport:
 
 @app.post("/api/release-autopilot/run", response_model=ReleaseAutopilotResult)
 def release_autopilot_run(request: ReleaseAutopilotRequest) -> ReleaseAutopilotResult:
+    require_permission("release:gate", "release_autopilot.run")
     return run_release_autopilot(request)
 
 
@@ -3226,6 +3385,7 @@ def automation_rules() -> list[AutomationRule]:
 
 @app.post("/api/automations", response_model=AutomationRule)
 def create_automation_rule(request: AutomationRuleCreate) -> AutomationRule:
+    require_permission("automation:write", "automation_rules.create")
     now = datetime.now().isoformat()
     rule = AutomationRule(
         id=f"auto_{token_hex(5)}",
@@ -3246,6 +3406,7 @@ def create_automation_rule(request: AutomationRuleCreate) -> AutomationRule:
 
 @app.patch("/api/automations/{rule_id}", response_model=AutomationRule)
 def patch_automation_rule(rule_id: str, patch: AutomationRulePatch) -> AutomationRule:
+    require_permission("automation:write", rule_id)
     existing = get_scoped_record("automation_rules", rule_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Automation rule not found")
@@ -3259,6 +3420,7 @@ def patch_automation_rule(rule_id: str, patch: AutomationRulePatch) -> Automatio
 
 @app.post("/api/automations/{rule_id}/run-test", response_model=AutomationEvent)
 def run_automation_test(rule_id: str, request: AutomationRunTestRequest) -> AutomationEvent:
+    require_permission("automation:write", rule_id)
     existing = get_scoped_record("automation_rules", rule_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Automation rule not found")
@@ -3694,6 +3856,7 @@ def get_gateway_routing_policy() -> GatewayRoutingPolicy:
 
 @app.put("/api/gateway/routing-policy", response_model=GatewayRoutingPolicy)
 def update_gateway_routing_policy(request: dict[str, Any]) -> GatewayRoutingPolicy:
+    require_permission("gateway:operate", "gateway_routing_policy.update")
     return save_gateway_routing_policy(request)
 
 
@@ -3704,16 +3867,19 @@ def get_gateway_budgets() -> list[GatewayBudget]:
 
 @app.post("/api/gateway/budgets", response_model=GatewayBudget)
 def create_gateway_budget(request: dict[str, Any]) -> GatewayBudget:
+    require_permission("gateway:operate", "gateway_budget.create")
     return save_gateway_budget(request)
 
 
 @app.patch("/api/gateway/budgets/{budget_id}", response_model=GatewayBudget)
 def update_gateway_budget(budget_id: str, request: dict[str, Any]) -> GatewayBudget:
+    require_permission("gateway:operate", budget_id)
     return patch_gateway_budget(budget_id, request)
 
 
 @app.post("/api/gateway/cache/clear")
 def clear_gateway_cache() -> dict[str, Any]:
+    require_permission("gateway:operate", "gateway_cache.clear")
     entries = scoped_records("gateway_cache_entries")
     for entry in entries:
         delete_scoped_record("gateway_cache_entries", str(entry.get("id")))
@@ -3911,6 +4077,7 @@ def replay_existing_trace(trace_id: str) -> ReplayResult:
 
 @app.post("/api/traces/{trace_id}/replay-gate", response_model=ReplayGateResult)
 def replay_gate_trace(trace_id: str, request: ReplayGateRequest) -> ReplayGateResult:
+    require_permission("release:gate", trace_id)
     trace = get_scoped_record("traces", trace_id)
     if trace is None:
         raise HTTPException(status_code=404, detail="Trace not found")
@@ -3919,6 +4086,7 @@ def replay_gate_trace(trace_id: str, request: ReplayGateRequest) -> ReplayGateRe
 
 @app.post("/api/replay-gate/dataset/run", response_model=ReplayDatasetGateResult)
 def replay_gate_dataset(request: ReplayDatasetGateRequest) -> ReplayDatasetGateResult:
+    require_permission("release:gate", "replay_gate.dataset")
     return run_dataset_replay_gate(request)
 
 
@@ -4132,6 +4300,7 @@ def analyze_latest_detection(request: DetectionCaseCreateRequest) -> DetectionCa
 
 @app.patch("/api/detections/{case_id}/action", response_model=DetectionCase)
 def detection_case_action(case_id: str, request: DetectionActionRequest) -> DetectionCase:
+    require_permission("incident:write", case_id)
     payload = get_scoped_record("detections", case_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="Detection case not found")
@@ -4205,6 +4374,7 @@ def incidents() -> list[Incident]:
 
 @app.patch("/api/incidents/{incident_id}", response_model=Incident)
 def patch_incident(incident_id: str, patch: IncidentPatch) -> Incident:
+    require_permission("incident:write", incident_id)
     updated = update_scoped_record("incidents", incident_id, patch.model_dump(exclude_unset=True))
     if updated is None:
         raise HTTPException(status_code=404, detail="Incident not found")
@@ -4218,6 +4388,7 @@ def prompts() -> list[PromptVersion]:
 
 @app.post("/api/prompts/{prompt_id}/deploy", response_model=PromptVersion)
 def deploy_prompt(prompt_id: str) -> PromptVersion:
+    require_permission("release:gate", prompt_id)
     prompt = get_scoped_record("prompts", prompt_id)
     if prompt is None:
         raise HTTPException(status_code=404, detail="Prompt not found")
@@ -4229,6 +4400,7 @@ def deploy_prompt(prompt_id: str) -> PromptVersion:
 
 @app.post("/api/prompts/{prompt_id}/traffic", response_model=PromptVersion)
 def update_prompt_traffic(prompt_id: str, request: PromptTrafficUpdate) -> PromptVersion:
+    require_permission("release:gate", prompt_id)
     prompt = get_scoped_record("prompts", prompt_id)
     if prompt is None:
         raise HTTPException(status_code=404, detail="Prompt not found")
@@ -4240,6 +4412,7 @@ def update_prompt_traffic(prompt_id: str, request: PromptTrafficUpdate) -> Promp
 
 @app.post("/api/prompts/{prompt_id}/rollback", response_model=PromptVersion)
 def rollback_prompt(prompt_id: str) -> PromptVersion:
+    require_permission("release:gate", prompt_id)
     prompt = get_scoped_record("prompts", prompt_id)
     if prompt is None:
         raise HTTPException(status_code=404, detail="Prompt not found")
@@ -4270,6 +4443,7 @@ def evals() -> list[Evaluator]:
 
 @app.post("/api/evals/run", response_model=list[Evaluator])
 def run_evals() -> list[Evaluator]:
+    require_permission("release:gate", "evals.run")
     records = []
     for evaluator in scoped_records("evals"):
         evaluator["lastRun"] = "just now"
@@ -4285,6 +4459,7 @@ def rag() -> list[RagQuery]:
 
 @app.post("/api/rag/test", response_model=RagQuery)
 def test_rag_retrieval(request: RagRetrievalTestRequest) -> RagQuery:
+    require_permission("release:gate", request.queryId)
     query = get_scoped_record("rag", request.queryId)
     if query is None:
         raise HTTPException(status_code=404, detail="RAG query not found")
@@ -4309,6 +4484,7 @@ def costs() -> dict[str, Any]:
 
 @app.patch("/api/costs/budget")
 def update_cost_budget(request: CostBudgetUpdateRequest) -> dict[str, Any]:
+    require_permission("gateway:operate", "costs.budget")
     payload = get_record("costs", costs_record_id()) or {}
     summary = payload.setdefault("summary", {})
     summary["budgetLimit"] = request.budgetLimit
@@ -4337,6 +4513,7 @@ def policies() -> list[Policy]:
 
 @app.patch("/api/policies/{policy_id}", response_model=Policy)
 def patch_policy(policy_id: str, patch: PolicyPatch) -> Policy:
+    require_permission("policy:write", policy_id)
     updated = update_record("policies", policy_id, patch.model_dump(exclude_unset=True))
     if updated is None:
         raise HTTPException(status_code=404, detail="Policy not found")
@@ -4397,6 +4574,7 @@ def list_provider_connections() -> list[ProviderConnection]:
 
 @app.post("/api/providers/connections", response_model=ProviderConnection)
 def add_provider_connection(request: ProviderConnectionCreate) -> ProviderConnection:
+    require_permission("provider:write", "provider_connections.create")
     connection = create_provider_connection(request, current_workspace_id())
     save_audit_event(
         "provider.connection.create",
@@ -4410,6 +4588,7 @@ def add_provider_connection(request: ProviderConnectionCreate) -> ProviderConnec
 
 @app.post("/api/providers/connections/{connection_id}/test", response_model=ProviderConnectionTestResult)
 def run_provider_connection_test(connection_id: str) -> ProviderConnectionTestResult:
+    require_permission("provider:write", connection_id)
     result = test_provider_connection(connection_id, current_workspace_id())
     if result is None:
         raise HTTPException(status_code=404, detail="Provider connection not found")
@@ -4438,6 +4617,7 @@ def agent_run_detail(run_id: str) -> AgentRunRecord:
 
 @app.post("/api/agent-runtime/run", response_model=AgentRunResponse)
 def execute_agent(request: AgentRunRequest) -> AgentRunResponse:
+    require_permission("gateway:operate", "agent_runtime.run")
     try:
         run, trace = run_agent(request)
     except ValueError as exc:
@@ -4467,6 +4647,7 @@ def lab_experiment_detail(experiment_id: str) -> LabExperiment:
 
 @app.post("/api/labs/run", response_model=LabRunResponse)
 def run_lab_experiment(request: LabRunRequest) -> LabRunResponse:
+    require_permission("release:gate", "labs.run")
     variants: list[LabVariantResult] = []
     traces: list[Trace] = []
     failures: list[dict[str, str]] = []
@@ -4580,11 +4761,13 @@ def agent_job_detail(job_id: str) -> AgentJob:
 
 @app.post("/api/agent-runtime/jobs", response_model=AgentJobSubmitResponse)
 def submit_agent_job(request: AgentJobSubmitRequest) -> AgentJobSubmitResponse:
+    require_permission("gateway:operate", "agent_jobs.submit")
     return AgentJobSubmitResponse(job=submit_job(request))
 
 
 @app.post("/api/agent-runtime/jobs/process-next", response_model=AgentJobProcessResponse)
 def process_next_agent_job() -> AgentJobProcessResponse:
+    require_permission("gateway:operate", "agent_jobs.process_next")
     result = process_next_job()
     if result is None:
         raise HTTPException(status_code=404, detail="No queued agent jobs")
@@ -4593,6 +4776,7 @@ def process_next_agent_job() -> AgentJobProcessResponse:
 
 @app.post("/api/agent-runtime/jobs/{job_id}/process", response_model=AgentJobProcessResponse)
 def process_agent_job(job_id: str) -> AgentJobProcessResponse:
+    require_permission("gateway:operate", job_id)
     result = process_job(job_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Agent job not found")
@@ -4601,6 +4785,7 @@ def process_agent_job(job_id: str) -> AgentJobProcessResponse:
 
 @app.post("/api/agent-runtime/jobs/{job_id}/retry", response_model=AgentJob)
 def retry_agent_job(job_id: str) -> AgentJob:
+    require_permission("gateway:operate", job_id)
     job = retry_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Agent job not found")
@@ -4609,6 +4794,7 @@ def retry_agent_job(job_id: str) -> AgentJob:
 
 @app.post("/api/agent-runtime/jobs/{job_id}/cancel", response_model=AgentJob)
 def cancel_agent_job(job_id: str) -> AgentJob:
+    require_permission("gateway:operate", job_id)
     job = cancel_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Agent job not found")
@@ -4626,6 +4812,40 @@ def onboarding_bootstrap() -> OnboardingStatus:
     return build_onboarding_status()
 
 
+@app.get("/api/access/policy", response_model=AccessPolicyMatrix)
+def access_policy() -> AccessPolicyMatrix:
+    ensure_workspace_bootstrap()
+    roles = {
+        role: AccessRolePolicy(
+            role=role,
+            permissions=list(permissions),
+            description=ROLE_DESCRIPTIONS[role],
+        )
+        for role, permissions in ROLE_PERMISSIONS.items()
+    }
+    return AccessPolicyMatrix(
+        workspaceId=current_workspace_id(),
+        currentUser=current_access_user(),
+        roles=roles,
+        generatedAt=datetime.now().isoformat(),
+    )
+
+
+@app.post("/api/access/check", response_model=AccessCheckResult)
+def access_check(request: AccessCheckRequest) -> AccessCheckResult:
+    return access_check_result(request.permission, request.subject)
+
+
+@app.get("/api/access/audit", response_model=list[AuditEvent])
+def access_audit() -> list[AuditEvent]:
+    events = [
+        AuditEvent.model_validate(item)
+        for item in scoped_records("audit")
+        if str(item.get("type", "")).startswith("access.")
+    ]
+    return sorted(events, key=lambda item: item.createdAt, reverse=True)
+
+
 @app.get("/api/workspace", response_model=WorkspaceProfile)
 def workspace_profile() -> WorkspaceProfile:
     return WorkspaceProfile.model_validate(ensure_workspace_bootstrap())
@@ -4638,6 +4858,7 @@ def workspace_members() -> list[WorkspaceMember]:
 
 @app.post("/api/workspace/members", response_model=WorkspaceMember)
 def create_workspace_member(request: WorkspaceMemberCreateRequest) -> WorkspaceMember:
+    require_permission("workspace:write", "workspace_members.create")
     workspace_id = current_workspace_id()
     normalized_email = request.email.strip().lower()
     if any(member.get("email", "").lower() == normalized_email for member in workspace_members_payload()):
@@ -4667,6 +4888,7 @@ def create_workspace_member(request: WorkspaceMemberCreateRequest) -> WorkspaceM
 
 @app.patch("/api/workspace/members/{member_id}", response_model=WorkspaceMember)
 def patch_workspace_member(member_id: str, request: WorkspaceMemberPatchRequest) -> WorkspaceMember:
+    require_permission("workspace:write", member_id)
     payload = workspace_member_or_404(member_id)
     if request.name is not None:
         payload["name"] = request.name.strip()
@@ -4690,6 +4912,7 @@ def patch_workspace_member(member_id: str, request: WorkspaceMemberPatchRequest)
 
 @app.delete("/api/workspace/members/{member_id}")
 def delete_workspace_member(member_id: str) -> dict[str, str]:
+    require_permission("workspace:write", member_id)
     payload = workspace_member_or_404(member_id)
     delete_record("workspace_members", member_id)
     workspace_profile_payload()
@@ -4710,6 +4933,7 @@ def settings() -> SettingsPayload:
 
 @app.post("/api/settings/api-keys", response_model=ApiKeyCreateResponse)
 def create_api_key(request: ApiKeyCreateRequest) -> ApiKeyCreateResponse:
+    require_permission("settings:write", "settings.api_keys")
     with SETTINGS_WRITE_LOCK:
         payload = settings_payload_or_404()
         key_id = f"key_{token_hex(4)}"
@@ -4738,6 +4962,7 @@ def create_api_key(request: ApiKeyCreateRequest) -> ApiKeyCreateResponse:
 
 @app.post("/api/settings/webhooks", response_model=SettingsPayload)
 def create_webhook(request: WebhookCreateRequest) -> SettingsPayload:
+    require_permission("settings:write", "settings.webhooks")
     with SETTINGS_WRITE_LOCK:
         payload = settings_payload_or_404()
         secret = f"whsec_{token_hex(16)}"
@@ -4759,6 +4984,7 @@ def create_webhook(request: WebhookCreateRequest) -> SettingsPayload:
 
 @app.patch("/api/settings/retention", response_model=SettingsPayload)
 def update_retention(request: RetentionUpdateRequest) -> SettingsPayload:
+    require_permission("settings:write", "settings.retention")
     with SETTINGS_WRITE_LOCK:
         payload = settings_payload_or_404()
         payload["retentionDays"] = request.retentionDays

@@ -101,6 +101,99 @@ def test_auth_required_allows_scoped_qa_token(tmp_path: Path) -> None:
         os.environ.pop("NEURALOPS_QA_WORKSPACE_ID", None)
 
 
+def auth_header(email: str, workspace_id: str = "acme-workspace") -> dict[str, str]:
+    token = jwt.encode(
+        {
+            "sub": email.split("@", 1)[0],
+            "email": email,
+            "app_metadata": {"neuralops_workspace_id": workspace_id},
+        },
+        "test-jwt-secret",
+        algorithm="HS256",
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_workspace_rbac_denies_viewer_writes_and_records_access_audit(tmp_path: Path) -> None:
+    database.DB_PATH = tmp_path / "neuralops-rbac-test.sqlite3"
+    database.POSTGRES_URL = None
+    os.environ["NEURALOPS_DB_PATH"] = str(database.DB_PATH)
+    os.environ["NEURALOPS_AUTH_REQUIRED"] = "true"
+    os.environ["SUPABASE_JWT_SECRET"] = "test-jwt-secret"
+    try:
+        with TestClient(app) as test_client:
+            owner_headers = auth_header("owner@example.com")
+            viewer_headers = auth_header("viewer@example.com")
+
+            assert test_client.get("/api/workspace", headers=owner_headers).status_code == 200
+            viewer = test_client.post(
+                "/api/workspace/members",
+                headers=owner_headers,
+                json={"name": "Read Only Operator", "email": "viewer@example.com", "role": "Viewer"},
+            )
+            assert viewer.status_code == 200
+
+            denied = test_client.post(
+                "/api/settings/api-keys",
+                headers=viewer_headers,
+                json={"name": "viewer key", "role": "Developer", "environment": "staging", "scopes": ["trace:ingest"]},
+            )
+
+            assert denied.status_code == 403
+            assert denied.json()["detail"]["code"] == "permission_denied"
+            assert denied.json()["detail"]["requiredPermission"] == "settings:write"
+
+            audit = test_client.get("/api/access/audit", headers=owner_headers)
+            assert audit.status_code == 200
+            assert any(
+                event["decision"] == "block"
+                and event["subject"] == "settings:write"
+                and event["actor"] == "viewer@example.com"
+                for event in audit.json()
+            )
+    finally:
+        os.environ.pop("NEURALOPS_AUTH_REQUIRED", None)
+        os.environ.pop("SUPABASE_JWT_SECRET", None)
+
+
+def test_access_policy_exposes_role_matrix_and_permission_simulation(tmp_path: Path) -> None:
+    database.DB_PATH = tmp_path / "neuralops-access-test.sqlite3"
+    database.POSTGRES_URL = None
+    os.environ["NEURALOPS_DB_PATH"] = str(database.DB_PATH)
+    os.environ["NEURALOPS_AUTH_REQUIRED"] = "true"
+    os.environ["SUPABASE_JWT_SECRET"] = "test-jwt-secret"
+    try:
+        with TestClient(app) as test_client:
+            owner_headers = auth_header("owner@example.com")
+            assert test_client.get("/api/workspace", headers=owner_headers).status_code == 200
+            test_client.post(
+                "/api/workspace/members",
+                headers=owner_headers,
+                json={"name": "Security Reviewer", "email": "security@example.com", "role": "Security"},
+            )
+
+            policy = test_client.get("/api/access/policy", headers=owner_headers)
+            assert policy.status_code == 200
+            payload = policy.json()
+            assert payload["currentUser"]["role"] == "Owner"
+            assert "settings:write" in payload["roles"]["Owner"]["permissions"]
+            assert "settings:write" not in payload["roles"]["Viewer"]["permissions"]
+            assert "policy:write" in payload["roles"]["Security"]["permissions"]
+
+            simulation = test_client.post(
+                "/api/access/check",
+                headers=auth_header("security@example.com"),
+                json={"permission": "settings:write", "subject": "api-key-create"},
+            )
+            assert simulation.status_code == 200
+            assert simulation.json()["allowed"] is False
+            assert simulation.json()["role"] == "Security"
+            assert simulation.json()["decision"] == "block"
+    finally:
+        os.environ.pop("NEURALOPS_AUTH_REQUIRED", None)
+        os.environ.pop("SUPABASE_JWT_SECRET", None)
+
+
 def test_automation_rule_creates_incident_from_blocked_release_gate(client: TestClient) -> None:
     rule = client.post(
         "/api/automations",

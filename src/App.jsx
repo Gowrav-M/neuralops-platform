@@ -18,6 +18,7 @@ import ConnectCenter from './components/ConnectCenter';
 import GatewayCenter from './components/GatewayCenter';
 import EvidenceCenter from './components/EvidenceCenter';
 import AutomationCenter from './components/AutomationCenter';
+import AccessCenter from './components/AccessCenter';
 import ReleaseAutopilot from './components/ReleaseAutopilot';
 import DetectionResponse from './components/DetectionResponse';
 import Settings from './components/Settings';
@@ -136,6 +137,16 @@ const getNavIcon = (tab) => {
           <path d="M4 15a7 7 0 0 0 12 4.9L20 14" />
         </svg>
       );
+    case 'Access':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+          <circle cx="9" cy="7" r="4" />
+          <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+          <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+          <path d="m17 11 2 2 4-4" />
+        </svg>
+      );
     case 'Autopilot':
       return (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -179,6 +190,7 @@ const workflowStages = [
   { label: 'Gate', tab: 'Evidence', detail: 'Release proof' },
   { label: 'Respond', tab: 'Detection', detail: 'ADR cases' },
   { label: 'Act', tab: 'Automations', detail: 'Rules and incidents' },
+  { label: 'Access', tab: 'Access', detail: 'RBAC and audit' },
   { label: 'Monitor', tab: 'Dashboard', detail: 'Traces and cost' },
   { label: 'Investigate', tab: 'Traces', detail: 'Replay failures' },
   { label: 'Configure', tab: 'Settings', detail: 'Providers and auth' },
@@ -437,6 +449,7 @@ export default function App() {
     'Evidence',
     'Detection',
     'Automations',
+    'Access',
     'Settings'
   ];
 
@@ -504,6 +517,8 @@ export default function App() {
         return <DetectionResponse addToast={addToast} refreshDashboard={refreshDashboard} />;
       case 'Automations':
         return <AutomationCenter addToast={addToast} />;
+      case 'Access':
+        return <AccessCenter addToast={addToast} />;
       case 'Settings':
         return <Settings addToast={addToast} />;
       default:

@@ -159,6 +159,21 @@ export function bootstrapOnboarding() {
   return request('/api/onboarding/bootstrap', { method: 'POST' });
 }
 
+export function fetchAccessPolicy() {
+  return request('/api/access/policy');
+}
+
+export function checkAccessPermission(payload) {
+  return request('/api/access/check', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchAccessAudit() {
+  return request('/api/access/audit');
+}
+
 export function verifyConnectIngest(payload, apiKey) {
   return request('/api/connect/verify', {
     method: 'POST',

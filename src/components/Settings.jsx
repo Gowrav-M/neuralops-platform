@@ -106,10 +106,10 @@ export default function Settings({ addToast }) {
         setGatewayRoutes(routes);
         const defaultPreset = catalog.find((provider) => provider.id === 'openrouter') || catalog[0];
         if (defaultPreset) {
-          setSelectedProviderId(defaultPreset.id);
-          setProviderLabel(defaultPreset.label);
-          setProviderBaseUrl(defaultPreset.baseUrl);
-          setProviderModel(defaultPreset.defaultModel);
+          setSelectedProviderId((current) => current || defaultPreset.id);
+          setProviderLabel((current) => current || defaultPreset.label);
+          setProviderBaseUrl((current) => current || defaultPreset.baseUrl);
+          setProviderModel((current) => current || defaultPreset.defaultModel);
         }
       })
       .catch(() => {

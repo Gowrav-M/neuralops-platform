@@ -9,6 +9,18 @@ DecisionStatus = Literal["success", "warning", "failed", "blocked"]
 IncidentStatus = Literal["Open", "Investigating", "Resolved"]
 Severity = Literal["Critical", "Major", "Minor", "Low"]
 WorkspaceRole = Literal["Owner", "Admin", "Developer", "Security", "Viewer"]
+AccessPermission = Literal[
+    "workspace:read",
+    "workspace:write",
+    "settings:read",
+    "settings:write",
+    "provider:write",
+    "policy:write",
+    "gateway:operate",
+    "release:gate",
+    "incident:write",
+    "automation:write",
+]
 DetectionDecision = Literal["allow", "review", "block"]
 DetectionStatus = Literal["open", "contained", "closed"]
 ApiKeyScope = Literal["trace:ingest", "trace:read", "gateway:invoke", "admin"]
@@ -1104,6 +1116,40 @@ class AuditEvent(BaseModel):
     decision: Literal["allow", "review", "block"]
     summary: str
     createdAt: str
+
+
+class AccessRolePolicy(BaseModel):
+    role: WorkspaceRole
+    permissions: list[AccessPermission]
+    description: str
+
+
+class AccessCurrentUser(BaseModel):
+    email: str
+    role: WorkspaceRole
+    permissions: list[AccessPermission]
+    workspaceId: str
+
+
+class AccessPolicyMatrix(BaseModel):
+    workspaceId: str
+    currentUser: AccessCurrentUser
+    roles: dict[str, AccessRolePolicy]
+    generatedAt: str
+
+
+class AccessCheckRequest(BaseModel):
+    permission: AccessPermission
+    subject: str = Field(default="manual-check", min_length=1, max_length=200)
+
+
+class AccessCheckResult(BaseModel):
+    allowed: bool
+    decision: Literal["allow", "block"]
+    role: WorkspaceRole
+    permission: AccessPermission
+    subject: str
+    reason: str
 
 
 class ApiEnvelope(BaseModel):
