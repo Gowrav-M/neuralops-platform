@@ -125,6 +125,9 @@ from .schemas import (
     GitHubPrCommentResult,
     PromptTrafficUpdate,
     ProviderStatus,
+    ProviderCalibrationRequest,
+    ProviderCalibrationResult,
+    ProviderCalibrationRun,
     ProviderConnection,
     ProviderConnectionCreate,
     ProviderConnectionTestResult,
@@ -820,6 +823,7 @@ def build_production_readiness() -> ProductionReadinessReport:
     status = build_system_status()
     member_count = len(workspace_members_payload())
     provider_count = len(provider_connections(current_workspace_id()))
+    latest_calibration = latest_provider_calibration()
     gateway_policy = gateway_routing_policy()
     access_audit_count = len([item for item in scoped_records("audit") if str(item.get("type", "")).startswith("access.")])
     checks = [
@@ -852,6 +856,16 @@ def build_production_readiness() -> ProductionReadinessReport:
             "Live provider gateway",
             "pass" if provider_count > 0 else "review",
             f"{provider_count} provider connection(s) are configured for this workspace.",
+        ),
+        readiness_check(
+            "provider_calibration",
+            "Provider calibration evidence",
+            "pass" if latest_calibration and latest_calibration.decision == "allow" else "review",
+            (
+                f"Latest calibration {latest_calibration.id} is {latest_calibration.decision} with {latest_calibration.summary.get('passed', 0)} passing provider(s)."
+                if latest_calibration
+                else "Run Provider Calibration from Gateway before routing production AI traffic."
+            ),
         ),
         readiness_check(
             "gateway_policy",
@@ -905,6 +919,7 @@ def build_system_status() -> SystemStatus:
         "replay_gates",
         "dataset_replay_gates",
         "gateway_route_events",
+        "provider_calibrations",
         "connector_deliveries",
         "detections",
         "release_gate_definitions",
@@ -924,6 +939,8 @@ def build_system_status() -> SystemStatus:
     gateway_key_count = sum(1 for api_key in settings_payload.get("apiKeys", []) if "gateway:invoke" in api_key.get("scopes", []) or "admin" in api_key.get("scopes", []))
     gateway_trace_count = sum(1 for trace in scoped_records("traces") if str(trace.get("id", "")).startswith("tr_gateway_"))
     gateway_route_count = record_counts["gateway_route_events"]
+    calibration_count = record_counts["provider_calibrations"]
+    latest_calibration = latest_provider_calibration()
     member_count = record_counts["workspace_members"]
     blockers: list[str] = []
 
@@ -1018,6 +1035,17 @@ def build_system_status() -> SystemStatus:
             state="live_provider" if live_configured else "not_configured",
             evidence=f"{record_counts['provider_connections']} provider connection record(s), {len(providers)} catalog/status entries",
             action="Add a provider connection for OpenRouter, Vercel AI Gateway, Groq, NVIDIA, Ollama, vLLM, or a custom endpoint.",
+        ),
+        FeatureTruth(
+            id="provider_calibration",
+            label="Provider Calibration",
+            state="persisted" if calibration_count else "live_provider" if live_configured else "not_configured",
+            evidence=(
+                f"{calibration_count} calibration run(s), latest {latest_calibration.decision}: {latest_calibration.recommendedProviderLabel or 'no recommended provider'}"
+                if latest_calibration
+                else f"{calibration_count} calibration run(s), {record_counts['provider_connections']} provider connection record(s)"
+            ),
+            action="Run calibration in Gateway to measure live provider latency, policy behavior, cost, and route readiness.",
         ),
         FeatureTruth(
             id="webhooks",
@@ -2219,6 +2247,7 @@ def recent_access_audit(limit: int = 20) -> list[AuditEvent]:
 def render_evidence_pack_markdown(pack_id: str, generated_at: str, evidence: EvidenceReport, readiness: ProductionReadinessReport, gateway: dict[str, Any], access_audit: list[AuditEvent], automation: dict[str, Any]) -> str:
     latest_gate = evidence.latestGate
     gateway_metrics_payload = gateway.get("metrics", {})
+    latest_calibration = gateway.get("latestCalibration")
     lines = [
         "# NeuralOps Release Evidence Pack",
         "",
@@ -2234,6 +2263,7 @@ def render_evidence_pack_markdown(pack_id: str, generated_at: str, evidence: Evi
         f"- Latest release gate: `{latest_gate.decision if latest_gate else 'not_run'}`",
         f"- Latest dataset replay gate: `{evidence.summary.get('latestDatasetReplayGateDecision', 'not_run')}`",
         f"- Gateway requests: `{gateway_metrics_payload.get('totalRequests', 0)}` total, `{gateway_metrics_payload.get('routedRequests', 0)}` routed",
+        f"- Provider calibration: `{latest_calibration.get('decision', 'not_run') if latest_calibration else 'not_run'}`",
         f"- Automation rules: `{automation.get('rules', 0)}`, delivery attempts: `{automation.get('deliveries', 0)}`",
         f"- Access audit events: `{len(access_audit)}`",
         "",
@@ -2252,6 +2282,16 @@ def render_evidence_pack_markdown(pack_id: str, generated_at: str, evidence: Evi
                 f"- Decision: `{latest_gate.decision}`",
                 f"- Score: `{latest_gate.score}/100`",
                 *[f"- **{check.label}**: `{check.status}` - {check.evidence}" for check in latest_gate.checks],
+            ]
+        )
+    if latest_calibration:
+        lines.extend(
+            [
+                "",
+                "## Provider Calibration",
+                f"- Decision: `{latest_calibration.get('decision')}`",
+                f"- Recommended provider: `{latest_calibration.get('recommendedProviderLabel') or 'none'}`",
+                f"- Environment: `{latest_calibration.get('environment')}`",
             ]
         )
     latest_requests = gateway.get("latestRequests", [])
@@ -2286,6 +2326,7 @@ def build_evidence_export_pack() -> EvidenceExportPack:
         "metrics": gateway_metrics().model_dump(),
         "latestRequests": [request.model_dump() for request in gateway_request_logs(limit=10)],
         "costSuggestions": [suggestion.model_dump() for suggestion in gateway_cost_suggestions()],
+        "latestCalibration": latest_provider_calibration().model_dump() if latest_provider_calibration() else None,
     }
     access_audit = recent_access_audit()
     automation_snapshot = {
@@ -2311,6 +2352,7 @@ def build_evidence_export_pack() -> EvidenceExportPack:
         "latestDatasetReplayGateDecision": evidence.summary.get("latestDatasetReplayGateDecision", "not_run"),
         "gatewayTotalRequests": gateway_snapshot["metrics"]["totalRequests"],
         "gatewayRoutedRequests": gateway_snapshot["metrics"]["routedRequests"],
+        "latestProviderCalibrationDecision": gateway_snapshot["latestCalibration"]["decision"] if gateway_snapshot["latestCalibration"] else "not_run",
         "accessAuditEvents": len(access_audit),
         "automationRules": automation_snapshot["rules"],
         "automationDeliveries": automation_snapshot["deliveries"],
@@ -2993,6 +3035,350 @@ def persist_gateway_trace(trace: Trace, policy_decision: GatewayPolicyDecision, 
         policy_decision.decision,
         f"Gateway {policy_decision.stage} decision {policy_decision.decision}: {policy_decision.reason}",
     )
+
+
+def provider_calibration_runs(limit: int = 25) -> list[ProviderCalibrationRun]:
+    runs = [ProviderCalibrationRun.model_validate(item) for item in scoped_records("provider_calibrations")]
+    return sorted(runs, key=lambda item: item.generatedAt, reverse=True)[:limit]
+
+
+def latest_provider_calibration() -> ProviderCalibrationRun | None:
+    runs = provider_calibration_runs(limit=1)
+    return runs[0] if runs else None
+
+
+def provider_calibration_request(provider: RuntimeProvider, request: ProviderCalibrationRequest) -> GatewayChatCompletionRequest:
+    return GatewayChatCompletionRequest(
+        model=provider.default_model,
+        temperature=0,
+        max_tokens=96,
+        metadata={
+            "environment": request.environment,
+            "session": f"provider-calibration-{provider.id}",
+            "calibration": True,
+        },
+        messages=[
+            {
+                "role": "system",
+                "content": "You are being used for a NeuralOps provider calibration. Answer concisely with safe operational wording.",
+            },
+            {"role": "user", "content": request.prompt},
+        ],
+    )
+
+
+def calibration_score(decision: str, latency_ms: int, max_latency_ms: int, findings: list[str], cost_review: bool) -> int:
+    if decision == "block":
+        return 0
+    score = 100
+    if decision == "review":
+        score -= 35
+    if latency_ms > max_latency_ms:
+        score -= min(40, round(((latency_ms - max_latency_ms) / max(1, max_latency_ms)) * 40))
+    if cost_review:
+        score -= 20
+    score -= min(30, len(findings) * 10)
+    return max(0, min(100, score))
+
+
+def calibrate_single_provider(provider: RuntimeProvider, request: ProviderCalibrationRequest, routing_policy: GatewayRoutingPolicy) -> ProviderCalibrationResult:
+    gateway_request = provider_calibration_request(provider, request)
+    prompt = gateway_messages_text(gateway_request.messages)
+    estimated_cost = estimate_gateway_cost_usd(provider.default_model, prompt, gateway_request)
+    findings: list[str] = []
+    cost_review = False
+    if request.maxEstimatedCostUsd is not None and estimated_cost is not None and estimated_cost > request.maxEstimatedCostUsd:
+        cost_review = True
+        findings.append("estimated-cost-threshold")
+
+    pre_policy = evaluate_gateway_policy("pre_policy", prompt)
+    if pre_policy.findings:
+        findings.extend(pre_policy.findings)
+    if pre_policy.decision == "block":
+        trace = gateway_trace(
+            request=gateway_request,
+            environment=request.environment,
+            provider=provider,
+            prompt=prompt,
+            output="Provider calibration blocked before provider call.",
+            policy_decision=pre_policy,
+            latency_ms=1,
+            usage=None,
+        )
+        persist_gateway_trace(trace, pre_policy, current_user_email())
+        route_event = save_gateway_route_event(
+            environment=request.environment,
+            requested_model=provider.default_model,
+            selected_provider=provider,
+            status="blocked",
+            decision="block",
+            attempts=[],
+            trace_id=trace.id,
+            findings=findings,
+            routing_strategy=routing_policy.strategy,
+            selected_reason="calibration_pre_policy",
+            cache_status="disabled",
+            budget_decision="allow",
+            estimated_cost_usd=estimated_cost,
+        )
+        save_gateway_request_log(
+            environment=request.environment,
+            requested_model=provider.default_model,
+            routing_policy=routing_policy,
+            selected_provider=provider,
+            selected_reason="calibration_pre_policy",
+            cache_status="disabled",
+            budget_decision="allow",
+            status="blocked",
+            latency_ms=1,
+            trace_id=trace.id,
+            route_event_id=route_event.id,
+            estimated_cost_usd=estimated_cost,
+        )
+        return ProviderCalibrationResult(
+            providerId=provider.id,
+            providerLabel=provider.label,
+            source=provider.source,
+            model=provider.default_model,
+            status="failed",
+            decision="block",
+            score=0,
+            latencyMs=1,
+            estimatedCostUsd=estimated_cost,
+            traceId=trace.id,
+            routeEventId=route_event.id,
+            findings=findings,
+            outputPreview="Blocked before provider call.",
+        )
+
+    started = perf_counter()
+    attempts: list[GatewayRouteAttempt] = []
+    try:
+        payload = provider_chat_completion(provider, gateway_request)
+        latency_ms = max(1, int((perf_counter() - started) * 1000))
+        attempts.append(gateway_route_attempt(provider, "succeeded", latency_ms))
+    except Exception as exc:  # noqa: BLE001 - calibration records provider runtime failures.
+        latency_ms = max(1, int((perf_counter() - started) * 1000))
+        attempts.append(gateway_route_attempt(provider, "failed", latency_ms, str(exc)))
+        error = sanitize_gateway_error(str(exc))
+        route_event = save_gateway_route_event(
+            environment=request.environment,
+            requested_model=provider.default_model,
+            selected_provider=provider,
+            status="failed",
+            decision="review",
+            attempts=attempts,
+            findings=["provider-call-failed"],
+            routing_strategy=routing_policy.strategy,
+            selected_reason="calibration_failed",
+            cache_status="disabled",
+            budget_decision="allow",
+            estimated_cost_usd=estimated_cost,
+        )
+        save_gateway_request_log(
+            environment=request.environment,
+            requested_model=provider.default_model,
+            routing_policy=routing_policy,
+            selected_provider=provider,
+            selected_reason="calibration_failed",
+            cache_status="disabled",
+            budget_decision="allow",
+            status="failed",
+            latency_ms=latency_ms,
+            route_event_id=route_event.id,
+            estimated_cost_usd=estimated_cost,
+        )
+        return ProviderCalibrationResult(
+            providerId=provider.id,
+            providerLabel=provider.label,
+            source=provider.source,
+            model=provider.default_model,
+            status="failed",
+            decision="review",
+            score=0,
+            latencyMs=latency_ms,
+            estimatedCostUsd=estimated_cost,
+            routeEventId=route_event.id,
+            findings=["provider-call-failed"],
+            error=error,
+        )
+
+    output = gateway_response_text(payload)
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else None
+    actual_cost = actual_gateway_cost_usd(provider.default_model, usage)
+    if not output:
+        findings.append("empty-provider-output")
+    if latency_ms > request.maxLatencyMs:
+        findings.append("latency-threshold")
+    post_policy = evaluate_gateway_policy("post_policy", prompt, output)
+    if post_policy.findings:
+        findings.extend(post_policy.findings)
+    effective_decision = post_policy.decision if post_policy.decision != "allow" else pre_policy.decision
+    if cost_review and effective_decision == "allow":
+        effective_decision = "review"
+    if "latency-threshold" in findings and effective_decision == "allow":
+        effective_decision = "review"
+    if "empty-provider-output" in findings:
+        effective_decision = "block"
+
+    policy_decision = GatewayPolicyDecision(
+        decision=effective_decision,  # type: ignore[arg-type]
+        stage="post_policy",
+        findings=sorted(set(findings)),
+        reason="Provider calibration completed with measured output, latency, cost, and policy evidence.",
+    )
+    trace = gateway_trace(
+        request=gateway_request,
+        environment=request.environment,
+        provider=provider,
+        prompt=prompt,
+        output=output or "Provider returned no text content.",
+        policy_decision=policy_decision,
+        latency_ms=latency_ms,
+        usage=usage,
+    )
+    persist_gateway_trace(trace, policy_decision, current_user_email())
+    route_event = save_gateway_route_event(
+        environment=request.environment,
+        requested_model=provider.default_model,
+        selected_provider=provider,
+        status="routed" if effective_decision != "block" else "blocked",
+        decision=effective_decision,
+        attempts=attempts,
+        trace_id=trace.id,
+        findings=policy_decision.findings,
+        routing_strategy=routing_policy.strategy,
+        selected_reason="provider_calibration",
+        cache_status="disabled",
+        budget_decision="allow",
+        estimated_cost_usd=estimated_cost,
+        actual_cost_usd=actual_cost,
+    )
+    save_gateway_request_log(
+        environment=request.environment,
+        requested_model=provider.default_model,
+        routing_policy=routing_policy,
+        selected_provider=provider,
+        selected_reason="provider_calibration",
+        cache_status="disabled",
+        budget_decision="allow",
+        status="routed" if effective_decision != "block" else "blocked",
+        latency_ms=latency_ms,
+        trace_id=trace.id,
+        route_event_id=route_event.id,
+        estimated_cost_usd=estimated_cost,
+        actual_cost_usd=actual_cost,
+    )
+    score = calibration_score(effective_decision, latency_ms, request.maxLatencyMs, policy_decision.findings, cost_review)
+    return ProviderCalibrationResult(
+        providerId=provider.id,
+        providerLabel=provider.label,
+        source=provider.source,
+        model=provider.default_model,
+        status="passed" if effective_decision == "allow" else "failed",
+        decision=effective_decision,  # type: ignore[arg-type]
+        score=score,
+        latencyMs=latency_ms,
+        estimatedCostUsd=estimated_cost,
+        actualCostUsd=actual_cost,
+        traceId=trace.id,
+        routeEventId=route_event.id,
+        findings=policy_decision.findings,
+        outputPreview=(output or "Provider returned no text content.")[:240],
+    )
+
+
+def run_provider_calibration(request: ProviderCalibrationRequest) -> ProviderCalibrationRun:
+    routing_policy = gateway_routing_policy()
+    providers = [
+        provider
+        for provider in gateway_providers_for_environment(request.environment)
+        if not request.includeProviders or provider.id in request.includeProviders or provider.label in request.includeProviders
+    ]
+    run_id = f"cal_{token_hex(6)}"
+    if not providers:
+        route_event = save_gateway_route_event(
+            environment=request.environment,
+            requested_model=None,
+            status="not_configured",
+            decision="review",
+            attempts=[],
+            findings=["no-configured-provider"],
+            routing_strategy=routing_policy.strategy,
+            selected_reason="calibration_not_configured",
+            cache_status="disabled",
+            budget_decision="allow",
+        )
+        save_gateway_request_log(
+            environment=request.environment,
+            requested_model=None,
+            routing_policy=routing_policy,
+            selected_reason="calibration_not_configured",
+            cache_status="disabled",
+            budget_decision="allow",
+            status="not_configured",
+            latency_ms=1,
+            route_event_id=route_event.id,
+        )
+        run = ProviderCalibrationRun(
+            id=run_id,
+            environment=request.environment,
+            prompt=request.prompt,
+            decision="review",
+            summary={
+                "configuredProviders": 0,
+                "passed": 0,
+                "failed": 0,
+                "notConfigured": 1,
+                "message": "No configured live provider is available for this environment.",
+            },
+            results=[],
+            generatedAt=now_iso(),
+        )
+        save_scoped_record("provider_calibrations", run.id, run.model_dump())
+        save_audit_event("provider.calibration.run", current_user_email(), run.id, "review", "Provider calibration could not run because no provider is configured.")
+        return run
+
+    results = [calibrate_single_provider(provider, request, routing_policy) for provider in providers]
+    passed = [result for result in results if result.status == "passed" and result.decision == "allow"]
+    recommended = sorted(
+        passed,
+        key=lambda item: (-item.score, item.latencyMs, item.actualCostUsd if item.actualCostUsd is not None else item.estimatedCostUsd if item.estimatedCostUsd is not None else 999_999),
+    )[0] if passed else None
+    if recommended is not None:
+        decision = "allow"
+    elif any(result.decision == "block" for result in results):
+        decision = "block"
+    else:
+        decision = "review"
+    run = ProviderCalibrationRun(
+        id=run_id,
+        environment=request.environment,
+        prompt=request.prompt,
+        decision=decision,  # type: ignore[arg-type]
+        recommendedProviderId=recommended.providerId if recommended else None,
+        recommendedProviderLabel=recommended.providerLabel if recommended else None,
+        summary={
+            "configuredProviders": len(providers),
+            "passed": len(passed),
+            "failed": sum(1 for result in results if result.status == "failed"),
+            "notConfigured": 0,
+            "avgLatencyMs": round(sum(result.latencyMs for result in results) / max(1, len(results))),
+            "estimatedCostUsd": round(sum(result.estimatedCostUsd or 0 for result in results), 6),
+            "actualCostUsd": round(sum(result.actualCostUsd or 0 for result in results), 6),
+        },
+        results=results,
+        generatedAt=now_iso(),
+    )
+    save_scoped_record("provider_calibrations", run.id, run.model_dump())
+    save_audit_event(
+        "provider.calibration.run",
+        current_user_email(),
+        run.id,
+        run.decision,
+        f"Provider calibration {run.decision}: {len(passed)}/{len(results)} provider(s) passed.",
+    )
+    return run
 
 
 def build_connect_guide() -> ConnectGuide:
@@ -4965,6 +5351,22 @@ def run_provider_connection_test(connection_id: str) -> ProviderConnectionTestRe
         result.message,
     )
     return result
+
+
+@app.get("/api/providers/calibrations", response_model=list[ProviderCalibrationRun])
+def list_provider_calibrations() -> list[ProviderCalibrationRun]:
+    return provider_calibration_runs(limit=25)
+
+
+@app.get("/api/providers/calibrations/latest", response_model=ProviderCalibrationRun | None)
+def provider_calibration_latest() -> ProviderCalibrationRun | None:
+    return latest_provider_calibration()
+
+
+@app.post("/api/providers/calibrate", response_model=ProviderCalibrationRun)
+def provider_calibrate(request: ProviderCalibrationRequest) -> ProviderCalibrationRun:
+    require_permission("provider:write", "provider_calibration.run")
+    return run_provider_calibration(request)
 
 
 @app.get("/api/agent-runtime/runs", response_model=list[AgentRunRecord])

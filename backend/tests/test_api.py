@@ -2003,6 +2003,65 @@ def create_mock_provider(client: TestClient) -> None:
     assert response.status_code == 200
 
 
+def test_provider_calibration_reports_not_configured_without_providers(client: TestClient) -> None:
+    response = client.post("/api/providers/calibrate", json={"environment": "staging"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["decision"] == "review"
+    assert payload["summary"]["configuredProviders"] == 0
+    assert payload["summary"]["notConfigured"] == 1
+    assert payload["results"] == []
+
+    latest = client.get("/api/providers/calibrations/latest")
+    assert latest.status_code == 200
+    assert latest.json()["id"] == payload["id"]
+
+    requests = client.get("/api/gateway/requests")
+    assert requests.status_code == 200
+    assert requests.json()[0]["status"] == "not_configured"
+    assert requests.json()[0]["selectedReason"] == "calibration_not_configured"
+
+
+def test_provider_calibration_scores_provider_and_persists_evidence(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    create_mock_provider(client)
+    FakeOpenAIClient.calls = []
+    FakeOpenAIClient.response_content = "Calibration passed with safe operational summary."
+    monkeypatch.setattr("app.main.httpx.Client", FakeOpenAIClient)
+
+    response = client.post(
+        "/api/providers/calibrate",
+        json={
+            "environment": "staging",
+            "prompt": "Summarize this production incident safely.",
+            "maxLatencyMs": 2500,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["decision"] == "allow"
+    assert payload["recommendedProviderLabel"] == "Mock Provider"
+    assert payload["summary"]["passed"] == 1
+    assert payload["results"][0]["status"] == "passed"
+    assert payload["results"][0]["traceId"].startswith("tr_gateway_")
+    assert payload["results"][0]["routeEventId"].startswith("gr_")
+
+    trace = client.get(f"/api/traces/{payload['results'][0]['traceId']}")
+    assert trace.status_code == 200
+    assert trace.json()["toolCalls"] == "gateway.openai_chat -> Mock Provider"
+
+    routes = client.get("/api/gateway/routes")
+    assert routes.status_code == 200
+    latest_route = routes.json()[0]
+    assert latest_route["selectedReason"] == "provider_calibration"
+    assert latest_route["selectedProvider"]["label"] == "Mock Provider"
+
+    status = client.get("/api/system/status")
+    feature_states = {feature["id"]: feature["state"] for feature in status.json()["features"]}
+    assert feature_states["provider_calibration"] == "persisted"
+
+
 def test_gateway_forwards_safe_request_and_stores_trace(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     token = create_gateway_key(client)
     create_mock_provider(client)

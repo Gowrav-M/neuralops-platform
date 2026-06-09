@@ -299,6 +299,48 @@ class ProviderConnectionTestResult(BaseModel):
     message: str
 
 
+class ProviderCalibrationRequest(BaseModel):
+    environment: Literal["prod", "staging", "dev"] = "staging"
+    prompt: str = Field(
+        default="Summarize this production AI incident in one sentence with safe operational wording.",
+        min_length=1,
+        max_length=2000,
+    )
+    maxLatencyMs: int = Field(default=2500, ge=1, le=120_000)
+    maxEstimatedCostUsd: float | None = Field(default=None, ge=0)
+    includeProviders: list[str] = Field(default_factory=list, max_length=25)
+
+
+class ProviderCalibrationResult(BaseModel):
+    providerId: str
+    providerLabel: str
+    source: str
+    model: str
+    status: Literal["passed", "failed", "not_configured"]
+    decision: Literal["allow", "review", "block"]
+    score: int = Field(ge=0, le=100)
+    latencyMs: int = Field(ge=0)
+    estimatedCostUsd: float | None = Field(default=None, ge=0)
+    actualCostUsd: float | None = Field(default=None, ge=0)
+    traceId: str | None = None
+    routeEventId: str | None = None
+    findings: list[str] = Field(default_factory=list)
+    outputPreview: str = ""
+    error: str | None = None
+
+
+class ProviderCalibrationRun(BaseModel):
+    id: str
+    environment: Literal["prod", "staging", "dev"]
+    prompt: str
+    decision: Literal["allow", "review", "block"]
+    recommendedProviderId: str | None = None
+    recommendedProviderLabel: str | None = None
+    summary: dict[str, Any]
+    results: list[ProviderCalibrationResult]
+    generatedAt: str
+
+
 class FeatureTruth(BaseModel):
     id: str
     label: str

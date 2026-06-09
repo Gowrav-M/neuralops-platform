@@ -66,6 +66,37 @@ Local/private providers can be enabled with:
 
 Every successful run stores an agent run, trace, eval checks, cost estimate, and audit evidence.
 
+## Provider Calibration
+
+Before trusting cost-aware or balanced routing, run **Provider Calibration** from the Gateway page or API. Calibration sends one measured OpenAI-compatible test prompt to every configured provider for an environment and records:
+
+- provider status and decision
+- measured latency
+- estimated cost and actual usage cost when the provider returns usage
+- pre/post policy findings
+- trace ID
+- route event ID
+- recommended provider
+
+If no provider is configured, NeuralOps returns a `review` calibration with no results and stores `not_configured` route evidence. It does not invent provider scores.
+
+```text
+GET  /api/providers/calibrations
+GET  /api/providers/calibrations/latest
+POST /api/providers/calibrate
+```
+
+Example:
+
+```json
+{
+  "environment": "staging",
+  "prompt": "Summarize this production AI incident in one sentence with safe operational wording.",
+  "maxLatencyMs": 2500,
+  "maxEstimatedCostUsd": 0.01
+}
+```
+
 ## OpenAI-Compatible Intelligent Gateway Routing
 
 Server apps can send OpenAI-compatible chat completion calls to:
@@ -112,6 +143,9 @@ GET /api/gateway/routes
 Gateway operating APIs:
 
 ```text
+GET  /api/providers/calibrations
+GET  /api/providers/calibrations/latest
+POST /api/providers/calibrate
 GET  /api/gateway/metrics
 GET  /api/gateway/requests
 GET  /api/gateway/cost-suggestions

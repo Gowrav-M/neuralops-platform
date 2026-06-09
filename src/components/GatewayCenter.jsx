@@ -7,8 +7,10 @@ import {
   fetchGatewayMetrics,
   fetchGatewayRequests,
   fetchGatewayRoutingPolicy,
+  fetchProviderCalibrations,
   updateGatewayBudget,
   updateGatewayRoutingPolicy,
+  runProviderCalibration,
 } from '../lib/api';
 
 const statusBadge = {
@@ -18,6 +20,13 @@ const statusBadge = {
   rate_limited: 'badge-warning',
   failed: 'badge-error',
   not_configured: 'badge-warning',
+  passed: 'badge-success',
+};
+
+const decisionBadge = {
+  allow: 'badge-success',
+  review: 'badge-warning',
+  block: 'badge-error',
 };
 
 const strategyCopy = {
@@ -45,6 +54,13 @@ export default function GatewayCenter({ addToast }) {
   const [suggestions, setSuggestions] = useState([]);
   const [policy, setPolicy] = useState(null);
   const [budgets, setBudgets] = useState([]);
+  const [calibrations, setCalibrations] = useState([]);
+  const [calibrationForm, setCalibrationForm] = useState({
+    environment: 'staging',
+    prompt: 'Summarize this production AI incident in one sentence with safe operational wording.',
+    maxLatencyMs: 2500,
+    maxEstimatedCostUsd: '',
+  });
   const [budgetForm, setBudgetForm] = useState({
     environment: 'staging',
     limitUsd: 10,
@@ -54,22 +70,25 @@ export default function GatewayCenter({ addToast }) {
   });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [calibrating, setCalibrating] = useState(false);
 
   const load = async () => {
     setError('');
     try {
-      const [nextMetrics, nextRequests, nextSuggestions, nextPolicy, nextBudgets] = await Promise.all([
+      const [nextMetrics, nextRequests, nextSuggestions, nextPolicy, nextBudgets, nextCalibrations] = await Promise.all([
         fetchGatewayMetrics(),
         fetchGatewayRequests(),
         fetchGatewayCostSuggestions(),
         fetchGatewayRoutingPolicy(),
         fetchGatewayBudgets(),
+        fetchProviderCalibrations(),
       ]);
       setMetrics(nextMetrics);
       setRequests(nextRequests);
       setSuggestions(nextSuggestions);
       setPolicy(nextPolicy);
       setBudgets(nextBudgets);
+      setCalibrations(nextCalibrations);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gateway backend unavailable');
     }
@@ -83,14 +102,16 @@ export default function GatewayCenter({ addToast }) {
       fetchGatewayCostSuggestions(),
       fetchGatewayRoutingPolicy(),
       fetchGatewayBudgets(),
+      fetchProviderCalibrations(),
     ])
-      .then(([nextMetrics, nextRequests, nextSuggestions, nextPolicy, nextBudgets]) => {
+      .then(([nextMetrics, nextRequests, nextSuggestions, nextPolicy, nextBudgets, nextCalibrations]) => {
         if (cancelled) return;
         setMetrics(nextMetrics);
         setRequests(nextRequests);
         setSuggestions(nextSuggestions);
         setPolicy(nextPolicy);
         setBudgets(nextBudgets);
+        setCalibrations(nextCalibrations);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -107,6 +128,8 @@ export default function GatewayCenter({ addToast }) {
   const latestBudget = useMemo(() => {
     return budgets.find((item) => item.environment === budgetForm.environment) || budgets[0] || null;
   }, [budgets, budgetForm.environment]);
+
+  const latestCalibration = calibrations[0] || null;
 
   const updatePolicyField = (field, value) => {
     setPolicy((current) => ({ ...(current || {}), [field]: value }));
@@ -185,6 +208,27 @@ export default function GatewayCenter({ addToast }) {
     }
   };
 
+  const handleRunCalibration = async () => {
+    setCalibrating(true);
+    setError('');
+    try {
+      const run = await runProviderCalibration({
+        environment: calibrationForm.environment,
+        prompt: calibrationForm.prompt,
+        maxLatencyMs: Number(calibrationForm.maxLatencyMs),
+        maxEstimatedCostUsd: calibrationForm.maxEstimatedCostUsd === '' ? null : Number(calibrationForm.maxEstimatedCostUsd),
+      });
+      setCalibrations((current) => [run, ...current.filter((item) => item.id !== run.id)]);
+      addToast(`Provider calibration finished: ${run.decision}.`, run.decision === 'allow' ? 'success' : 'warning');
+      await load();
+    } catch (err) {
+      addToast('Provider calibration failed.', 'error');
+      setError(err instanceof Error ? err.message : 'Provider calibration failed');
+    } finally {
+      setCalibrating(false);
+    }
+  };
+
   return (
     <div className="main-panel">
       <div className="page-header">
@@ -227,6 +271,120 @@ export default function GatewayCenter({ addToast }) {
           <MetricTile label="Cache hit rate" value={`${cacheRate}%`} detail={`${metrics.cacheHits} exact-match hits`} />
           <MetricTile label="Actual spend" value={currency(metrics.actualSpendUsd)} detail={`${currency(metrics.estimatedSpendUsd)} estimated`} />
         </div>
+      </div>
+
+      <div className="card-container">
+        <div className="dark-panel-title-row">
+          <div>
+            <span className="card-title">Provider Calibration</span>
+            <p className="page-subtitle" style={{ marginTop: '6px' }}>
+              Run a measured test across configured providers before trusting cost-aware routing. NeuralOps records latency, cost estimate, policy findings, trace, and route evidence.
+            </p>
+          </div>
+          <span className={`badge ${latestCalibration ? decisionBadge[latestCalibration.decision] : 'badge-warning'}`}>
+            {latestCalibration ? latestCalibration.decision : 'not run'}
+          </span>
+        </div>
+
+        <div className="gateway-form-grid">
+          <label>
+            <span className="metric-label">Environment</span>
+            <select
+              className="filter-select"
+              value={calibrationForm.environment}
+              onChange={(event) => setCalibrationForm((current) => ({ ...current, environment: event.target.value }))}
+            >
+              <option value="staging">staging</option>
+              <option value="prod">prod</option>
+              <option value="dev">dev</option>
+            </select>
+          </label>
+          <label>
+            <span className="metric-label">Max latency ms</span>
+            <input
+              className="filter-search-input"
+              type="number"
+              min="1"
+              value={calibrationForm.maxLatencyMs}
+              onChange={(event) => setCalibrationForm((current) => ({ ...current, maxLatencyMs: event.target.value }))}
+            />
+          </label>
+          <label>
+            <span className="metric-label">Max estimated cost</span>
+            <input
+              className="filter-search-input"
+              type="number"
+              min="0"
+              step="0.0001"
+              placeholder="optional"
+              value={calibrationForm.maxEstimatedCostUsd}
+              onChange={(event) => setCalibrationForm((current) => ({ ...current, maxEstimatedCostUsd: event.target.value }))}
+            />
+          </label>
+        </div>
+        <label className="field-stack" style={{ marginTop: '14px' }}>
+          <span className="metric-label">Calibration prompt</span>
+          <textarea
+            className="filter-search-input"
+            rows="3"
+            value={calibrationForm.prompt}
+            onChange={(event) => setCalibrationForm((current) => ({ ...current, prompt: event.target.value }))}
+          />
+        </label>
+        <div className="gate-row-actions" style={{ marginTop: '14px' }}>
+          <button className="btn-primary" onClick={handleRunCalibration} disabled={calibrating}>
+            {calibrating ? 'Running Calibration...' : 'Run Provider Calibration'}
+          </button>
+          {latestCalibration && (
+            <span className="page-subtitle">
+              Recommended: {latestCalibration.recommendedProviderLabel || 'none'} | {latestCalibration.summary.passed || 0}/{latestCalibration.summary.configuredProviders || 0} passed
+            </span>
+          )}
+        </div>
+
+        {latestCalibration && (
+          <div className="table-container" style={{ marginTop: '16px', padding: '0' }}>
+            <table className="dense-table">
+              <thead>
+                <tr>
+                  <th>Provider</th>
+                  <th>Status</th>
+                  <th>Score</th>
+                  <th>Latency</th>
+                  <th>Cost</th>
+                  <th>Findings</th>
+                  <th>Trace</th>
+                </tr>
+              </thead>
+              <tbody>
+                {latestCalibration.results.length ? latestCalibration.results.map((result) => (
+                  <tr key={`${latestCalibration.id}-${result.providerId}`}>
+                    <td>
+                      <strong>{result.providerLabel}</strong>
+                      <div className="code-font">{result.model}</div>
+                    </td>
+                    <td>
+                      <span className={`badge ${statusBadge[result.status] || decisionBadge[result.decision] || 'badge-warning'}`}>
+                        {result.status} / {result.decision}
+                      </span>
+                    </td>
+                    <td>{result.score}</td>
+                    <td>{result.latencyMs}ms</td>
+                    <td>{currency(result.actualCostUsd ?? result.estimatedCostUsd ?? 0)}</td>
+                    <td>{result.findings.length ? result.findings.join(', ') : 'none'}</td>
+                    <td className="code-font">{result.traceId || result.routeEventId || 'not traced'}</td>
+                  </tr>
+                )) : (
+                  <tr>
+                    <td colSpan="7" style={{ color: 'var(--text-secondary)' }}>
+                      No configured provider matched this environment. Add a provider in Settings, then rerun calibration.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       <div className="gateway-grid">

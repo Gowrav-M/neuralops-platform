@@ -10,6 +10,8 @@ NeuralOps also includes a Connect workflow so a real app can send traces through
 
 NeuralOps now also exposes an OpenAI-compatible Intelligent Gateway. A backend service can call `/api/gateway/openai/v1/chat/completions` with a NeuralOps key, and NeuralOps will run pre/post guardrails, route across configured providers by priority, cost, latency, or balanced health, enforce budgets/rate limits, use exact-match cache when enabled, store trace/audit/cost evidence, and return `not_configured` when no provider is connected instead of inventing model output.
 
+The Gateway now includes Provider Calibration. Before routing production traffic, operators can run one measured prompt across configured providers. NeuralOps records latency, estimated/actual cost, policy findings, trace IDs, route events, and the recommended provider. If no provider is configured, calibration returns `review/not_configured` rather than fake benchmark data.
+
 NeuralOps also includes a developer Integration Kit and Trace Replay Gate:
 
 ```powershell
@@ -45,6 +47,7 @@ flowchart LR
   D["GenAI / OTEL Traces"] --> F
   K["JavaScript / Python SDK"] --> F
   M["OpenAI-Compatible Intelligent Gateway"] --> N["Cost/Latency/Policy Router"]
+  Q["Provider Calibration"] --> N
   N --> F
   E["Evaluations + Policy"] --> F
   I["Cost + Incidents"] --> F
@@ -201,6 +204,9 @@ The router supports:
 Gateway management APIs:
 
 ```text
+GET  /api/providers/calibrations
+GET  /api/providers/calibrations/latest
+POST /api/providers/calibrate
 GET  /api/gateway/metrics
 GET  /api/gateway/requests
 GET  /api/gateway/cost-suggestions

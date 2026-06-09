@@ -2992,6 +2992,11 @@ body {
   gap: 6px;
 }
 
+.field-stack {
+  display: grid;
+  gap: 8px;
+}
+
 .gateway-metric-tile {
   min-height: 118px;
   display: grid;

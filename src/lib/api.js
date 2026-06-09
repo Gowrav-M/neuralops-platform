@@ -263,6 +263,21 @@ export function clearGatewayCache() {
   return request('/api/gateway/cache/clear', { method: 'POST' });
 }
 
+export function fetchProviderCalibrations() {
+  return request('/api/providers/calibrations');
+}
+
+export function fetchLatestProviderCalibration() {
+  return request('/api/providers/calibrations/latest');
+}
+
+export function runProviderCalibration(payload) {
+  return request('/api/providers/calibrate', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export function fetchTraces() {
   return request('/api/traces');
 }
