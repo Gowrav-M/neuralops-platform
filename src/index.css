@@ -263,8 +263,35 @@ body {
 .sidebar-nav-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 14px;
   flex: 1;
+}
+
+.sidebar-nav-section {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sidebar-nav-section-title {
+  display: grid;
+  gap: 2px;
+  padding: 4px 8px 2px;
+}
+
+.sidebar-nav-section-title span {
+  color: var(--text-primary);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sidebar-nav-section-title small {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.2;
 }
 
 /* Sidebar Nav Item - Premium hover springing translations & gold highlights */
@@ -272,11 +299,11 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 14px;
+  padding: 9px 12px;
   border-radius: var(--radius-md);
   color: var(--text-secondary);
   font-family: var(--font-sans);
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 500;
   background: transparent;
   border: none;
@@ -1832,6 +1859,24 @@ body {
   border: 1px solid var(--border-color);
   border-radius: 12px;
   padding: 14px;
+}
+
+.settings-handoff-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 16px;
+  border-top: 1px solid var(--border-color);
+  padding-top: 14px;
+}
+
+.settings-handoff-panel p {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 720px;
 }
 
 .gate-checkbox {
@@ -3520,6 +3565,10 @@ body {
   .settings-member-form {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+  .settings-handoff-panel {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 
 @media (max-width: 768px) {
@@ -3557,10 +3606,20 @@ body {
     padding-bottom: 6px;
     gap: 8px;
   }
+  .sidebar-nav-section {
+    flex: 0 0 auto;
+    flex-direction: row;
+    gap: 8px;
+    width: max-content;
+  }
+  .sidebar-nav-section-title {
+    display: none;
+  }
   .sidebar-nav-item {
     flex: 0 0 auto;
     padding: 10px 12px;
     white-space: nowrap;
+    width: auto;
   }
   .sidebar-nav-item:hover {
     transform: translateY(-2px);

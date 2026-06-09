@@ -191,18 +191,35 @@ const getNavIcon = (tab) => {
 };
 
 const workflowStages = [
-  { label: 'Ingest', tab: 'Connect', detail: 'SDK, REST, OTEL' },
-  { label: 'Route', tab: 'Gateway', detail: 'Cost and policy' },
-  { label: 'Test', tab: 'Labs', detail: 'Agents and evals' },
-  { label: 'Replay', tab: 'Autopilot', detail: 'Regression proof' },
+  { label: 'Connect', tab: 'Connect', detail: 'SDK and ingest' },
+  { label: 'Route', tab: 'Gateway', detail: 'Policy gateway' },
+  { label: 'Test', tab: 'Labs', detail: 'Evals and replay' },
   { label: 'Gate', tab: 'Evidence', detail: 'Release proof' },
-  { label: 'Respond', tab: 'Detection', detail: 'ADR cases' },
-  { label: 'Act', tab: 'Automations', detail: 'Rules and incidents' },
-  { label: 'Access', tab: 'Access', detail: 'RBAC and audit' },
-  { label: 'Ready', tab: 'Readiness', detail: 'Deploy gate' },
-  { label: 'Monitor', tab: 'Dashboard', detail: 'Traces and cost' },
-  { label: 'Investigate', tab: 'Traces', detail: 'Replay failures' },
-  { label: 'Configure', tab: 'Settings', detail: 'Providers and auth' },
+  { label: 'Monitor', tab: 'Dashboard', detail: 'Live operations' },
+  { label: 'Respond', tab: 'Detection', detail: 'Incidents and actions' },
+];
+
+const navGroups = [
+  {
+    title: 'Operate',
+    caption: 'Daily AI operations',
+    items: ['Dashboard', 'Traces', 'Incidents', 'Cost'],
+  },
+  {
+    title: 'Build & Test',
+    caption: 'Connect apps, prompts, RAG, agents',
+    items: ['Connect', 'Gateway', 'Agents', 'Labs', 'Prompts', 'Evaluations', 'RAG Quality'],
+  },
+  {
+    title: 'Govern',
+    caption: 'Release gates and response controls',
+    items: ['Evidence', 'Autopilot', 'Policies', 'Detection', 'Automations'],
+  },
+  {
+    title: 'Admin',
+    caption: 'Access, readiness, configuration',
+    items: ['Access', 'Readiness', 'Settings'],
+  },
 ];
 
 export default function App() {
@@ -447,27 +464,7 @@ export default function App() {
     setCmdPaletteOpen(false);
   };
 
-  const navItems = [
-    'Dashboard',
-    'Traces',
-    'Prompts',
-    'Evaluations',
-    'RAG Quality',
-    'Cost',
-    'Policies',
-    'Incidents',
-    'Agents',
-    'Labs',
-    'Connect',
-    'Gateway',
-    'Autopilot',
-    'Evidence',
-    'Detection',
-    'Automations',
-    'Access',
-    'Readiness',
-    'Settings'
-  ];
+  const navItems = Array.from(new Set(navGroups.flatMap((group) => group.items)));
 
   // Map active tab to component
   const renderActiveScreen = () => {
@@ -538,7 +535,7 @@ export default function App() {
       case 'Readiness':
         return <ProductionReadiness addToast={addToast} />;
       case 'Settings':
-        return <Settings addToast={addToast} />;
+        return <Settings addToast={addToast} onNavigate={handleNavClick} />;
       default:
         return <Overview stats={stats} traces={traces} incidents={incidents} />;
     }
@@ -570,16 +567,24 @@ export default function App() {
         </button>
 
         {/* Sidebar Navigation Items */}
-        <div className="sidebar-nav-list">
-          {navItems.map((tab) => (
-            <button
-              key={tab}
-              className={`sidebar-nav-item ${activeTab === tab ? 'active' : ''}`}
-              onClick={() => handleNavClick(tab)}
-            >
-              {getNavIcon(tab)}
-              {tab}
-            </button>
+        <div className="sidebar-nav-list" aria-label="Primary navigation">
+          {navGroups.map((group) => (
+            <section className="sidebar-nav-section" key={group.title} aria-label={group.title}>
+              <div className="sidebar-nav-section-title">
+                <span>{group.title}</span>
+                <small>{group.caption}</small>
+              </div>
+              {group.items.map((tab) => (
+                <button
+                  key={tab}
+                  className={`sidebar-nav-item ${activeTab === tab ? 'active' : ''}`}
+                  onClick={() => handleNavClick(tab)}
+                >
+                  {getNavIcon(tab)}
+                  {tab}
+                </button>
+              ))}
+            </section>
           ))}
         </div>
 
@@ -774,7 +779,7 @@ export default function App() {
         <div className="operator-workflow-rail" aria-label="NeuralOps operator workflow">
           <div className="workflow-rail-copy">
             <span className="metric-label">Operator Workflow</span>
-            <strong>{'Ingest -> Test -> Gate -> Monitor -> Investigate'}</strong>
+            <strong>{'Connect -> Route -> Test -> Gate -> Monitor -> Respond'}</strong>
           </div>
           <div className="workflow-stage-list">
             {workflowStages.map((stage) => (

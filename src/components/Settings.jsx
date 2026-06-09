@@ -5,7 +5,6 @@ import {
   createWebhook,
   createWorkspaceMember,
   deleteWorkspaceMember,
-  fetchGatewayRoutes,
   fetchProviderCatalog,
   fetchProviderConnections,
   fetchSettings,
@@ -14,7 +13,7 @@ import {
   updateRetention,
 } from '../lib/api';
 
-export default function Settings({ addToast }) {
+export default function Settings({ addToast, onNavigate }) {
   const [retentionDays, setRetentionDays] = useState(30);
   const [apiKeys, setApiKeys] = useState([]);
   const [newKeyName, setNewKeyName] = useState('');
@@ -32,7 +31,6 @@ export default function Settings({ addToast }) {
   const [providerEnvironment, setProviderEnvironment] = useState('staging');
   const [providerPriority, setProviderPriority] = useState(20);
   const [testingProviderId, setTestingProviderId] = useState('');
-  const [gatewayRoutes, setGatewayRoutes] = useState([]);
 
   const [webhooks, setWebhooks] = useState([]);
   const [newWebhookName, setNewWebhookName] = useState('');
@@ -108,12 +106,11 @@ export default function Settings({ addToast }) {
   useEffect(() => {
     let cancelled = false;
 
-    Promise.all([fetchProviderCatalog(), fetchProviderConnections(), fetchGatewayRoutes()])
-      .then(([catalog, connections, routes]) => {
+    Promise.all([fetchProviderCatalog(), fetchProviderConnections()])
+      .then(([catalog, connections]) => {
         if (cancelled) return;
         setProviderCatalog(catalog);
         setProviderConnections(connections);
-        setGatewayRoutes(routes);
         const defaultPreset = catalog.find((provider) => provider.id === 'openrouter') || catalog[0];
         if (defaultPreset) {
           setSelectedProviderId((current) => current || defaultPreset.id);
@@ -126,7 +123,6 @@ export default function Settings({ addToast }) {
         if (cancelled) return;
         setProviderCatalog([]);
         setProviderConnections([]);
-        setGatewayRoutes([]);
       });
 
     return () => {
@@ -215,7 +211,6 @@ export default function Settings({ addToast }) {
         supportsVision: preset?.supportsVision ?? false,
       });
       setProviderConnections((current) => [connection, ...current.filter((item) => item.id !== connection.id)]);
-      fetchGatewayRoutes().then(setGatewayRoutes).catch(() => setGatewayRoutes([]));
       setProviderApiKey('');
       addToast(`Provider connection saved: ${connection.label}.`, 'success');
     } catch {
@@ -577,48 +572,21 @@ export default function Settings({ addToast }) {
               </button>
             </form>
 
-            <div style={{ marginTop: '16px', borderTop: '1px solid var(--border-color)', paddingTop: '14px' }}>
-              <span className="card-title" style={{ fontSize: '13px' }}>Recent Gateway Route Evidence</span>
-              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                Each gateway request records provider attempts, selected route, policy decision, and failover evidence.
-              </p>
-              <table className="dense-table" style={{ fontSize: '11px', marginTop: '8px' }}>
-                <thead>
-                  <tr>
-                    <th>Status</th>
-                    <th>Selected Provider</th>
-                    <th>Attempts</th>
-                    <th>Trace</th>
-                    <th>Time</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {gatewayRoutes.slice(0, 5).map((route) => (
-                    <tr key={route.id}>
-                      <td>
-                        <span className={`badge ${route.status === 'routed' ? 'badge-success' : route.status === 'failed' || route.status === 'blocked' ? 'badge-danger' : 'badge-warning'}`}>
-                          {route.status}
-                        </span>
-                      </td>
-                      <td>{route.selectedProvider?.label || 'none'}</td>
-                      <td>
-                        <span className="code-font">
-                          {route.attempts.length ? route.attempts.map((attempt) => `${attempt.provider.label}:${attempt.status}`).join(' -> ') : 'no provider attempts'}
-                        </span>
-                      </td>
-                      <td className="code-font">{route.traceId || 'not traced'}</td>
-                      <td>{new Date(route.generatedAt).toLocaleTimeString()}</td>
-                    </tr>
-                  ))}
-                  {gatewayRoutes.length === 0 && (
-                    <tr>
-                      <td colSpan="5" style={{ color: 'var(--text-secondary)' }}>
-                        No gateway routes have been recorded yet. Route a server-side LLM call through the Policy Gateway to create evidence.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+            <div className="settings-handoff-panel">
+              <div>
+                <span className="card-title" style={{ fontSize: '13px' }}>Gateway operations live in Gateway</span>
+                <p>
+                  Use this Settings page only for provider secrets and workspace configuration. Routing evidence,
+                  budgets, cache state, provider health, and cost suggestions are managed from the Gateway page.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => onNavigate?.('Gateway')}
+              >
+                Open Gateway
+              </button>
             </div>
           </div>
 
