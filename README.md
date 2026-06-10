@@ -1,6 +1,6 @@
 # NeuralOps Platform
 
-Production-style AI control plane for LLM apps, RAG systems, agents, cost, evaluations, prompts, and policy guardrails.
+Production-style AI gateway, observability, SLO/error-budget, release gate, and estate governance control plane for LLM apps, RAG systems, and agents.
 
 The frontend keeps the premium warm enterprise dashboard direction from the original `D:\SAAS` build, while this repo adds a real FastAPI + SQLite backend, an agent runtime, trace ingestion, eval checks, cost estimates, and provider readiness.
 
@@ -11,6 +11,16 @@ NeuralOps also includes a Connect workflow so a real app can send traces through
 NeuralOps now also exposes an OpenAI-compatible Intelligent Gateway. A backend service can call `/api/gateway/openai/v1/chat/completions` with a NeuralOps key, and NeuralOps will run pre/post guardrails, route across configured providers by priority, cost, latency, or balanced health, enforce budgets/rate limits, use exact-match cache when enabled, store trace/audit/cost evidence, and return `not_configured` when no provider is connected instead of inventing model output.
 
 The Gateway now includes Provider Calibration. Before routing production traffic, operators can run one measured prompt across configured providers. NeuralOps records latency, estimated/actual cost, policy findings, trace IDs, route events, and the recommended provider. If no provider is configured, calibration returns `review/not_configured` rather than fake benchmark data.
+
+NeuralOps now includes an AI Estate Graph. It auto-discovers apps, agents, providers, models, prompts, datasets, policies, gateway routes, incidents, and evidence from persisted backend records. The Estate page answers the enterprise governance question: what AI is running, who owns it, what does it touch, and is it safe to ship?
+
+NeuralOps now includes AI SLOs and Error Budgets. Operators can define production contracts for p95 latency, success rate, eval score, policy violation rate, and cost, then evaluate those contracts against real persisted traces. No matching traces produces a review decision, not fake health.
+
+NeuralOps now includes an Action Center. It converts readiness, release, SLO, estate, incident, gateway, detection, and setup evidence into one prioritized operator queue with owner, impact, evidence, next step, and destination page.
+
+NeuralOps now includes a Risk Register. Teams can create time-boxed risk exceptions with owner, approver, reason, compensating controls, expiry, revoke flow, and audit events. Active critical or expiring exceptions surface in Action Center.
+
+NeuralOps now includes a Control Center. It maps persisted evidence into enterprise controls for observability, release gating, gateway policy, SLOs, estate ownership, accepted risk, access audit, incidents, and provider cost/health, then exports an audit-ready JSON/Markdown packet.
 
 NeuralOps also includes a developer Integration Kit and Trace Replay Gate:
 
@@ -49,13 +59,98 @@ flowchart LR
   M["OpenAI-Compatible Intelligent Gateway"] --> N["Cost/Latency/Policy Router"]
   Q["Provider Calibration"] --> N
   N --> F
+  O["Action Center"] --> F
+  X["Risk Register + Exceptions"] --> F
+  Y["Control Center + Audit Matrix"] --> F
+  R["AI Estate Graph"] --> F
+  S["AI SLOs + Error Budgets"] --> F
   E["Evaluations + Policy"] --> F
   I["Cost + Incidents"] --> F
   J["Release Gate + Evidence"] --> F
   L["Detection + Response Cases"] --> F
   F --> G["Premium React Dashboard"]
   F --> H["SQLite or Supabase Postgres Evidence Store"]
+  F --> O
+  F --> X
+  F --> Y
+  F --> R
+  F --> S
 ```
+
+## Action Center
+
+The Action Center is the first operator workflow surface. It prevents the product from becoming “many dashboards with no next step” by generating a prioritized queue from backend evidence.
+
+Use the UI or API:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/api/action-center
+```
+
+Each action includes severity, owner, business impact, evidence, next step, and the NeuralOps page that owns the fix.
+
+See [docs/action-center.md](docs/action-center.md).
+
+## Risk Register
+
+The Risk Register is the accepted-risk workflow. If a team proceeds with an unresolved AI risk, NeuralOps records who accepted it, why, what controls are required, and when it expires.
+
+Use the UI or API:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/api/risk-exceptions
+```
+
+See [docs/risk-register.md](docs/risk-register.md).
+
+## Control Center
+
+The Control Center is the enterprise evidence matrix. It answers which controls are covered by persisted proof, which controls need review, and which controls are blocked before security/procurement/release review.
+
+Use the UI or API:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/api/control-center
+Invoke-RestMethod -Method Post http://localhost:8000/api/control-center/export
+```
+
+See [docs/control-center.md](docs/control-center.md).
+
+## AI Estate Graph
+
+The Estate page is a live registry for production AI ownership and dependency mapping. It is not a static diagram and it does not invent systems. It derives records from:
+
+- SDK, REST, and OpenTelemetry traces
+- NeuralOps Gateway route events
+- provider connections and calibration evidence
+- agent runs and local/live runtime jobs
+- prompt versions and RAG retrieval tests
+- incidents, policy findings, replay gates, and release evidence
+
+Use the UI or API:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/api/estate/summary
+Invoke-RestMethod http://localhost:8000/api/estate/graph
+Invoke-RestMethod -Method Post http://localhost:8000/api/estate/rebuild
+```
+
+See [docs/ai-estate-graph.md](docs/ai-estate-graph.md).
+
+## AI SLOs And Error Budgets
+
+The SLO page is the production contract layer for AI systems. It answers whether observed AI traffic is meeting reliability, quality, policy, latency, and cost expectations before a rollout continues.
+
+Use the UI or API:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/api/slos
+Invoke-RestMethod -Method Post http://localhost:8000/api/slos/evaluate
+```
+
+Each evaluation is persisted as backend evidence and includes check-level proof such as the matched trace count, p95 latency, success rate, average eval score, violation rate, and cost window.
+
+See [docs/ai-slos.md](docs/ai-slos.md).
 
 ## Evidence & Release Gate
 

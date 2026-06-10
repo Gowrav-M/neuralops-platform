@@ -49,6 +49,89 @@ export function fetchSystemStatus() {
   return request('/api/system/status');
 }
 
+export function fetchActionCenter() {
+  return request('/api/action-center');
+}
+
+export function fetchControlCenter() {
+  return request('/api/control-center');
+}
+
+export function exportControlCenter() {
+  return request('/api/control-center/export', { method: 'POST' });
+}
+
+export function fetchRiskExceptions() {
+  return request('/api/risk-exceptions');
+}
+
+export function createRiskException(payload) {
+  return request('/api/risk-exceptions', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function patchRiskException(exceptionId, patch) {
+  return request(`/api/risk-exceptions/${exceptionId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function revokeRiskException(exceptionId) {
+  return request(`/api/risk-exceptions/${exceptionId}/revoke`, { method: 'POST' });
+}
+
+export function fetchEstateSummary() {
+  return request('/api/estate/summary');
+}
+
+export function fetchEstateGraph() {
+  return request('/api/estate/graph');
+}
+
+export function fetchEstateSystem(systemId) {
+  return request(`/api/estate/systems/${systemId}`);
+}
+
+export function patchEstateSystem(systemId, patch) {
+  return request(`/api/estate/systems/${systemId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function rebuildEstateGraph() {
+  return request('/api/estate/rebuild', { method: 'POST' });
+}
+
+export function fetchAiSlos() {
+  return request('/api/slos');
+}
+
+export function createAiSlo(payload) {
+  return request('/api/slos', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function patchAiSlo(sloId, patch) {
+  return request(`/api/slos/${sloId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function evaluateAiSlos() {
+  return request('/api/slos/evaluate', { method: 'POST' });
+}
+
+export function evaluateAiSlo(sloId) {
+  return request(`/api/slos/${sloId}/evaluate`, { method: 'POST' });
+}
+
 export function runReleaseGate(payload = {}) {
   return request('/api/release-gate/run', {
     method: 'POST',

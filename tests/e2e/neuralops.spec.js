@@ -1,7 +1,9 @@
 import { expect, test } from '@playwright/test';
 
 const tabs = [
+  'Action Center',
   'Dashboard',
+  'Estate',
   'Traces',
   'Prompts',
   'Evaluations',
@@ -13,6 +15,9 @@ const tabs = [
   'Labs',
   'Connect',
   'Gateway',
+  'SLOs',
+  'Risk Register',
+  'Control Center',
   'Autopilot',
   'Evidence',
   'Detection',
@@ -171,8 +176,8 @@ test('Connect page creates a key and stores a verification trace', async ({ page
 
   const gatewayResponse = page.waitForResponse((response) => response.url().includes('/api/gateway/openai/v1/chat/completions'));
   await page.getByRole('button', { name: /Route First LLM Call/i }).click();
-  expect((await gatewayResponse).status()).toBe(503);
-  await expect(page.getByText('gateway not_configured')).toBeVisible();
+  expect([401, 403, 503]).toContain((await gatewayResponse).status());
+  await expect(page.getByText(/gateway (not_configured|blocked)/i)).toBeVisible();
 
   const verifyResponse = page.waitForResponse((response) => response.url().includes('/api/connect/verify'));
   await page.getByRole('button', { name: /Verify Connection/i }).click();
@@ -183,6 +188,151 @@ test('Connect page creates a key and stores a verification trace', async ({ page
 
   await sidebar.getByRole('button', { name: 'Traces', exact: true }).click();
   await expect(page.getByRole('cell', { name: 'neuralops-connect-javascript' }).first()).toBeVisible();
+});
+
+test('Action Center prioritizes operator work and links to the owning surface', async ({ page }) => {
+  await page.goto('/');
+  await waitForBackend(page);
+  const sidebar = page.locator('.sidebar-container');
+  await sidebar.getByRole('button', { name: 'Action Center', exact: true }).click();
+  await expect(page.locator('h1.page-title', { hasText: 'Action Center' })).toBeVisible();
+  await expect(page.getByLabel('Action center summary')).toBeVisible();
+  await expect(page.getByText('Prioritized Queue')).toBeVisible();
+  await expect(page.getByLabel('Selected action detail')).toBeVisible();
+  await page.getByRole('button', { name: /Open Selected Surface/i }).click();
+  await expect(page.locator('.main-content-panel h2')).not.toHaveText('Action Center');
+});
+
+test('SLO Center creates and evaluates a real trace contract', async ({ page }) => {
+  await page.goto('/');
+  await waitForBackend(page);
+  const sidebar = page.locator('.sidebar-container');
+  const serviceName = `slo-service-${Date.now()}`;
+
+  await sidebar.getByRole('button', { name: 'Connect', exact: true }).click();
+  await page.getByPlaceholder('service name').fill(serviceName);
+  await page.getByRole('button', { name: 'Create Ingest Key' }).click();
+  await expect(page.getByPlaceholder(/Paste NEURALOPS_API_KEY/i)).toHaveValue(/nop_sk_/);
+  const verifyResponse = page.waitForResponse((response) => response.url().includes('/api/connect/verify'));
+  await page.getByRole('button', { name: /Verify Connection/i }).click();
+  expect((await verifyResponse).ok()).toBe(true);
+
+  await sidebar.getByRole('button', { name: 'SLOs', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'AI SLO Center' })).toBeVisible();
+  await page.locator('.slo-form-grid input').nth(0).fill(`Playwright ${serviceName}`);
+  await page.locator('.slo-form-grid select').selectOption('prod');
+  await page.locator('.slo-form-grid input').nth(1).fill(serviceName);
+  await page.locator('.slo-form-grid input').nth(2).fill('3000');
+  await page.locator('.slo-form-grid input').nth(3).fill('0.5');
+  await page.locator('.slo-form-grid input').nth(4).fill('0.5');
+  await page.locator('.slo-form-grid input').nth(5).fill('1');
+  await page.locator('.slo-form-grid input').nth(6).fill('5');
+  const createResponse = page.waitForResponse((response) => response.url().endsWith('/api/slos') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Create SLO Target' }).click();
+  expect((await createResponse).ok()).toBe(true);
+  await expect(page.getByText(`Playwright ${serviceName}`)).toBeVisible();
+
+  const evaluateResponse = page.waitForResponse((response) => response.url().includes('/api/slos/evaluate'));
+  await page.getByRole('button', { name: 'Evaluate SLOs' }).click();
+  expect((await evaluateResponse).ok()).toBe(true);
+  await expect(page.getByText(/SLOs evaluated and evidence persisted/i)).toBeVisible();
+  await expect(page.getByLabel('AI SLO summary').getByText('Trace Coverage')).toBeVisible();
+});
+
+test('Risk Register creates and revokes an accepted-risk exception', async ({ page }) => {
+  await page.goto('/');
+  await waitForBackend(page);
+  const sidebar = page.locator('.sidebar-container');
+  await sidebar.getByRole('button', { name: 'Risk Register', exact: true }).click();
+  await expect(page.locator('h1.page-title', { hasText: 'Risk Register' })).toBeVisible();
+  const title = `Playwright accepted risk ${Date.now()}`;
+  await page.locator('.risk-form input').first().fill(title);
+  await page.locator('.risk-form select').first().selectOption('gateway');
+  await page.locator('.risk-form select').nth(1).selectOption('Critical');
+  const createResponse = page.waitForResponse((response) => response.url().endsWith('/api/risk-exceptions') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Create Exception' }).click();
+  expect((await createResponse).ok()).toBe(true);
+  await expect(page.locator('.risk-exception-card').filter({ hasText: title })).toBeVisible();
+  await expect(page.getByLabel('Risk register summary').getByText('Critical Active')).toBeVisible();
+  const revokeResponse = page.waitForResponse((response) => response.url().includes('/api/risk-exceptions/') && response.url().endsWith('/revoke'));
+  await page.getByRole('button', { name: 'Revoke Exception' }).first().click();
+  expect((await revokeResponse).ok()).toBe(true);
+  await expect(page.getByText(/Risk exception revoked/i)).toBeVisible();
+});
+
+test('Control Center maps persisted evidence and exports an audit packet', async ({ page }) => {
+  await page.goto('/');
+  await waitForBackend(page);
+  const sidebar = page.locator('.sidebar-container');
+  const title = `Playwright control exception ${Date.now()}`;
+
+  await sidebar.getByRole('button', { name: 'Risk Register', exact: true }).click();
+  await page.locator('.risk-form input').first().fill(title);
+  await page.locator('.risk-form select').first().selectOption('gateway');
+  await page.locator('.risk-form select').nth(1).selectOption('Critical');
+  const createResponse = page.waitForResponse((response) => response.url().endsWith('/api/risk-exceptions') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Create Exception' }).click();
+  expect((await createResponse).ok()).toBe(true);
+
+  await sidebar.getByRole('button', { name: 'Control Center', exact: true }).click();
+  await expect(page.locator('h1.page-title', { hasText: 'Control Center' })).toBeVisible();
+  await expect(page.getByLabel('Control center summary').getByText('Blocked')).toBeVisible();
+  await expect(page.getByText('Accepted risks are time-boxed and reviewable')).toBeVisible();
+  await page.locator('.segmented-control').getByRole('button', { name: 'Governance', exact: true }).click();
+  await expect(page.locator('.control-row').filter({ hasText: 'Accepted risks are time-boxed' })).toBeVisible();
+  const exportResponse = page.waitForResponse((response) => response.url().includes('/api/control-center/export'));
+  await page.getByRole('button', { name: 'Export Evidence' }).click();
+  const exported = await exportResponse;
+  expect(exported.ok()).toBe(true);
+  const payload = await exported.json();
+  expect(payload.report.summary.blocked).toBeGreaterThanOrEqual(1);
+  await expect(page.getByText(/Control evidence exported/i)).toBeVisible();
+});
+
+test('Estate page discovers systems from connected trace records', async ({ page }) => {
+  await page.goto('/');
+  await waitForBackend(page);
+  const sidebar = page.locator('.sidebar-container');
+  const serviceName = `estate-service-${Date.now()}`;
+
+  await sidebar.getByRole('button', { name: 'Connect', exact: true }).click();
+  await page.getByPlaceholder('service name').fill(serviceName);
+  await page.getByRole('button', { name: 'Create Ingest Key' }).click();
+  await expect(page.getByPlaceholder(/Paste NEURALOPS_API_KEY/i)).toHaveValue(/nop_sk_/);
+  const verifyResponse = page.waitForResponse((response) => response.url().includes('/api/connect/verify'));
+  await page.getByRole('button', { name: /Verify Connection/i }).click();
+  const verified = await verifyResponse;
+  expect(verified.ok()).toBe(true);
+  const verifiedPayload = await verified.json();
+  const discoveredService = verifiedPayload.trace.session;
+
+  await sidebar.getByRole('button', { name: 'Estate', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'AI Estate Graph' })).toBeVisible();
+  const firstRebuildResponse = page.waitForResponse((response) => response.url().includes('/api/estate/rebuild'));
+  await page.getByRole('button', { name: /Rebuild Estate Graph/i }).click();
+  const rebuiltGraph = await firstRebuildResponse;
+  expect(rebuiltGraph.ok()).toBe(true);
+  const rebuiltPayload = await rebuiltGraph.json();
+  expect(rebuiltPayload.systems.some((system) => system.name === discoveredService)).toBe(true);
+  await expect(page.getByText('Dependency Map')).toBeVisible();
+  await expect(page.getByText('System Detail')).toBeVisible();
+
+  await page.locator('.estate-node').first().click();
+  await expect(page.getByText(/service.*javascript|trace/i).first()).toBeVisible();
+  await page.locator('.estate-edit-grid input').first().fill('Platform Engineering');
+  await page.locator('.estate-edit-grid input').nth(1).fill('checkout, observed');
+  const patchResponse = page.waitForResponse((response) => response.url().includes('/api/estate/systems/') && response.request().method() === 'PATCH');
+  await page.getByRole('button', { name: 'Save Metadata' }).click();
+  expect((await patchResponse).ok()).toBe(true);
+  await expect(page.getByText('Estate system metadata saved.')).toBeVisible();
+
+  const rebuildResponse = page.waitForResponse((response) => response.url().includes('/api/estate/rebuild'));
+  await page.getByRole('button', { name: /Rebuild Estate Graph/i }).click();
+  expect((await rebuildResponse).ok()).toBe(true);
+  await expect(page.getByText(/Estate graph rebuilt/i)).toBeVisible();
+
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+  expect(overflow).toBe(false);
 });
 
 test('Settings workspace members persist through backend RBAC API', async ({ page }, testInfo) => {

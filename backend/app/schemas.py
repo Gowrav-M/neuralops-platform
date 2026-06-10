@@ -23,6 +23,10 @@ AccessPermission = Literal[
 ]
 DetectionDecision = Literal["allow", "review", "block"]
 DetectionStatus = Literal["open", "contained", "closed"]
+RiskExceptionStatus = Literal["active", "expired", "revoked"]
+RiskExceptionScope = Literal["release", "slo", "gateway", "estate", "detection", "incident", "policy", "other"]
+ControlStatus = Literal["pass", "review", "block"]
+ControlDomain = Literal["governance", "security", "reliability", "operations", "cost", "access"]
 ApiKeyScope = Literal["trace:ingest", "trace:read", "gateway:invoke", "admin"]
 AutomationTrigger = Literal[
     "release_gate.blocked",
@@ -33,6 +37,10 @@ AutomationTrigger = Literal[
     "cost.budget_risk",
 ]
 AutomationAction = Literal["audit_only", "create_incident", "webhook_record"]
+EstateSystemKind = Literal["app", "agent", "prompt", "model", "provider", "dataset", "policy", "gateway", "evidence"]
+EstateSystemSource = Literal["trace", "otel", "gateway", "agent", "provider", "prompt", "rag", "policy", "evidence"]
+EstateHealthStatus = Literal["healthy", "review", "blocked"]
+EstateEdgeType = Literal["calls", "routes_to", "uses", "evaluated_by", "guarded_by", "released_by", "observed_as", "owns"]
 
 
 class Stats(BaseModel):
@@ -64,6 +72,77 @@ class Trace(BaseModel):
     spanCount: int = Field(default=0, ge=0)
     riskFlags: list[str] = Field(default_factory=list)
     spans: list["TraceSpan"] = Field(default_factory=list)
+
+
+class EstateSystem(BaseModel):
+    id: str
+    name: str
+    kind: EstateSystemKind
+    owner: str = "Unassigned"
+    environment: Literal["prod", "staging", "dev", "all"] = "all"
+    source: EstateSystemSource
+    firstSeen: str
+    lastSeen: str
+    risk: Severity = "Low"
+    riskScore: int = Field(default=0, ge=0, le=100)
+    costUsd: float = Field(default=0, ge=0)
+    avgLatencyMs: int = Field(default=0, ge=0)
+    evalScore: float | None = Field(default=None, ge=0, le=1)
+    incidentCount: int = Field(default=0, ge=0)
+    latestTraceId: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EstateEdge(BaseModel):
+    id: str
+    sourceId: str
+    targetId: str
+    type: EstateEdgeType
+    label: str
+    evidence: str
+    latestSeen: str
+
+
+class EstateHealth(BaseModel):
+    systemId: str
+    status: EstateHealthStatus
+    decision: Literal["allow", "review", "block"]
+    score: int = Field(ge=0, le=100)
+    reasons: list[str] = Field(default_factory=list)
+
+
+class EstateSummary(BaseModel):
+    workspaceId: str
+    generatedAt: str
+    totalSystems: int = Field(ge=0)
+    riskySystems: int = Field(ge=0)
+    totalSpendUsd: float = Field(ge=0)
+    avgLatencyMs: int = Field(ge=0)
+    counts: dict[str, int]
+    latestSystem: EstateSystem | None = None
+
+
+class EstateGraph(BaseModel):
+    workspaceId: str
+    generatedAt: str
+    systems: list[EstateSystem]
+    edges: list[EstateEdge]
+    health: list[EstateHealth]
+
+
+class EstateSystemPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    owner: str | None = Field(default=None, min_length=1, max_length=120)
+    tags: list[str] | None = Field(default=None, max_length=20)
+
+
+class EstateSystemDetail(BaseModel):
+    system: EstateSystem
+    health: EstateHealth
+    incoming: list[EstateEdge]
+    outgoing: list[EstateEdge]
+    relatedTraces: list[Trace] = Field(default_factory=list)
 
 
 class TraceSpan(BaseModel):
@@ -210,6 +289,78 @@ class RagRetrievalTestRequest(BaseModel):
 
 class CostBudgetUpdateRequest(BaseModel):
     budgetLimit: int = Field(ge=1, le=1_000_000)
+
+
+class AiSloTarget(BaseModel):
+    id: str
+    name: str = Field(min_length=1, max_length=120)
+    environment: Literal["prod", "staging", "dev", "all"] = "prod"
+    serviceFilter: str | None = Field(default=None, max_length=120)
+    maxP95LatencyMs: int = Field(default=2500, ge=1)
+    minSuccessRate: float = Field(default=0.98, ge=0, le=1)
+    minEvalScore: float = Field(default=0.85, ge=0, le=1)
+    maxPolicyViolationRate: float = Field(default=0.02, ge=0, le=1)
+    maxCostUsd: float = Field(default=25, ge=0)
+    windowTraceLimit: int = Field(default=200, ge=1, le=5000)
+    enabled: bool = True
+    createdAt: str
+    updatedAt: str
+
+
+class AiSloTargetCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    environment: Literal["prod", "staging", "dev", "all"] = "prod"
+    serviceFilter: str | None = Field(default=None, max_length=120)
+    maxP95LatencyMs: int = Field(default=2500, ge=1)
+    minSuccessRate: float = Field(default=0.98, ge=0, le=1)
+    minEvalScore: float = Field(default=0.85, ge=0, le=1)
+    maxPolicyViolationRate: float = Field(default=0.02, ge=0, le=1)
+    maxCostUsd: float = Field(default=25, ge=0)
+    windowTraceLimit: int = Field(default=200, ge=1, le=5000)
+    enabled: bool = True
+
+
+class AiSloTargetPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    environment: Literal["prod", "staging", "dev", "all"] | None = None
+    serviceFilter: str | None = Field(default=None, max_length=120)
+    maxP95LatencyMs: int | None = Field(default=None, ge=1)
+    minSuccessRate: float | None = Field(default=None, ge=0, le=1)
+    minEvalScore: float | None = Field(default=None, ge=0, le=1)
+    maxPolicyViolationRate: float | None = Field(default=None, ge=0, le=1)
+    maxCostUsd: float | None = Field(default=None, ge=0)
+    windowTraceLimit: int | None = Field(default=None, ge=1, le=5000)
+    enabled: bool | None = None
+
+
+class AiSloCheck(BaseModel):
+    id: str
+    label: str
+    status: Literal["pass", "warn", "fail"]
+    target: str
+    actual: str
+    evidence: str
+
+
+class AiSloEvaluation(BaseModel):
+    id: str
+    sloId: str
+    sloName: str
+    decision: Literal["allow", "review", "block"]
+    score: int = Field(ge=0, le=100)
+    traceCount: int = Field(ge=0)
+    burnRate: float = Field(ge=0)
+    errorBudgetRemaining: float = Field(ge=0, le=1)
+    checks: list[AiSloCheck]
+    generatedAt: str
+
+
+class AiSloDashboard(BaseModel):
+    workspaceId: str
+    generatedAt: str
+    slos: list[AiSloTarget]
+    evaluations: list[AiSloEvaluation]
+    summary: dict[str, Any]
 
 
 class AgentRuntime(BaseModel):
@@ -360,6 +511,137 @@ class SystemStatus(BaseModel):
     readinessScore: int = Field(ge=0, le=100)
     blockers: list[str]
     generatedAt: str
+
+
+class ActionCenterItem(BaseModel):
+    id: str
+    title: str
+    severity: Literal["critical", "high", "medium", "low"]
+    category: Literal["connect", "govern", "operate", "secure", "release", "cost"]
+    owner: str
+    impact: str
+    evidence: str
+    nextStep: str
+    destinationTab: str
+    source: str
+    generatedAt: str
+
+
+class ActionCenterSummary(BaseModel):
+    critical: int = Field(ge=0)
+    high: int = Field(ge=0)
+    medium: int = Field(ge=0)
+    low: int = Field(ge=0)
+    total: int = Field(ge=0)
+    readinessScore: int = Field(ge=0, le=100)
+    topCategory: str | None = None
+
+
+class ActionCenterResponse(BaseModel):
+    workspaceId: str
+    generatedAt: str
+    summary: ActionCenterSummary
+    items: list[ActionCenterItem]
+    executiveBrief: list[str]
+
+
+class RiskExceptionCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    scope: RiskExceptionScope = "release"
+    sourceId: str = Field(default="", max_length=160)
+    severity: Severity = "Major"
+    owner: str = Field(default="AI Platform Owner", min_length=1, max_length=120)
+    approver: str = Field(default="Security Reviewer", min_length=1, max_length=120)
+    reason: str = Field(min_length=12, max_length=2000)
+    compensatingControls: list[str] = Field(default_factory=list, max_length=12)
+    expiresInDays: int = Field(default=14, ge=1, le=365)
+
+
+class RiskExceptionPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    severity: Severity | None = None
+    owner: str | None = Field(default=None, min_length=1, max_length=120)
+    approver: str | None = Field(default=None, min_length=1, max_length=120)
+    reason: str | None = Field(default=None, min_length=12, max_length=2000)
+    compensatingControls: list[str] | None = Field(default=None, max_length=12)
+    status: RiskExceptionStatus | None = None
+
+
+class RiskException(BaseModel):
+    id: str
+    title: str
+    scope: RiskExceptionScope
+    sourceId: str = ""
+    severity: Severity
+    status: RiskExceptionStatus
+    owner: str
+    approver: str
+    reason: str
+    compensatingControls: list[str] = Field(default_factory=list)
+    createdAt: str
+    updatedAt: str
+    expiresAt: str
+    revokedAt: str | None = None
+
+
+class RiskRegisterSummary(BaseModel):
+    total: int = Field(ge=0)
+    active: int = Field(ge=0)
+    expired: int = Field(ge=0)
+    revoked: int = Field(ge=0)
+    criticalActive: int = Field(ge=0)
+    expiringSoon: int = Field(ge=0)
+    generatedAt: str
+
+
+class RiskRegisterResponse(BaseModel):
+    workspaceId: str
+    summary: RiskRegisterSummary
+    exceptions: list[RiskException]
+
+
+class ControlEvidence(BaseModel):
+    id: str
+    label: str
+    source: str
+    count: int = Field(ge=0)
+    detail: str
+
+
+class ControlCheck(BaseModel):
+    id: str
+    title: str
+    domain: ControlDomain
+    status: ControlStatus
+    owner: str
+    requirement: str
+    evidence: list[ControlEvidence] = Field(default_factory=list)
+    gaps: list[str] = Field(default_factory=list)
+    nextStep: str
+    mappedFrameworks: list[str] = Field(default_factory=list)
+
+
+class ControlCenterSummary(BaseModel):
+    total: int = Field(ge=0)
+    passing: int = Field(ge=0)
+    review: int = Field(ge=0)
+    blocked: int = Field(ge=0)
+    coverageScore: int = Field(ge=0, le=100)
+    generatedAt: str
+
+
+class ControlCenterReport(BaseModel):
+    workspaceId: str
+    summary: ControlCenterSummary
+    controls: list[ControlCheck]
+    markdown: str
+
+
+class ControlCenterExport(BaseModel):
+    id: str
+    generatedAt: str
+    report: ControlCenterReport
+    artifacts: list[dict[str, str]] = Field(default_factory=list)
 
 
 class ReleaseGateRequest(BaseModel):

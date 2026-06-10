@@ -54,11 +54,20 @@ from .schemas import (
     AccessPermission,
     AccessPolicyMatrix,
     AccessRolePolicy,
+    ActionCenterItem,
+    ActionCenterResponse,
+    ActionCenterSummary,
     AgentJob,
     AgentJobProcessResponse,
     AgentJobSubmitRequest,
     AgentJobSubmitResponse,
     AgentRuntime,
+    AiSloCheck,
+    AiSloDashboard,
+    AiSloEvaluation,
+    AiSloTarget,
+    AiSloTargetCreate,
+    AiSloTargetPatch,
     AutomationEvent,
     AutomationRunTestRequest,
     AutomationRule,
@@ -73,6 +82,13 @@ from .schemas import (
     AgentRunRequest,
     AgentRunResponse,
     DashboardSnapshot,
+    EstateEdge,
+    EstateGraph,
+    EstateHealth,
+    EstateSummary,
+    EstateSystem,
+    EstateSystemDetail,
+    EstateSystemPatch,
     Evaluator,
     EvidenceExportArtifact,
     EvidenceExportPack,
@@ -103,6 +119,11 @@ from .schemas import (
     ConnectivityAction,
     ConnectivityCheck,
     ConnectivityMap,
+    ControlCenterExport,
+    ControlCenterReport,
+    ControlCenterSummary,
+    ControlCheck,
+    ControlEvidence,
     ConnectorDelivery,
     ConnectorDeliveryProcessRequest,
     ConnectorDeliveryProcessResult,
@@ -150,6 +171,11 @@ from .schemas import (
     ReplayGateRequest,
     ReplayGateResult,
     ReplayResult,
+    RiskException,
+    RiskExceptionCreate,
+    RiskExceptionPatch,
+    RiskRegisterResponse,
+    RiskRegisterSummary,
     SettingsPayload,
     Stats,
     SystemStatus,
@@ -924,6 +950,13 @@ def build_system_status() -> SystemStatus:
         "detections",
         "release_gate_definitions",
         "release_gates",
+        "ai_systems",
+        "ai_system_edges",
+        "ai_system_health",
+        "ai_slos",
+        "ai_slo_evaluations",
+        "risk_exceptions",
+        "control_exports",
         "audit",
     ]
     if auth_required():
@@ -967,11 +1000,32 @@ def build_system_status() -> SystemStatus:
             action="Create an ingest API key in Settings, then send traces to /api/traces/ingest.",
         ),
         FeatureTruth(
+            id="ai_estate_graph",
+            label="AI Estate Graph",
+            state="persisted" if record_counts["ai_systems"] or record_counts["traces"] or gateway_route_count else "not_configured",
+            evidence=f"{record_counts['ai_systems']} system snapshot(s), {record_counts['ai_system_edges']} edge snapshot(s), {record_counts['traces']} trace(s), {gateway_route_count} gateway route event(s)",
+            action="Send traces through Connect, Gateway, OTEL, or agent runs, then rebuild the Estate graph.",
+        ),
+        FeatureTruth(
             id="release_gates",
             label="Release Gates",
             state="persisted" if record_counts["release_gate_definitions"] or record_counts["release_gates"] or record_counts["dataset_replay_gates"] else "not_configured",
             evidence=f"{record_counts['release_gate_definitions']} saved gate(s), {record_counts['release_gates']} run(s), {record_counts['dataset_replay_gates']} dataset replay(s)",
             action="Create a saved release gate or dataset replay gate and run it from the Evidence page or CLI before deployment.",
+        ),
+        FeatureTruth(
+            id="ai_slos",
+            label="AI SLOs + Error Budgets",
+            state="persisted" if record_counts["ai_slos"] or record_counts["ai_slo_evaluations"] else "not_configured",
+            evidence=f"{record_counts['ai_slos']} SLO target(s), {record_counts['ai_slo_evaluations']} evaluation record(s), {record_counts['traces']} trace(s)",
+            action="Create an AI SLO, evaluate it against real traces, and use the decision before promotion.",
+        ),
+        FeatureTruth(
+            id="risk_register",
+            label="Risk Register + Exceptions",
+            state="persisted" if record_counts["risk_exceptions"] else "not_configured",
+            evidence=f"{record_counts['risk_exceptions']} risk exception record(s)",
+            action="Create time-boxed exceptions when a release, SLO, gateway, or detection risk is accepted.",
         ),
         FeatureTruth(
             id="connect_sdk",
@@ -1103,6 +1157,636 @@ def build_system_status() -> SystemStatus:
     )
 
 
+ACTION_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+def action_center_item(
+    title: str,
+    severity: str,
+    category: str,
+    owner: str,
+    impact: str,
+    evidence: str,
+    next_step: str,
+    destination_tab: str,
+    source: str,
+) -> ActionCenterItem:
+    raw = f"{current_workspace_id()}:{title}:{source}:{evidence}".encode("utf-8")
+    return ActionCenterItem(
+        id=f"act_{sha256(raw).hexdigest()[:12]}",
+        title=title,
+        severity=severity,  # type: ignore[arg-type]
+        category=category,  # type: ignore[arg-type]
+        owner=owner,
+        impact=impact,
+        evidence=evidence,
+        nextStep=next_step,
+        destinationTab=destination_tab,
+        source=source,
+        generatedAt=datetime.now().isoformat(),
+    )
+
+
+def build_action_center() -> ActionCenterResponse:
+    status = build_system_status()
+    readiness = build_production_readiness()
+    actions: list[ActionCenterItem] = []
+
+    if readiness.decision == "block":
+        actions.append(
+            action_center_item(
+                "Production readiness is blocked",
+                "critical",
+                "release",
+                "Platform Owner",
+                "Deployment should not proceed until blockers are cleared.",
+                "; ".join(readiness.blockers[:3]) or f"Readiness score {readiness.score}/100.",
+                "Open Readiness, run the deployment checks, and clear blocker items before release.",
+                "Readiness",
+                "production_readiness",
+            )
+        )
+    elif readiness.decision == "review":
+        actions.append(
+            action_center_item(
+                "Production readiness needs review",
+                "high",
+                "release",
+                "Release Owner",
+                "Launch confidence is limited because one or more controls are incomplete.",
+                f"Readiness score {readiness.score}/100 with {sum(1 for check in readiness.checks if check.state == 'review')} review check(s).",
+                "Open Readiness and resolve review checks or document an explicit exception.",
+                "Readiness",
+                "production_readiness",
+            )
+        )
+
+    latest_gate = latest_release_gate()
+    if latest_gate is None:
+        actions.append(
+            action_center_item(
+                "No release gate evidence exists",
+                "high",
+                "release",
+                "Release Owner",
+                "Teams cannot prove why a prompt, model, or agent change is safe to ship.",
+                "No /api/release-gate/run result is stored for this workspace.",
+                "Open Evidence and run a release gate against the target environment.",
+                "Evidence",
+                "release_gate",
+            )
+        )
+    elif latest_gate.decision != "allow":
+        actions.append(
+            action_center_item(
+                f"Latest release gate is {latest_gate.decision}",
+                "critical" if latest_gate.decision == "block" else "high",
+                "release",
+                "Release Owner",
+                "A recent gate found evidence that the release is not clean.",
+                f"Gate {latest_gate.id}: {latest_gate.score}/100 for {latest_gate.target}.",
+                "Open Evidence, inspect failed checks, and rerun the gate after remediation.",
+                "Evidence",
+                "release_gate",
+            )
+        )
+
+    slo_dashboard = build_ai_slo_dashboard()
+    for evaluation in slo_dashboard.evaluations[:8]:
+        if evaluation.decision == "allow":
+            continue
+        failed = [check.label for check in evaluation.checks if check.status == "fail"]
+        warned = [check.label for check in evaluation.checks if check.status == "warn"]
+        actions.append(
+            action_center_item(
+                f"SLO breach: {evaluation.sloName}",
+                "critical" if evaluation.decision == "block" else "high",
+                "operate",
+                "SRE / AI Platform",
+                "The AI workflow is outside reliability, quality, policy, latency, or cost targets.",
+                f"{evaluation.traceCount} trace(s), {evaluation.score}/100, failed: {', '.join(failed) or 'none'}, warned: {', '.join(warned) or 'none'}.",
+                "Open SLOs, inspect failed checks, and adjust traffic, prompt, provider, or policy before promotion.",
+                "SLOs",
+                "ai_slos",
+            )
+        )
+
+    estate = estate_summary()
+    if estate.riskySystems:
+        actions.append(
+            action_center_item(
+                "Risky AI systems need ownership review",
+                "high",
+                "govern",
+                "AI Governance",
+                "Unowned or risky AI systems make audits and incident response slower.",
+                f"{estate.riskySystems}/{estate.totalSystems} discovered system(s) are major or critical risk.",
+                "Open Estate, assign owners/tags, and inspect risky system relationships.",
+                "Estate",
+                "ai_estate_graph",
+            )
+        )
+    elif estate.totalSystems == 0:
+        actions.append(
+            action_center_item(
+                "No AI systems discovered yet",
+                "medium",
+                "connect",
+                "Developer Experience",
+                "The product cannot govern traffic until apps send traces or route through the gateway.",
+                "Estate graph contains 0 discovered systems.",
+                "Open Connect and verify one SDK, REST, OTEL, or Gateway integration.",
+                "Connect",
+                "ai_estate_graph",
+            )
+        )
+
+    open_incidents = [Incident.model_validate(item) for item in scoped_records("incidents") if item.get("status") != "Resolved"]
+    for incident in open_incidents[:4]:
+        actions.append(
+            action_center_item(
+                f"Open incident: {incident.title}",
+                "critical" if incident.severity == "Critical" else "high" if incident.severity == "Major" else "medium",
+                "operate",
+                incident.owner,
+                "Active incidents can hide model, prompt, cost, or policy regressions.",
+                f"{incident.severity} incident is {incident.status} from {incident.time}.",
+                "Open Incidents, update owner/status, and connect the incident to trace or SLO evidence.",
+                "Incidents",
+                "incidents",
+            )
+        )
+
+    detection_records = scoped_records("detections")
+    open_detections = [item for item in detection_records if item.get("status") not in {"closed", "resolved"}]
+    if open_detections:
+        top_detection = open_detections[0]
+        actions.append(
+            action_center_item(
+                "Agent detection case requires containment",
+                "critical" if top_detection.get("severity") == "Critical" else "high",
+                "secure",
+                str(top_detection.get("owner") or "Trust Engineering"),
+                "Risky agent behavior should be contained before more traffic is routed.",
+                f"{len(open_detections)} open detection case(s); latest {top_detection.get('title', 'case')}.",
+                "Open Detection, review blast radius, and trigger containment or incident creation.",
+                "Detection",
+                "detections",
+            )
+        )
+
+    feature_states = {feature.id: feature for feature in status.features}
+    setup_priority = [
+        ("auth", "Supabase Auth is not enforced", "critical", "secure", "Security Owner", "Public deployments need authentication before exposing workspace data.", "Set NEURALOPS_AUTH_REQUIRED=true and verify Supabase Auth before public launch.", "Settings"),
+        ("provider_gateway", "No live provider is configured", "high", "connect", "AI Platform", "Gateway traffic cannot produce live model output until a provider is configured.", "Open Settings and configure Groq, NVIDIA, OpenRouter, Vercel AI Gateway, Ollama, vLLM, or a custom endpoint.", "Settings"),
+        ("policy_gateway", "Policy gateway is not receiving routed traffic", "high", "connect", "AI Platform", "Developers will not adopt NeuralOps unless one real LLM call routes through it.", "Open Gateway or Connect and route a first OpenAI-compatible request.", "Gateway"),
+        ("ai_slos", "No AI SLO has been evaluated", "medium", "operate", "SRE / AI Platform", "Release decisions lack reliability and error-budget proof.", "Open SLOs, create a target, and evaluate it from real traces.", "SLOs"),
+        ("webhooks", "Webhook notifications are not configured", "medium", "operate", "Platform Owner", "Failures will stay inside the UI unless external delivery is configured.", "Open Settings and register Slack, Jira, GitHub, or a webhook endpoint.", "Settings"),
+    ]
+    for feature_id, title, severity, category, owner, impact, next_step, tab in setup_priority:
+        feature = feature_states.get(feature_id)
+        if feature and feature.state == "not_configured":
+            actions.append(
+                action_center_item(
+                    title,
+                    severity,
+                    category,
+                    owner,
+                    impact,
+                    feature.evidence,
+                    next_step,
+                    tab,
+                    f"feature_truth:{feature_id}",
+                )
+            )
+
+    latest_calibration = latest_provider_calibration()
+    if latest_calibration is not None and latest_calibration.decision != "allow":
+        actions.append(
+            action_center_item(
+                f"Provider calibration is {latest_calibration.decision}",
+                "high" if latest_calibration.decision == "review" else "critical",
+                "cost",
+                "AI Platform",
+                "Routing decisions need measured provider health before production traffic shifts.",
+                f"Calibration {latest_calibration.id}: {latest_calibration.summary}.",
+                "Open Gateway, inspect calibration findings, and retest after provider configuration changes.",
+                "Gateway",
+                "provider_calibration",
+            )
+        )
+
+    risk_register = build_risk_register()
+    if risk_register.summary.criticalActive:
+        actions.append(
+            action_center_item(
+                "Critical risk exception is active",
+                "high",
+                "govern",
+                "Security Reviewer",
+                "Accepted critical risk must remain visible until it expires or is revoked.",
+                f"{risk_register.summary.criticalActive} active critical exception(s).",
+                "Open Risk Register, confirm compensating controls, and shorten or revoke exceptions where possible.",
+                "Risk Register",
+                "risk_exceptions",
+            )
+        )
+    if risk_register.summary.expiringSoon:
+        actions.append(
+            action_center_item(
+                "Risk exceptions expire soon",
+                "medium",
+                "govern",
+                "Risk Owner",
+                "Expired exceptions should force renewed review instead of silently extending accepted risk.",
+                f"{risk_register.summary.expiringSoon} active exception(s) expire within 7 days.",
+                "Open Risk Register and renew only with fresh evidence or revoke the exception.",
+                "Risk Register",
+                "risk_exceptions",
+            )
+        )
+
+    control_report = build_control_center()
+    if control_report.summary.blocked:
+        actions.append(
+            action_center_item(
+                "Control Center has blocked controls",
+                "critical",
+                "govern",
+                "AI Governance",
+                "Enterprise review should not proceed while governance controls are blocked.",
+                f"{control_report.summary.blocked} blocked control(s), coverage {control_report.summary.coverageScore}/100.",
+                "Open Control Center, review blocked controls, and export a fresh evidence pack after remediation.",
+                "Control Center",
+                "control_center",
+            )
+        )
+    elif control_report.summary.review:
+        actions.append(
+            action_center_item(
+                "Control Center needs evidence review",
+                "high",
+                "govern",
+                "AI Governance",
+                "Missing or review-only control evidence weakens enterprise readiness.",
+                f"{control_report.summary.review} review control(s), coverage {control_report.summary.coverageScore}/100.",
+                "Open Control Center and attach the missing evidence through traces, gates, SLOs, access audit, or risk exceptions.",
+                "Control Center",
+                "control_center",
+            )
+        )
+
+    deduped: dict[str, ActionCenterItem] = {}
+    for item in actions:
+        deduped.setdefault(item.id, item)
+    ordered = sorted(
+        deduped.values(),
+        key=lambda item: (ACTION_SEVERITY_RANK[item.severity], item.category, item.title),
+    )[:16]
+    counts = {severity: sum(1 for item in ordered if item.severity == severity) for severity in ACTION_SEVERITY_RANK}
+    category_counts: dict[str, int] = {}
+    for item in ordered:
+        category_counts[item.category] = category_counts.get(item.category, 0) + 1
+    top_category = max(category_counts.items(), key=lambda item: item[1])[0] if category_counts else None
+    executive_brief = [
+        f"{counts['critical']} critical and {counts['high']} high-priority action(s) need attention.",
+        f"Production readiness score is {status.readinessScore}/100.",
+        f"Top action area: {top_category or 'none'}.",
+    ]
+    return ActionCenterResponse(
+        workspaceId=current_workspace_id(),
+        generatedAt=datetime.now().isoformat(),
+        summary=ActionCenterSummary(
+            critical=counts["critical"],
+            high=counts["high"],
+            medium=counts["medium"],
+            low=counts["low"],
+            total=len(ordered),
+            readinessScore=status.readinessScore,
+            topCategory=top_category,
+        ),
+        items=ordered,
+        executiveBrief=executive_brief,
+    )
+
+
+def normalize_risk_exception(payload: dict[str, Any]) -> RiskException:
+    exception = RiskException.model_validate(payload)
+    if exception.status == "active":
+        try:
+            expired = datetime.fromisoformat(exception.expiresAt) < datetime.now()
+        except ValueError:
+            expired = False
+        if expired:
+            exception = exception.model_copy(update={"status": "expired", "updatedAt": datetime.now().isoformat()})
+            save_scoped_record("risk_exceptions", exception.id, exception.model_dump())
+    return exception
+
+
+def list_risk_exceptions() -> list[RiskException]:
+    exceptions = [normalize_risk_exception(item) for item in scoped_records("risk_exceptions")]
+    status_rank = {"active": 0, "expired": 1, "revoked": 2}
+    return sorted(exceptions, key=lambda item: (status_rank[item.status], item.expiresAt), reverse=False)
+
+
+def build_risk_register() -> RiskRegisterResponse:
+    exceptions = list_risk_exceptions()
+    now = datetime.now()
+    expiring_soon = 0
+    for item in exceptions:
+        if item.status != "active":
+            continue
+        try:
+            days_left = (datetime.fromisoformat(item.expiresAt) - now).days
+        except ValueError:
+            days_left = 999
+        if days_left <= 7:
+            expiring_soon += 1
+    summary = RiskRegisterSummary(
+        total=len(exceptions),
+        active=sum(1 for item in exceptions if item.status == "active"),
+        expired=sum(1 for item in exceptions if item.status == "expired"),
+        revoked=sum(1 for item in exceptions if item.status == "revoked"),
+        criticalActive=sum(1 for item in exceptions if item.status == "active" and item.severity == "Critical"),
+        expiringSoon=expiring_soon,
+        generatedAt=datetime.now().isoformat(),
+    )
+    return RiskRegisterResponse(workspaceId=current_workspace_id(), summary=summary, exceptions=exceptions)
+
+
+def create_risk_exception_record(request: RiskExceptionCreate) -> RiskException:
+    now = datetime.now()
+    exception = RiskException(
+        id=f"risk_{token_hex(6)}",
+        title=request.title,
+        scope=request.scope,
+        sourceId=request.sourceId,
+        severity=request.severity,
+        status="active",
+        owner=request.owner,
+        approver=request.approver,
+        reason=request.reason,
+        compensatingControls=[control.strip() for control in request.compensatingControls if control.strip()],
+        createdAt=now.isoformat(),
+        updatedAt=now.isoformat(),
+        expiresAt=(now + timedelta(days=request.expiresInDays)).isoformat(),
+    )
+    save_scoped_record("risk_exceptions", exception.id, exception.model_dump())
+    save_audit_event("risk_exception.create", current_user_email(), exception.id, "review", f"Accepted {exception.severity} {exception.scope} risk until {exception.expiresAt}.")
+    return exception
+
+
+def control_evidence(evidence_id: str, label: str, source: str, count: int, detail: str) -> ControlEvidence:
+    return ControlEvidence(id=evidence_id, label=label, source=source, count=max(0, count), detail=detail)
+
+
+def control_check(
+    check_id: str,
+    title: str,
+    domain: str,
+    status: str,
+    owner: str,
+    requirement: str,
+    evidence: list[ControlEvidence],
+    gaps: list[str],
+    next_step: str,
+    mapped_frameworks: list[str],
+) -> ControlCheck:
+    return ControlCheck(
+        id=check_id,
+        title=title,
+        domain=domain,  # type: ignore[arg-type]
+        status=status,  # type: ignore[arg-type]
+        owner=owner,
+        requirement=requirement,
+        evidence=evidence,
+        gaps=gaps,
+        nextStep=next_step,
+        mappedFrameworks=mapped_frameworks,
+    )
+
+
+def render_control_report_markdown(report: ControlCenterReport) -> str:
+    lines = [
+        "# NeuralOps Control Center Report",
+        "",
+        f"- Workspace: `{report.workspaceId}`",
+        f"- Generated: `{report.summary.generatedAt}`",
+        f"- Coverage score: `{report.summary.coverageScore}/100`",
+        f"- Controls: `{report.summary.passing} pass`, `{report.summary.review} review`, `{report.summary.blocked} block`",
+        "",
+        "## Control Matrix",
+        "",
+        "| Control | Domain | Status | Owner | Evidence | Gaps |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for item in report.controls:
+        evidence = "<br>".join(f"{entry.label}: {entry.detail}" for entry in item.evidence) or "No stored evidence"
+        gaps = "<br>".join(item.gaps) or "None"
+        lines.append(f"| {item.title} | {item.domain} | {item.status} | {item.owner} | {evidence} | {gaps} |")
+    lines.extend(
+        [
+            "",
+            "## Notes",
+            "",
+            "This report is generated from persisted NeuralOps backend records. It does not claim compliance certification.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def build_control_center() -> ControlCenterReport:
+    record_counts = {domain: count_domain(domain) for domain in (
+        "traces",
+        "release_gates",
+        "replay_gates",
+        "dataset_replay_gates",
+        "ai_slos",
+        "ai_slo_evaluations",
+        "gateway_route_events",
+        "gateway_request_logs",
+        "provider_connections",
+        "provider_calibrations",
+        "ai_systems",
+        "ai_system_edges",
+        "risk_exceptions",
+        "audit",
+        "incidents",
+        "detections",
+        "automation_rules",
+        "connector_deliveries",
+    )}
+    readiness = build_production_readiness()
+    risk_register = build_risk_register()
+    slo_dashboard = build_ai_slo_dashboard()
+    estate = estate_summary()
+    latest_gate = latest_release_gate()
+    latest_calibration = latest_provider_calibration()
+    open_incidents = [item for item in scoped_records("incidents") if item.get("status") != "Resolved"]
+    blocked_traces = [item for item in scoped_records("traces") if item.get("status") in {"blocked", "failed"}]
+    access_audits = [item for item in scoped_records("audit") if str(item.get("type", "")).startswith("access.")]
+
+    controls = [
+        control_check(
+            "trace_coverage",
+            "AI traffic is observable",
+            "operations",
+            "pass" if record_counts["traces"] > 0 else "review",
+            "AI Platform",
+            "Production AI requests should create trace evidence before teams rely on dashboards or gates.",
+            [control_evidence("traces", "Trace records", "traces", record_counts["traces"], f"{record_counts['traces']} trace(s) stored")],
+            [] if record_counts["traces"] else ["No trace records are stored for this workspace."],
+            "Open Connect and send one SDK, REST, Gateway, or OTEL trace.",
+            ["OpenTelemetry GenAI", "NIST AI RMF Measure"],
+        ),
+        control_check(
+            "release_gate_evidence",
+            "Releases have gate evidence",
+            "governance",
+            "block" if latest_gate and latest_gate.decision == "block" else "pass" if latest_gate and latest_gate.decision == "allow" else "review",
+            "Release Owner",
+            "Prompt, model, RAG, and agent changes should have a stored release decision before production rollout.",
+            [
+                control_evidence("release_gates", "Release gates", "release_gates", record_counts["release_gates"], f"{record_counts['release_gates']} run(s) stored"),
+                control_evidence("replay_gates", "Replay gates", "replay_gates", record_counts["replay_gates"] + record_counts["dataset_replay_gates"], f"{record_counts['replay_gates']} trace replay(s), {record_counts['dataset_replay_gates']} dataset replay(s)"),
+            ],
+            [] if latest_gate and latest_gate.decision == "allow" else ["Latest release gate is not an allow decision." if latest_gate else "No release gate result exists."],
+            "Run a release gate from Evidence, then attach the report to the deployment review.",
+            ["NIST AI RMF Govern", "SOC2 Change Management"],
+        ),
+        control_check(
+            "policy_gateway",
+            "Gateway enforces policy and records decisions",
+            "security",
+            "pass" if record_counts["gateway_route_events"] > 0 and not blocked_traces else "block" if blocked_traces else "review",
+            "Security Engineering",
+            "Routed model calls should record policy decisions, provider path, latency, cost, and blocked unsafe behavior.",
+            [
+                control_evidence("gateway_routes", "Gateway route events", "gateway_route_events", record_counts["gateway_route_events"], f"{record_counts['gateway_route_events']} route event(s)"),
+                control_evidence("blocked_traces", "Blocked or failed traces", "traces", len(blocked_traces), f"{len(blocked_traces)} blocked/failed trace(s)"),
+            ],
+            [] if record_counts["gateway_route_events"] and not blocked_traces else ["No routed gateway traffic exists." if not record_counts["gateway_route_events"] else "Blocked or failed traces need review."],
+            "Route one real OpenAI-compatible call through Gateway and inspect blocked traces.",
+            ["OWASP LLM/Agent Security", "NIST AI RMF Manage"],
+        ),
+        control_check(
+            "slo_error_budget",
+            "AI SLOs and error budgets are evaluated",
+            "reliability",
+            "block" if slo_dashboard.summary.get("block", 0) else "pass" if record_counts["ai_slo_evaluations"] else "review",
+            "SRE / AI Platform",
+            "Critical AI workflows need explicit latency, success, quality, policy, and cost targets evaluated against traces.",
+            [
+                control_evidence("ai_slos", "SLO targets", "ai_slos", record_counts["ai_slos"], f"{record_counts['ai_slos']} target(s)"),
+                control_evidence("ai_slo_evaluations", "SLO evaluations", "ai_slo_evaluations", record_counts["ai_slo_evaluations"], f"{record_counts['ai_slo_evaluations']} evaluation record(s)"),
+            ],
+            [] if record_counts["ai_slo_evaluations"] and not slo_dashboard.summary.get("block", 0) else ["SLO evidence is missing or currently blocked."],
+            "Open SLOs, create targets for production workflows, and evaluate them before release.",
+            ["SRE Error Budgets", "NIST AI RMF Measure"],
+        ),
+        control_check(
+            "estate_ownership",
+            "AI systems have owner and dependency evidence",
+            "governance",
+            "block" if estate.riskySystems else "pass" if estate.totalSystems else "review",
+            "AI Governance",
+            "Teams need an inventory of AI apps, agents, prompts, models, providers, datasets, policies, incidents, and evidence.",
+            [
+                control_evidence("ai_systems", "Discovered systems", "ai_systems", record_counts["ai_systems"], f"{estate.totalSystems} system(s), {estate.riskySystems} risky"),
+                control_evidence("ai_system_edges", "Dependency edges", "ai_system_edges", record_counts["ai_system_edges"], f"{record_counts['ai_system_edges']} relationship(s)"),
+            ],
+            [] if estate.totalSystems and not estate.riskySystems else ["No AI systems discovered." if not estate.totalSystems else "Risky AI systems need ownership review."],
+            "Open Estate, rebuild the graph, and assign owners/tags to risky systems.",
+            ["AI Inventory", "NIST AI RMF Govern"],
+        ),
+        control_check(
+            "accepted_risk",
+            "Accepted risks are time-boxed and reviewable",
+            "governance",
+            "block" if risk_register.summary.criticalActive else "review" if risk_register.summary.expiringSoon else "pass" if risk_register.summary.total else "review",
+            "Risk Owner",
+            "Exceptions should document owner, approver, reason, compensating controls, expiry, and revoke evidence.",
+            [control_evidence("risk_exceptions", "Risk exceptions", "risk_exceptions", record_counts["risk_exceptions"], f"{risk_register.summary.active} active, {risk_register.summary.expiringSoon} expiring soon")],
+            [] if risk_register.summary.total and not risk_register.summary.criticalActive and not risk_register.summary.expiringSoon else ["Critical or expiring exceptions require review." if risk_register.summary.total else "No accepted-risk workflow has been exercised."],
+            "Open Risk Register and revoke, renew, or document exceptions with fresh evidence.",
+            ["SOC2 Risk Acceptance", "NIST AI RMF Govern"],
+        ),
+        control_check(
+            "access_audit",
+            "Workspace access changes are auditable",
+            "access",
+            "pass" if access_audits else "review",
+            "Security Owner",
+            "Workspace membership, role decisions, and permission checks should leave auditable records.",
+            [control_evidence("access_audit", "Access audit events", "audit", len(access_audits), f"{len(access_audits)} access audit event(s)")],
+            [] if access_audits else ["No access audit event exists yet."],
+            "Open Access, run a permission simulation, and confirm workspace roles.",
+            ["SOC2 Access Control", "ISO 27001 Access Management"],
+        ),
+        control_check(
+            "incident_response",
+            "AI incidents and detections are tracked",
+            "operations",
+            "block" if any(item.get("severity") == "Critical" for item in open_incidents) else "review" if open_incidents or record_counts["detections"] else "pass",
+            "AI Platform Oncall",
+            "AI failures should create visible incidents or detection cases with owner and status.",
+            [
+                control_evidence("incidents", "Incidents", "incidents", record_counts["incidents"], f"{len(open_incidents)} open incident(s)"),
+                control_evidence("detections", "Detection cases", "detections", record_counts["detections"], f"{record_counts['detections']} detection case(s)"),
+            ],
+            [] if not open_incidents else ["Open incidents need owner/status updates."],
+            "Open Incidents or Detection and close/contain unresolved cases.",
+            ["Incident Response", "NIST AI RMF Manage"],
+        ),
+        control_check(
+            "cost_provider_control",
+            "Provider cost and health decisions are measured",
+            "cost",
+            "pass" if latest_calibration and latest_calibration.decision == "allow" else "review",
+            "FinOps / AI Platform",
+            "Gateway routing should be backed by provider health, latency, policy, and cost calibration evidence.",
+            [
+                control_evidence("provider_connections", "Provider connections", "provider_connections", record_counts["provider_connections"], f"{record_counts['provider_connections']} connection(s)"),
+                control_evidence("provider_calibrations", "Provider calibrations", "provider_calibrations", record_counts["provider_calibrations"], f"{record_counts['provider_calibrations']} calibration run(s)"),
+            ],
+            [] if latest_calibration and latest_calibration.decision == "allow" else ["Provider calibration has not produced an allow decision."],
+            "Open Gateway, run provider calibration, and review routing policy before traffic shifts.",
+            ["FinOps", "Operational Resilience"],
+        ),
+    ]
+
+    blocked = sum(1 for item in controls if item.status == "block")
+    review = sum(1 for item in controls if item.status == "review")
+    passing = sum(1 for item in controls if item.status == "pass")
+    score = round((passing + review * 0.5) * 100 / max(1, len(controls)))
+    summary = ControlCenterSummary(
+        total=len(controls),
+        passing=passing,
+        review=review,
+        blocked=blocked,
+        coverageScore=score,
+        generatedAt=datetime.now().isoformat(),
+    )
+    report = ControlCenterReport(workspaceId=current_workspace_id(), summary=summary, controls=controls, markdown="")
+    return report.model_copy(update={"markdown": render_control_report_markdown(report)})
+
+
+def export_control_center() -> ControlCenterExport:
+    report = build_control_center()
+    export = ControlCenterExport(
+        id=f"ctrl_export_{token_hex(6)}",
+        generatedAt=datetime.now().isoformat(),
+        report=report,
+        artifacts=[
+            {"name": "control-center.json", "type": "application/json"},
+            {"name": "control-center.md", "type": "text/markdown"},
+        ],
+    )
+    save_scoped_record("control_exports", export.id, export.model_dump())
+    save_audit_event("control_center.export", current_user_email(), export.id, "review" if report.summary.blocked or report.summary.review else "allow", f"Exported control report with {report.summary.blocked} blocked control(s).")
+    return export
+
+
 def parse_seconds(value: str) -> float:
     try:
         return float(value.replace("s", ""))
@@ -1115,6 +1799,605 @@ def parse_cost(value: str) -> float:
         return float(value.replace("$", "").replace(",", ""))
     except ValueError:
         return 0.0
+
+
+def percentile(values: list[float], percent: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * percent
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def clamp_float(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def list_ai_slos() -> list[AiSloTarget]:
+    slos = [AiSloTarget.model_validate(item) for item in scoped_records("ai_slos")]
+    return sorted(slos, key=lambda item: item.updatedAt, reverse=True)
+
+
+def trace_matches_slo(trace: Trace, slo: AiSloTarget) -> bool:
+    if slo.environment != "all" and trace.environment != slo.environment:
+        return False
+    if not slo.serviceFilter:
+        return True
+    needle = slo.serviceFilter.lower().strip()
+    haystack = " ".join(
+        [
+            trace.id,
+            trace.session,
+            trace.environment,
+            trace.model,
+            trace.prompt,
+            trace.output,
+            trace.toolCalls or "",
+        ]
+    ).lower()
+    return needle in haystack
+
+
+def ai_slo_check(check_id: str, label: str, status: str, target: str, actual: str, evidence: str) -> AiSloCheck:
+    return AiSloCheck(id=check_id, label=label, status=status, target=target, actual=actual, evidence=evidence)  # type: ignore[arg-type]
+
+
+def evaluate_ai_slo(slo: AiSloTarget, save_result: bool = False) -> AiSloEvaluation:
+    traces = [Trace.model_validate(item) for item in scoped_records("traces")]
+    matched = [trace for trace in traces if trace_matches_slo(trace, slo)]
+    scoped = list(reversed(matched))[: slo.windowTraceLimit]
+    generated_at = datetime.now().isoformat()
+
+    if not scoped:
+        evaluation = AiSloEvaluation(
+            id=f"slo_eval_{token_hex(6)}",
+            sloId=slo.id,
+            sloName=slo.name,
+            decision="review",
+            score=50,
+            traceCount=0,
+            burnRate=0,
+            errorBudgetRemaining=1,
+            generatedAt=generated_at,
+            checks=[
+                ai_slo_check(
+                    "trace_coverage",
+                    "Trace Coverage",
+                    "warn",
+                    f">= 1 trace in {slo.environment}",
+                    "0 traces",
+                    "No real trace records match this SLO scope. Send SDK, gateway, OTEL, or agent traces before trusting a release.",
+                )
+            ],
+        )
+        if save_result:
+            save_scoped_record("ai_slo_evaluations", evaluation.id, evaluation.model_dump())
+        return evaluation
+
+    latencies_ms = [parse_seconds(trace.latency) * 1000 for trace in scoped]
+    costs = [parse_cost(trace.cost) for trace in scoped]
+    p95_latency = percentile(latencies_ms, 0.95)
+    total_cost = sum(costs)
+    success_count = sum(1 for trace in scoped if trace.status == "success")
+    success_rate = success_count / len(scoped)
+    scored = [trace.score for trace in scoped if trace.score > 0]
+    avg_eval_score = sum(scored) / len(scored) if scored else 0.0
+    risky_count = sum(1 for trace in scoped if trace.status in {"blocked", "failed", "warning"} or trace.riskFlags)
+    policy_violation_rate = risky_count / len(scoped)
+
+    checks: list[AiSloCheck] = []
+    checks.append(
+        ai_slo_check(
+            "p95_latency",
+            "p95 Latency",
+            "pass" if p95_latency <= slo.maxP95LatencyMs else "warn" if p95_latency <= slo.maxP95LatencyMs * 1.2 else "fail",
+            f"<= {slo.maxP95LatencyMs}ms",
+            f"{round(p95_latency)}ms",
+            f"Computed from {len(scoped)} persisted trace latency value(s).",
+        )
+    )
+    checks.append(
+        ai_slo_check(
+            "success_rate",
+            "Success Rate",
+            "pass" if success_rate >= slo.minSuccessRate else "warn" if success_rate >= slo.minSuccessRate * 0.95 else "fail",
+            f">= {slo.minSuccessRate:.1%}",
+            f"{success_rate:.1%}",
+            f"{success_count}/{len(scoped)} trace(s) have success status.",
+        )
+    )
+    checks.append(
+        ai_slo_check(
+            "eval_score",
+            "Average Eval Score",
+            "pass" if avg_eval_score >= slo.minEvalScore else "warn" if avg_eval_score >= max(0, slo.minEvalScore - 0.05) else "fail",
+            f">= {slo.minEvalScore:.2f}",
+            f"{avg_eval_score:.2f}",
+            f"Average of {len(scored)} non-zero trace score(s).",
+        )
+    )
+    checks.append(
+        ai_slo_check(
+            "policy_violation_rate",
+            "Policy Violation Rate",
+            "pass" if policy_violation_rate <= slo.maxPolicyViolationRate else "warn" if policy_violation_rate <= max(slo.maxPolicyViolationRate * 2, 0.01) else "fail",
+            f"<= {slo.maxPolicyViolationRate:.1%}",
+            f"{policy_violation_rate:.1%}",
+            f"{risky_count}/{len(scoped)} trace(s) are blocked, failed, warning, or risk-flagged.",
+        )
+    )
+    checks.append(
+        ai_slo_check(
+            "cost_window",
+            "Cost Window",
+            "pass" if total_cost <= slo.maxCostUsd else "warn" if total_cost <= slo.maxCostUsd * 1.1 else "fail",
+            f"<= ${slo.maxCostUsd:.2f}",
+            f"${total_cost:.4f}",
+            f"Summed from the {len(scoped)} trace(s) in this SLO window.",
+        )
+    )
+
+    failed = sum(1 for check in checks if check.status == "fail")
+    warned = sum(1 for check in checks if check.status == "warn")
+    decision = "block" if failed else "review" if warned else "allow"
+    allowed_error_rate = max(0.000001, 1 - slo.minSuccessRate)
+    observed_error_rate = 1 - success_rate
+    burn_rate = observed_error_rate / allowed_error_rate
+    error_budget_remaining = clamp_float((allowed_error_rate - observed_error_rate) / allowed_error_rate)
+    evaluation = AiSloEvaluation(
+        id=f"slo_eval_{token_hex(6)}",
+        sloId=slo.id,
+        sloName=slo.name,
+        decision=decision,
+        score=max(0, min(100, 100 - failed * 20 - warned * 8)),
+        traceCount=len(scoped),
+        burnRate=round(burn_rate, 3),
+        errorBudgetRemaining=round(error_budget_remaining, 3),
+        checks=checks,
+        generatedAt=generated_at,
+    )
+    if save_result:
+        save_scoped_record("ai_slo_evaluations", evaluation.id, evaluation.model_dump())
+        save_audit_event("slo.evaluate", current_user_email(), slo.id, evaluation.decision, f"Evaluated {slo.name}: {evaluation.score}/100 over {len(scoped)} trace(s).")
+    return evaluation
+
+
+def latest_ai_slo_evaluations() -> dict[str, AiSloEvaluation]:
+    latest: dict[str, AiSloEvaluation] = {}
+    evaluations = [AiSloEvaluation.model_validate(item) for item in scoped_records("ai_slo_evaluations")]
+    for evaluation in sorted(evaluations, key=lambda item: item.generatedAt, reverse=True):
+        latest.setdefault(evaluation.sloId, evaluation)
+    return latest
+
+
+def build_ai_slo_dashboard(evaluate: bool = False) -> AiSloDashboard:
+    slos = list_ai_slos()
+    latest = latest_ai_slo_evaluations()
+    evaluations: list[AiSloEvaluation] = []
+    for slo in slos:
+        if evaluate:
+            evaluations.append(evaluate_ai_slo(slo, save_result=True))
+        elif slo.id in latest:
+            evaluations.append(latest[slo.id])
+        else:
+            evaluations.append(evaluate_ai_slo(slo, save_result=False))
+    decisions = {state: sum(1 for item in evaluations if item.decision == state) for state in ("allow", "review", "block")}
+    avg_error_budget = round(sum(item.errorBudgetRemaining for item in evaluations) / len(evaluations), 3) if evaluations else 0
+    summary = {
+        "targetCount": len(slos),
+        "evaluationCount": len(evaluations),
+        "allow": decisions["allow"],
+        "review": decisions["review"],
+        "block": decisions["block"],
+        "avgErrorBudgetRemaining": avg_error_budget,
+        "traceCoverage": sum(item.traceCount for item in evaluations),
+    }
+    return AiSloDashboard(workspaceId=current_workspace_id(), generatedAt=datetime.now().isoformat(), slos=slos, evaluations=evaluations, summary=summary)
+
+
+def estate_key(kind: str, name: str, environment: str = "all") -> str:
+    raw = f"{kind}:{environment}:{name}".lower().strip().encode("utf-8")
+    return f"estate_{sha256(raw).hexdigest()[:14]}"
+
+
+def estate_edge_key(source_id: str, target_id: str, edge_type: str, label: str) -> str:
+    raw = f"{source_id}:{target_id}:{edge_type}:{label}".lower().encode("utf-8")
+    return f"edge_{sha256(raw).hexdigest()[:14]}"
+
+
+def normalize_estate_environment(value: str | None) -> str:
+    normalized = (value or "all").lower()
+    return normalized if normalized in {"prod", "staging", "dev", "all"} else "all"
+
+
+def trace_service_name(trace: Trace) -> str:
+    for span in trace.spans:
+        attrs = span.attributes or {}
+        for key in ("service.name", "deployment.environment.name", "app.name", "neuralops.service"):
+            value = attrs.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    prompt_head = trace.prompt.strip().splitlines()[0][:60]
+    if trace.session and not trace.session.startswith(("sess_", "gateway-")):
+        return trace.session
+    return prompt_head or trace.session or "Observed AI app"
+
+
+def trace_provider_name(trace: Trace) -> str:
+    for span in trace.spans:
+        attrs = span.attributes or {}
+        for key in ("gen_ai.provider.name", "gen_ai.system", "llm.system", "provider"):
+            value = attrs.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    if "gateway" in (trace.toolCalls or "").lower():
+        return "NeuralOps Gateway"
+    return "Observed Provider"
+
+
+def severity_for_trace(trace: Trace) -> tuple[str, int]:
+    if trace.status == "blocked":
+        return "Critical", 95
+    if trace.status == "failed":
+        return "Major", 80
+    if trace.status == "warning" or trace.riskFlags:
+        return "Major", 68
+    if trace.score < 0.75:
+        return "Minor", 42
+    return "Low", 12
+
+
+def merge_estate_system(
+    systems: dict[str, EstateSystem],
+    *,
+    kind: str,
+    name: str,
+    environment: str,
+    source: str,
+    seen_at: str,
+    risk: str = "Low",
+    risk_score: int = 0,
+    cost_usd: float = 0,
+    latency_ms: int = 0,
+    eval_score: float | None = None,
+    latest_trace_id: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> EstateSystem:
+    system_id = estate_key(kind, name, environment)
+    existing = systems.get(system_id)
+    if existing is None:
+        system = EstateSystem(
+            id=system_id,
+            name=name,
+            kind=kind,  # type: ignore[arg-type]
+            environment=environment,  # type: ignore[arg-type]
+            source=source,  # type: ignore[arg-type]
+            firstSeen=seen_at,
+            lastSeen=seen_at,
+            risk=risk,  # type: ignore[arg-type]
+            riskScore=risk_score,
+            costUsd=round(cost_usd, 6),
+            avgLatencyMs=latency_ms,
+            evalScore=eval_score,
+            latestTraceId=latest_trace_id,
+            tags=tags or [],
+            metadata=metadata or {},
+        )
+        systems[system_id] = system
+        return system
+
+    existing.lastSeen = max(existing.lastSeen, seen_at)
+    existing.firstSeen = min(existing.firstSeen, seen_at)
+    existing.costUsd = round(existing.costUsd + cost_usd, 6)
+    existing.avgLatencyMs = round((existing.avgLatencyMs + latency_ms) / 2) if existing.avgLatencyMs and latency_ms else existing.avgLatencyMs or latency_ms
+    if eval_score is not None:
+        existing.evalScore = round(((existing.evalScore or eval_score) + eval_score) / 2, 3)
+    if risk_score > existing.riskScore:
+        existing.riskScore = risk_score
+        existing.risk = risk  # type: ignore[assignment]
+    if latest_trace_id:
+        existing.latestTraceId = latest_trace_id
+    existing.tags = sorted(set(existing.tags + (tags or [])))
+    existing.metadata = {**existing.metadata, **(metadata or {})}
+    return existing
+
+
+def merge_estate_edge(
+    edges: dict[str, EstateEdge],
+    *,
+    source_id: str,
+    target_id: str,
+    edge_type: str,
+    label: str,
+    evidence: str,
+    seen_at: str,
+) -> EstateEdge:
+    edge_id = estate_edge_key(source_id, target_id, edge_type, label)
+    existing = edges.get(edge_id)
+    if existing is not None:
+        existing.latestSeen = max(existing.latestSeen, seen_at)
+        existing.evidence = evidence
+        return existing
+    edge = EstateEdge(
+        id=edge_id,
+        sourceId=source_id,
+        targetId=target_id,
+        type=edge_type,  # type: ignore[arg-type]
+        label=label,
+        evidence=evidence,
+        latestSeen=seen_at,
+    )
+    edges[edge_id] = edge
+    return edge
+
+
+def estate_health_for(system: EstateSystem) -> EstateHealth:
+    reasons: list[str] = []
+    if system.risk in {"Critical", "Major"}:
+        reasons.append(f"{system.risk} risk posture")
+    if system.incidentCount:
+        reasons.append(f"{system.incidentCount} linked incident(s)")
+    if system.evalScore is not None and system.evalScore < 0.8:
+        reasons.append(f"Eval score {system.evalScore:.2f}")
+    if system.costUsd > 25:
+        reasons.append(f"${system.costUsd:.2f} observed spend")
+    decision = "block" if system.risk == "Critical" else "review" if reasons else "allow"
+    status = "blocked" if decision == "block" else "review" if decision == "review" else "healthy"
+    score = max(0, 100 - system.riskScore - system.incidentCount * 10 - (0 if system.evalScore is None else max(0, round((0.85 - system.evalScore) * 100))))
+    return EstateHealth(systemId=system.id, status=status, decision=decision, score=score, reasons=reasons)
+
+
+def apply_estate_overrides(systems: dict[str, EstateSystem]) -> None:
+    for override in scoped_records("ai_systems"):
+        system_id = str(override.get("id", ""))
+        if system_id not in systems:
+            continue
+        system = systems[system_id]
+        for field in ("name", "owner", "tags"):
+            if field in override and override[field] is not None:
+                setattr(system, field, override[field])
+
+
+def build_estate_graph(save_snapshot: bool = False) -> EstateGraph:
+    systems: dict[str, EstateSystem] = {}
+    edges: dict[str, EstateEdge] = {}
+    traces = [Trace.model_validate(item) for item in scoped_records("traces")]
+    incidents = [Incident.model_validate(item) for item in scoped_records("incidents")]
+    incident_count = len([incident for incident in incidents if incident.status != "Resolved"])
+
+    for trace in traces:
+        seen_at = trace.timestamp if "T" in trace.timestamp else datetime.now().isoformat()
+        environment = normalize_estate_environment(trace.environment)
+        risk, risk_score = severity_for_trace(trace)
+        app = merge_estate_system(
+            systems,
+            kind="app",
+            name=trace_service_name(trace),
+            environment=environment,
+            source="otel" if trace.source == "otel" else "trace",
+            seen_at=seen_at,
+            risk=risk,
+            risk_score=risk_score,
+            cost_usd=parse_cost(trace.cost),
+            latency_ms=round(parse_seconds(trace.latency) * 1000),
+            eval_score=trace.score,
+            latest_trace_id=trace.id,
+            tags=[trace.source, trace.environment],
+            metadata={"session": trace.session, "status": trace.status, "riskFlags": trace.riskFlags},
+        )
+        model = merge_estate_system(
+            systems,
+            kind="model",
+            name=trace.model,
+            environment="all",
+            source="trace",
+            seen_at=seen_at,
+            risk=risk if trace.status in {"blocked", "failed"} else "Low",
+            risk_score=risk_score if trace.status in {"blocked", "failed"} else 8,
+            cost_usd=parse_cost(trace.cost),
+            latency_ms=round(parse_seconds(trace.latency) * 1000),
+            eval_score=trace.score,
+            latest_trace_id=trace.id,
+            tags=["model"],
+        )
+        provider = merge_estate_system(
+            systems,
+            kind="provider",
+            name=trace_provider_name(trace),
+            environment="all",
+            source="gateway" if trace.id.startswith("tr_gateway_") else "trace",
+            seen_at=seen_at,
+            cost_usd=parse_cost(trace.cost),
+            latency_ms=round(parse_seconds(trace.latency) * 1000),
+            latest_trace_id=trace.id,
+            tags=["provider"],
+        )
+        merge_estate_edge(edges, source_id=app.id, target_id=model.id, edge_type="uses", label="uses model", evidence=f"Trace {trace.id}", seen_at=seen_at)
+        merge_estate_edge(edges, source_id=app.id, target_id=provider.id, edge_type="calls", label="calls provider", evidence=f"Trace {trace.id}", seen_at=seen_at)
+        if trace.riskFlags or trace.status in {"blocked", "warning", "failed"}:
+            policy = merge_estate_system(
+                systems,
+                kind="policy",
+                name="Guardrail Policy",
+                environment="all",
+                source="policy",
+                seen_at=seen_at,
+                risk=risk,
+                risk_score=risk_score,
+                latest_trace_id=trace.id,
+                tags=["guardrail"],
+            )
+            merge_estate_edge(edges, source_id=app.id, target_id=policy.id, edge_type="guarded_by", label="guarded by", evidence=", ".join(trace.riskFlags) or trace.status, seen_at=seen_at)
+
+    for route in gateway_route_events(limit=500):
+        seen_at = route.generatedAt
+        gateway = merge_estate_system(
+            systems,
+            kind="gateway",
+            name="NeuralOps Gateway",
+            environment=route.environment,
+            source="gateway",
+            seen_at=seen_at,
+            risk="Major" if route.status in {"blocked", "failed", "budget_exceeded"} else "Low",
+            risk_score=65 if route.status in {"blocked", "failed", "budget_exceeded"} else 10,
+            cost_usd=route.actualCostUsd or route.estimatedCostUsd or 0,
+            latest_trace_id=route.traceId,
+            tags=["gateway", route.routingStrategy],
+            metadata={"status": route.status, "budgetDecision": route.budgetDecision, "cacheStatus": route.cacheStatus},
+        )
+        if route.selectedProvider is not None:
+            provider = merge_estate_system(
+                systems,
+                kind="provider",
+                name=route.selectedProvider.label,
+                environment=route.environment,
+                source="gateway",
+                seen_at=seen_at,
+                cost_usd=route.actualCostUsd or route.estimatedCostUsd or 0,
+                tags=[route.selectedProvider.source],
+            )
+            merge_estate_edge(edges, source_id=gateway.id, target_id=provider.id, edge_type="routes_to", label=route.selectedReason, evidence=f"Gateway route {route.id}: {route.status}", seen_at=seen_at)
+        if route.requestedModel:
+            model = merge_estate_system(systems, kind="model", name=route.requestedModel, environment="all", source="gateway", seen_at=seen_at, tags=["requested"])
+            merge_estate_edge(edges, source_id=gateway.id, target_id=model.id, edge_type="uses", label="requested model", evidence=f"Gateway route {route.id}", seen_at=seen_at)
+
+    for connection in scoped_records("provider_connections"):
+        seen_at = str(connection.get("updatedAt") or connection.get("createdAt") or datetime.now().isoformat())
+        provider = merge_estate_system(
+            systems,
+            kind="provider",
+            name=str(connection.get("label") or connection.get("providerId") or "Provider connection"),
+            environment=normalize_estate_environment(str(connection.get("environment") or "all")),
+            source="provider",
+            seen_at=seen_at,
+            risk="Major" if connection.get("lastStatus") in {"failed", "not_configured"} else "Low",
+            risk_score=60 if connection.get("lastStatus") in {"failed", "not_configured"} else 8,
+            tags=["configured-provider"],
+            metadata={"status": connection.get("lastStatus"), "model": connection.get("defaultModel"), "baseUrl": connection.get("baseUrl")},
+        )
+        if connection.get("defaultModel"):
+            model = merge_estate_system(systems, kind="model", name=str(connection["defaultModel"]), environment="all", source="provider", seen_at=seen_at, tags=["default"])
+            merge_estate_edge(edges, source_id=provider.id, target_id=model.id, edge_type="uses", label="default model", evidence="Provider connection", seen_at=seen_at)
+
+    for run in scoped_records("agent_runs"):
+        seen_at = str(run.get("createdAt") or datetime.now().isoformat())
+        environment = normalize_estate_environment(str(run.get("environment") or "all"))
+        risk = "Critical" if run.get("decision") == "block" else "Major" if run.get("decision") == "review" else "Low"
+        risk_score = 90 if risk == "Critical" else 62 if risk == "Major" else 10
+        agent = merge_estate_system(
+            systems,
+            kind="agent",
+            name=str(run.get("agentName") or run.get("agentId") or "Agent run"),
+            environment=environment,
+            source="agent",
+            seen_at=seen_at,
+            risk=risk,
+            risk_score=risk_score,
+            cost_usd=float(run.get("costUsd") or 0),
+            latency_ms=int(run.get("latencyMs") or 0),
+            eval_score=float(run.get("score") or 0),
+            latest_trace_id=run.get("traceId"),
+            tags=["agent"],
+            metadata={"provider": run.get("provider"), "decision": run.get("decision"), "policyFindings": run.get("policyFindings", [])},
+        )
+        if run.get("model"):
+            model = merge_estate_system(systems, kind="model", name=str(run["model"]), environment="all", source="agent", seen_at=seen_at, tags=["agent-model"])
+            merge_estate_edge(edges, source_id=agent.id, target_id=model.id, edge_type="uses", label="runs on", evidence=f"Agent run {run.get('id')}", seen_at=seen_at)
+
+    for prompt in scoped_records("prompts"):
+        seen_at = str(prompt.get("updatedAt") or datetime.now().isoformat())
+        merge_estate_system(
+            systems,
+            kind="prompt",
+            name=str(prompt.get("name") or prompt.get("id") or "Prompt"),
+            environment=normalize_estate_environment(str(prompt.get("env") or "all")),
+            source="prompt",
+            seen_at=seen_at,
+            eval_score=prompt.get("evalScore"),
+            tags=[str(prompt.get("status", "prompt")).lower()],
+            metadata={"version": prompt.get("version"), "owner": prompt.get("owner")},
+        )
+
+    for rag in scoped_records("rag"):
+        seen_at = datetime.now().isoformat()
+        merge_estate_system(
+            systems,
+            kind="dataset",
+            name=str(rag.get("query") or rag.get("id") or "RAG dataset"),
+            environment="all",
+            source="rag",
+            seen_at=seen_at,
+            eval_score=rag.get("faithfulness"),
+            tags=["rag"],
+            metadata={"precision": rag.get("precision"), "recall": rag.get("recall")},
+        )
+
+    latest_gate = latest_release_gate()
+    if latest_gate is not None and systems:
+        evidence = merge_estate_system(
+            systems,
+            kind="evidence",
+            name=f"Release gate {latest_gate.target}",
+            environment="all",
+            source="evidence",
+            seen_at=latest_gate.generatedAt,
+            risk="Critical" if latest_gate.decision == "block" else "Major" if latest_gate.decision == "review" else "Low",
+            risk_score=80 if latest_gate.decision == "block" else 55 if latest_gate.decision == "review" else 5,
+            tags=["release-gate"],
+            metadata={"decision": latest_gate.decision, "score": latest_gate.score},
+        )
+        for system in list(systems.values())[:8]:
+            if system.id != evidence.id:
+                merge_estate_edge(edges, source_id=system.id, target_id=evidence.id, edge_type="released_by", label="release evidence", evidence=f"Gate {latest_gate.id}", seen_at=latest_gate.generatedAt)
+
+    if incident_count:
+        for system in systems.values():
+            if system.risk in {"Critical", "Major"}:
+                system.incidentCount = incident_count
+
+    apply_estate_overrides(systems)
+    health = [estate_health_for(system) for system in systems.values()]
+    graph = EstateGraph(
+        workspaceId=current_workspace_id(),
+        generatedAt=datetime.now().isoformat(),
+        systems=sorted(systems.values(), key=lambda item: (item.riskScore, item.lastSeen), reverse=True),
+        edges=sorted(edges.values(), key=lambda item: item.latestSeen, reverse=True),
+        health=health,
+    )
+    if save_snapshot:
+        for system in graph.systems:
+            save_scoped_record("ai_systems", system.id, system.model_dump())
+        for edge in graph.edges:
+            save_scoped_record("ai_system_edges", edge.id, edge.model_dump())
+        for item in graph.health:
+            save_scoped_record("ai_system_health", item.systemId, item.model_dump())
+    return graph
+
+
+def estate_summary() -> EstateSummary:
+    graph = build_estate_graph()
+    systems = graph.systems
+    counts: dict[str, int] = {}
+    for system in systems:
+        counts[system.kind] = counts.get(system.kind, 0) + 1
+    latency_systems = [system for system in systems if system.avgLatencyMs]
+    avg_latency = round(sum(system.avgLatencyMs for system in latency_systems) / max(len(latency_systems), 1)) if latency_systems else 0
+    return EstateSummary(
+        workspaceId=current_workspace_id(),
+        generatedAt=graph.generatedAt,
+        totalSystems=len(systems),
+        riskySystems=sum(1 for system in systems if system.risk in {"Critical", "Major"}),
+        totalSpendUsd=round(sum(system.costUsd for system in systems), 6),
+        avgLatencyMs=avg_latency,
+        counts=counts,
+        latestSystem=systems[0] if systems else None,
+    )
 
 
 def list_release_gate_definitions() -> list[ReleaseGateDefinition]:
@@ -4000,6 +5283,69 @@ def system_status() -> SystemStatus:
     return build_system_status()
 
 
+@app.get("/api/action-center", response_model=ActionCenterResponse)
+def action_center() -> ActionCenterResponse:
+    return build_action_center()
+
+
+@app.get("/api/control-center", response_model=ControlCenterReport)
+def control_center() -> ControlCenterReport:
+    return build_control_center()
+
+
+@app.post("/api/control-center/export", response_model=ControlCenterExport)
+def control_center_export() -> ControlCenterExport:
+    require_permission("release:gate", "control_center.export")
+    return export_control_center()
+
+
+@app.get("/api/risk-exceptions", response_model=RiskRegisterResponse)
+def risk_exceptions() -> RiskRegisterResponse:
+    return build_risk_register()
+
+
+@app.post("/api/risk-exceptions", response_model=RiskException)
+def create_risk_exception(request: RiskExceptionCreate) -> RiskException:
+    require_permission("policy:write", "risk_exceptions.create")
+    return create_risk_exception_record(request)
+
+
+@app.patch("/api/risk-exceptions/{exception_id}", response_model=RiskException)
+def patch_risk_exception(exception_id: str, request: RiskExceptionPatch) -> RiskException:
+    require_permission("policy:write", exception_id)
+    existing = get_scoped_record("risk_exceptions", exception_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Risk exception not found")
+    current = normalize_risk_exception(existing).model_dump()
+    patch = request.model_dump(exclude_unset=True, exclude_none=True)
+    if patch.get("status") == "revoked":
+        patch["revokedAt"] = datetime.now().isoformat()
+    patch["updatedAt"] = datetime.now().isoformat()
+    updated = RiskException.model_validate({**current, **patch})
+    save_scoped_record("risk_exceptions", updated.id, updated.model_dump())
+    save_audit_event("risk_exception.update", current_user_email(), updated.id, "review", f"Updated risk exception {updated.title}: {updated.status}.")
+    return updated
+
+
+@app.post("/api/risk-exceptions/{exception_id}/revoke", response_model=RiskException)
+def revoke_risk_exception(exception_id: str) -> RiskException:
+    require_permission("policy:write", exception_id)
+    existing = get_scoped_record("risk_exceptions", exception_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Risk exception not found")
+    updated = RiskException.model_validate(
+        {
+            **normalize_risk_exception(existing).model_dump(),
+            "status": "revoked",
+            "revokedAt": datetime.now().isoformat(),
+            "updatedAt": datetime.now().isoformat(),
+        }
+    )
+    save_scoped_record("risk_exceptions", updated.id, updated.model_dump())
+    save_audit_event("risk_exception.revoke", current_user_email(), updated.id, "allow", f"Revoked risk exception {updated.title}.")
+    return updated
+
+
 @app.get("/api/connectivity", response_model=ConnectivityMap)
 def connectivity_map() -> ConnectivityMap:
     return build_connectivity_map()
@@ -4636,6 +5982,123 @@ def clear_gateway_cache() -> dict[str, Any]:
         delete_scoped_record("gateway_cache_entries", str(entry.get("id")))
     save_audit_event("gateway.cache.clear", "operator", "gateway_cache_entries", "allow", f"Cleared {len(entries)} gateway cache entrie(s).")
     return {"cleared": len(entries)}
+
+
+@app.get("/api/slos", response_model=AiSloDashboard)
+def get_ai_slos() -> AiSloDashboard:
+    return build_ai_slo_dashboard()
+
+
+@app.post("/api/slos", response_model=AiSloTarget)
+def create_ai_slo(request: AiSloTargetCreate) -> AiSloTarget:
+    require_permission("workspace:write", "ai_slos.create")
+    now = datetime.now().isoformat()
+    payload = request.model_dump()
+    raw = f"{current_workspace_id()}:{payload['name']}:{payload['environment']}:{now}".encode("utf-8")
+    slo = AiSloTarget(id=f"slo_{sha256(raw).hexdigest()[:12]}", createdAt=now, updatedAt=now, **payload)
+    save_scoped_record("ai_slos", slo.id, slo.model_dump())
+    save_audit_event("slo.create", current_user_email(), slo.id, "allow", f"Created AI SLO {slo.name}.")
+    return slo
+
+
+@app.patch("/api/slos/{slo_id}", response_model=AiSloTarget)
+def patch_ai_slo(slo_id: str, request: AiSloTargetPatch) -> AiSloTarget:
+    require_permission("workspace:write", slo_id)
+    current = get_scoped_record("ai_slos", slo_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="AI SLO not found")
+    patch = request.model_dump(exclude_none=True)
+    updated = AiSloTarget.model_validate({**current, **patch, "updatedAt": datetime.now().isoformat()})
+    save_scoped_record("ai_slos", updated.id, updated.model_dump())
+    save_audit_event("slo.update", current_user_email(), updated.id, "allow", f"Updated AI SLO {updated.name}.")
+    return updated
+
+
+@app.post("/api/slos/evaluate", response_model=AiSloDashboard)
+def evaluate_ai_slos_endpoint() -> AiSloDashboard:
+    require_permission("release:gate", "ai_slos.evaluate")
+    return build_ai_slo_dashboard(evaluate=True)
+
+
+@app.post("/api/slos/{slo_id}/evaluate", response_model=AiSloEvaluation)
+def evaluate_ai_slo_endpoint(slo_id: str) -> AiSloEvaluation:
+    require_permission("release:gate", slo_id)
+    current = get_scoped_record("ai_slos", slo_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="AI SLO not found")
+    return evaluate_ai_slo(AiSloTarget.model_validate(current), save_result=True)
+
+
+@app.get("/api/estate/summary", response_model=EstateSummary)
+def get_estate_summary() -> EstateSummary:
+    return estate_summary()
+
+
+@app.get("/api/estate/systems", response_model=list[EstateSystem])
+def get_estate_systems() -> list[EstateSystem]:
+    return build_estate_graph().systems
+
+
+@app.get("/api/estate/graph", response_model=EstateGraph)
+def get_estate_graph() -> EstateGraph:
+    return build_estate_graph()
+
+
+@app.get("/api/estate/systems/{system_id}", response_model=EstateSystemDetail)
+def get_estate_system(system_id: str) -> EstateSystemDetail:
+    graph = build_estate_graph()
+    system = next((item for item in graph.systems if item.id == system_id), None)
+    if system is None:
+        raise HTTPException(status_code=404, detail="Estate system not found")
+    health = next((item for item in graph.health if item.systemId == system_id), estate_health_for(system))
+    incoming = [edge for edge in graph.edges if edge.targetId == system_id]
+    outgoing = [edge for edge in graph.edges if edge.sourceId == system_id]
+    related_trace_ids = {system.latestTraceId, *[edge.evidence.split()[-1] for edge in incoming + outgoing if edge.evidence.startswith("Trace ")]}
+    related_traces = [
+        Trace.model_validate(item)
+        for item in scoped_records("traces")
+        if item.get("id") in related_trace_ids
+    ][:10]
+    return EstateSystemDetail(system=system, health=health, incoming=incoming, outgoing=outgoing, relatedTraces=related_traces)
+
+
+@app.patch("/api/estate/systems/{system_id}", response_model=EstateSystem)
+def patch_estate_system(system_id: str, request: EstateSystemPatch) -> EstateSystem:
+    require_permission("workspace:write", system_id)
+    graph = build_estate_graph()
+    system = next((item for item in graph.systems if item.id == system_id), None)
+    if system is None:
+        raise HTTPException(status_code=404, detail="Estate system not found")
+    patch = request.model_dump(exclude_none=True)
+    if "tags" in patch:
+        patch["tags"] = sorted(set(str(tag).strip() for tag in patch["tags"] if str(tag).strip()))
+    updated = system.model_copy(update=patch)
+    save_scoped_record("ai_systems", updated.id, updated.model_dump())
+    save_audit_event("estate.system.update", current_user_email(), updated.id, "allow", f"Updated estate metadata for {updated.name}.")
+    return updated
+
+
+@app.post("/api/estate/rebuild", response_model=EstateGraph)
+def rebuild_estate_graph() -> EstateGraph:
+    require_permission("workspace:write", "estate.rebuild")
+    editable_overrides = {
+        item["id"]: {
+            "id": item["id"],
+            "name": item.get("name"),
+            "owner": item.get("owner"),
+            "tags": item.get("tags", []),
+        }
+        for item in scoped_records("ai_systems")
+        if item.get("id")
+    }
+    for domain in ("ai_systems", "ai_system_edges", "ai_system_health"):
+        for item in scoped_records(domain):
+            delete_scoped_record(domain, str(item.get("id") or item.get("systemId")))
+    for system_id, override in editable_overrides.items():
+        save_scoped_record("ai_systems", system_id, override)
+    graph = build_estate_graph(save_snapshot=True)
+    save_audit_event("estate.rebuild", current_user_email(), current_workspace_id(), "allow", f"Rebuilt estate graph with {len(graph.systems)} system(s).")
+    return graph
 
 
 @app.get("/api/dashboard", response_model=DashboardSnapshot)

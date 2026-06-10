@@ -5,6 +5,8 @@ import { AUTH_ENABLED, supabase } from './lib/supabase';
 
 // Import Screens
 import Overview from './components/Overview';
+import ActionCenter from './components/ActionCenter';
+import EstateCenter from './components/EstateCenter';
 import TraceExplorer from './components/TraceExplorer';
 import PromptRegistry from './components/PromptRegistry';
 import EvalCenter from './components/EvalCenter';
@@ -16,6 +18,9 @@ import Agents from './components/Agents';
 import NeuralLabs from './components/NeuralLabs';
 import ConnectCenter from './components/ConnectCenter';
 import GatewayCenter from './components/GatewayCenter';
+import SloCenter from './components/SloCenter';
+import RiskRegister from './components/RiskRegister';
+import ControlCenter from './components/ControlCenter';
 import EvidenceCenter from './components/EvidenceCenter';
 import AutomationCenter from './components/AutomationCenter';
 import AccessCenter from './components/AccessCenter';
@@ -34,6 +39,27 @@ const getNavIcon = (tab) => {
           <rect x="14" y="3" width="7" height="5" />
           <rect x="14" y="12" width="7" height="9" />
           <rect x="3" y="16" width="7" height="5" />
+        </svg>
+      );
+    case 'Action Center':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M4 4h16v5H4z" />
+          <path d="M4 15h6v5H4z" />
+          <path d="M14 15h6v5h-6z" />
+          <path d="M7 12h10" />
+          <path d="m15 10 2 2-2 2" />
+        </svg>
+      );
+    case 'Estate':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="6" cy="7" r="3" />
+          <circle cx="18" cy="7" r="3" />
+          <circle cx="12" cy="18" r="3" />
+          <path d="M8.5 9.5 11 15" />
+          <path d="m15.5 9.5-2.5 5.5" />
+          <path d="M9 7h6" />
         </svg>
       );
     case 'Traces':
@@ -58,6 +84,15 @@ const getNavIcon = (tab) => {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z" />
           <path d="m9 12 2 2 4-4" />
+        </svg>
+      );
+    case 'SLOs':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M4 19V5" />
+          <path d="M4 19h16" />
+          <path d="m7 15 3-3 3 2 5-7" />
+          <path d="M18 7h2v2" />
         </svg>
       );
     case 'RAG Quality':
@@ -178,6 +213,25 @@ const getNavIcon = (tab) => {
           <path d="m17 19 3 3" />
         </svg>
       );
+    case 'Risk Register':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 3 4 6v6c0 5 3.4 8 8 9 4.6-1 8-4 8-9V6z" />
+          <path d="M9 12h6" />
+          <path d="M12 9v6" />
+        </svg>
+      );
+    case 'Control Center':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M4 4h16v16H4z" />
+          <path d="M8 8h8" />
+          <path d="M8 12h3" />
+          <path d="M14 12h2" />
+          <path d="M8 16h5" />
+          <path d="m15 16 1 1 2-3" />
+        </svg>
+      );
     case 'Settings':
       return (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -203,7 +257,7 @@ const navGroups = [
   {
     title: 'Operate',
     caption: 'Daily AI operations',
-    items: ['Dashboard', 'Traces', 'Incidents', 'Cost'],
+    items: ['Action Center', 'Dashboard', 'Estate', 'Traces', 'Incidents', 'Cost'],
   },
   {
     title: 'Build & Test',
@@ -213,7 +267,7 @@ const navGroups = [
   {
     title: 'Govern',
     caption: 'Release gates and response controls',
-    items: ['Evidence', 'Autopilot', 'Policies', 'Detection', 'Automations'],
+    items: ['SLOs', 'Risk Register', 'Control Center', 'Evidence', 'Autopilot', 'Policies', 'Detection', 'Automations'],
   },
   {
     title: 'Admin',
@@ -469,6 +523,8 @@ export default function App() {
   // Map active tab to component
   const renderActiveScreen = () => {
     switch (activeTab) {
+      case 'Action Center':
+        return <ActionCenter addToast={addToast} setActiveTab={setActiveTab} />;
       case 'Dashboard':
         return (
           <Overview
@@ -486,6 +542,8 @@ export default function App() {
             formatTime={formatTime}
           />
         );
+      case 'Estate':
+        return <EstateCenter addToast={addToast} setActiveTab={setActiveTab} />;
       case 'Traces':
         return (
           <TraceExplorer
@@ -522,6 +580,12 @@ export default function App() {
         return <ConnectCenter addToast={addToast} refreshDashboard={refreshDashboard} />;
       case 'Gateway':
         return <GatewayCenter addToast={addToast} />;
+      case 'SLOs':
+        return <SloCenter addToast={addToast} />;
+      case 'Risk Register':
+        return <RiskRegister addToast={addToast} />;
+      case 'Control Center':
+        return <ControlCenter addToast={addToast} />;
       case 'Autopilot':
         return <ReleaseAutopilot addToast={addToast} />;
       case 'Evidence':
