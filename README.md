@@ -18,6 +18,17 @@ NeuralOps now includes AI SLOs and Error Budgets. Operators can define productio
 
 NeuralOps now includes an Action Center. It converts readiness, release, SLO, estate, incident, gateway, detection, and setup evidence into one prioritized operator queue with owner, impact, evidence, next step, and destination page.
 
+NeuralOps now uses consolidated enterprise workflows instead of a long flat dashboard list:
+
+- `Home`: Action Center, Dashboard, readiness.
+- `Connect`: SDK setup and the OpenAI-compatible Gateway.
+- `Observe`: Estate Graph, traces, incidents, and cost.
+- `Test & Release`: prompts, evals, RAG, replay lab, agents, and autopilot.
+- `Govern`: policies, SLOs, risk, control evidence, detections, and automations.
+- `Admin`: access and settings.
+
+The frontend has stable deep links such as `/connect`, `/gateway`, `/observe/traces`, `/observe/traces/{trace_id}`, `/govern/evidence`, and `/release/replay-gate`. Screens are route-level lazy chunks so the first app bundle stays smaller while preserving all existing capabilities.
+
 NeuralOps now includes a Risk Register. Teams can create time-boxed risk exceptions with owner, approver, reason, compensating controls, expiry, revoke flow, and audit events. Active critical or expiring exceptions surface in Action Center.
 
 NeuralOps now includes a Control Center. It maps persisted evidence into enterprise controls for observability, release gating, gateway policy, SLOs, estate ownership, accepted risk, access audit, incidents, and provider cost/health, then exports an audit-ready JSON/Markdown packet.

@@ -44,12 +44,14 @@ test('all product tabs render without console errors and Evidence gate runs', as
   await expect(page.getByRole('button', { name: /NeuralOps/i })).toBeVisible();
   await waitForBackend(page);
   await expect(page.getByLabel('NeuralOps operator workflow')).toBeVisible();
-  await expect(page.getByText('Production Readiness Path')).toBeVisible();
-  await expect(page.getByRole('button', { name: /Open Evidence Center/i })).toBeVisible();
+  await expect(page.getByLabel('Workspace launch checklist')).toBeVisible();
+  await expect(page.getByText('Workspace Launch Checklist')).toBeVisible();
+  await expect(page.locator('.main-content-panel h2', { hasText: 'Action Center' })).toBeVisible();
   const sidebar = page.locator('.sidebar-container');
 
   await page.getByRole('button', { name: /Gate Release proof/i }).click();
   await expect(page.locator('.main-content-panel h2', { hasText: 'Evidence' })).toBeVisible();
+  await expect(page).toHaveURL(/\/govern\/evidence$/);
 
   for (const tab of tabs) {
     await sidebar.getByRole('button', { name: tab, exact: true }).click();
@@ -108,6 +110,7 @@ test('all product tabs render without console errors and Evidence gate runs', as
   await expect(page.locator('.dense-table tbody tr').first()).toBeVisible();
   await page.locator('.dense-table tbody tr').first().click();
   await page.getByRole('button', { name: 'Replay Gate' }).click();
+  await expect(page).toHaveURL(/\/observe\/traces\/.+/);
   const replayResponse = page.waitForResponse((response) => response.url().includes('/replay-gate'));
   await page.getByRole('button', { name: 'Run Replay Gate' }).click();
   expect((await replayResponse).ok()).toBe(true);
@@ -281,7 +284,7 @@ test('Control Center maps persisted evidence and exports an audit packet', async
   await page.locator('.segmented-control').getByRole('button', { name: 'Governance', exact: true }).click();
   await expect(page.locator('.control-row').filter({ hasText: 'Accepted risks are time-boxed' })).toBeVisible();
   const exportResponse = page.waitForResponse((response) => response.url().includes('/api/control-center/export'));
-  await page.getByRole('button', { name: 'Export Evidence' }).click();
+  await page.getByRole('button', { name: 'Export Evidence', exact: true }).click();
   const exported = await exportResponse;
   expect(exported.ok()).toBe(true);
   const payload = await exported.json();
@@ -318,7 +321,7 @@ test('Estate page discovers systems from connected trace records', async ({ page
   await expect(page.getByText('System Detail')).toBeVisible();
 
   await page.locator('.estate-node').first().click();
-  await expect(page.getByText(/service.*javascript|trace/i).first()).toBeVisible();
+  await expect(page.locator('.estate-detail-panel').getByText(/service.*javascript|trace/i).first()).toBeVisible();
   await page.locator('.estate-edit-grid input').first().fill('Platform Engineering');
   await page.locator('.estate-edit-grid input').nth(1).fill('checkout, observed');
   const patchResponse = page.waitForResponse((response) => response.url().includes('/api/estate/systems/') && response.request().method() === 'PATCH');
@@ -473,8 +476,9 @@ test('dark mode remains readable and uptime clock is contained', async ({ page }
   await page.addInitScript(() => {
     window.localStorage.setItem('neuralops-theme', 'dark');
   });
-  await page.goto('/');
+  await page.goto('/home/dashboard');
   await expect(page.locator('[data-theme="dark"], html[data-theme="dark"]')).toHaveCount(1);
+  await waitForBackend(page);
 
   const gaugeBox = await page.locator('.circular-gauge-container').boundingBox();
   const textBox = await page.locator('.gauge-text-overlay').boundingBox();

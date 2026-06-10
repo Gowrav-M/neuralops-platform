@@ -1053,6 +1053,48 @@ body {
   font-weight: 700;
 }
 
+.workspace-launch-checklist {
+  margin-bottom: 4px;
+}
+
+.launch-step-card strong {
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.launch-step-card.launch-step-complete {
+  border-left: 4px solid var(--color-success);
+}
+
+.launch-step-card.launch-step-not_configured {
+  border-left: 4px solid var(--color-warning);
+}
+
+.launch-step-card.launch-step-blocked {
+  border-left: 4px solid var(--color-error);
+}
+
+.screen-loading-card {
+  display: grid;
+  gap: 8px;
+  padding: 24px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-sm);
+}
+
+.screen-loading-card strong {
+  color: var(--text-primary);
+  font-size: 18px;
+}
+
+.screen-loading-card p {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
 .slider-metric-group {
   display: flex;
   gap: 20px;

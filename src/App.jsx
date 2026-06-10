@@ -1,34 +1,44 @@
-import { useState, useEffect, useCallback } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useCallback, useState } from 'react';
+import {
+  BrowserRouter,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  useParams,
+} from 'react-router-dom';
 import './index.css';
 import { fetchDashboard, fetchSystemStatus, setApiAuthToken, setApiWorkspaceId, setQaAuthToken } from './lib/api';
 import { AUTH_ENABLED, supabase } from './lib/supabase';
 
 // Import Screens
-import Overview from './components/Overview';
-import ActionCenter from './components/ActionCenter';
-import EstateCenter from './components/EstateCenter';
-import TraceExplorer from './components/TraceExplorer';
-import PromptRegistry from './components/PromptRegistry';
-import EvalCenter from './components/EvalCenter';
-import RAGQuality from './components/RAGQuality';
-import CostDashboard from './components/CostDashboard';
-import PolicyManager from './components/PolicyManager';
-import IncidentTimeline from './components/IncidentTimeline';
-import Agents from './components/Agents';
-import NeuralLabs from './components/NeuralLabs';
-import ConnectCenter from './components/ConnectCenter';
-import GatewayCenter from './components/GatewayCenter';
-import SloCenter from './components/SloCenter';
-import RiskRegister from './components/RiskRegister';
-import ControlCenter from './components/ControlCenter';
-import EvidenceCenter from './components/EvidenceCenter';
-import AutomationCenter from './components/AutomationCenter';
-import AccessCenter from './components/AccessCenter';
-import ReleaseAutopilot from './components/ReleaseAutopilot';
-import DetectionResponse from './components/DetectionResponse';
-import Settings from './components/Settings';
 import AuthGate from './components/AuthGate';
-import ProductionReadiness from './components/ProductionReadiness';
+
+const Overview = lazy(() => import('./components/Overview'));
+const ActionCenter = lazy(() => import('./components/ActionCenter'));
+const EstateCenter = lazy(() => import('./components/EstateCenter'));
+const TraceExplorer = lazy(() => import('./components/TraceExplorer'));
+const PromptRegistry = lazy(() => import('./components/PromptRegistry'));
+const EvalCenter = lazy(() => import('./components/EvalCenter'));
+const RAGQuality = lazy(() => import('./components/RAGQuality'));
+const CostDashboard = lazy(() => import('./components/CostDashboard'));
+const PolicyManager = lazy(() => import('./components/PolicyManager'));
+const IncidentTimeline = lazy(() => import('./components/IncidentTimeline'));
+const Agents = lazy(() => import('./components/Agents'));
+const NeuralLabs = lazy(() => import('./components/NeuralLabs'));
+const ConnectCenter = lazy(() => import('./components/ConnectCenter'));
+const GatewayCenter = lazy(() => import('./components/GatewayCenter'));
+const SloCenter = lazy(() => import('./components/SloCenter'));
+const RiskRegister = lazy(() => import('./components/RiskRegister'));
+const ControlCenter = lazy(() => import('./components/ControlCenter'));
+const EvidenceCenter = lazy(() => import('./components/EvidenceCenter'));
+const AutomationCenter = lazy(() => import('./components/AutomationCenter'));
+const AccessCenter = lazy(() => import('./components/AccessCenter'));
+const ReleaseAutopilot = lazy(() => import('./components/ReleaseAutopilot'));
+const DetectionResponse = lazy(() => import('./components/DetectionResponse'));
+const Settings = lazy(() => import('./components/Settings'));
+const ProductionReadiness = lazy(() => import('./components/ProductionReadiness'));
 
 const getNavIcon = (tab) => {
   switch (tab) {
@@ -255,28 +265,273 @@ const workflowStages = [
 
 const navGroups = [
   {
-    title: 'Operate',
-    caption: 'Daily AI operations',
-    items: ['Action Center', 'Dashboard', 'Estate', 'Traces', 'Incidents', 'Cost'],
+    title: 'Home',
+    caption: 'Command queue and readiness',
+    items: ['Action Center', 'Dashboard', 'Readiness'],
   },
   {
-    title: 'Build & Test',
-    caption: 'Connect apps, prompts, RAG, agents',
-    items: ['Connect', 'Gateway', 'Agents', 'Labs', 'Prompts', 'Evaluations', 'RAG Quality'],
+    title: 'Connect',
+    caption: 'SDK, gateway, providers',
+    items: ['Connect', 'Gateway'],
+  },
+  {
+    title: 'Observe',
+    caption: 'Systems, traces, incidents, cost',
+    items: ['Estate', 'Traces', 'Incidents', 'Cost'],
+  },
+  {
+    title: 'Test & Release',
+    caption: 'Prompts, RAG, agents, replay',
+    items: ['Prompts', 'Evaluations', 'RAG Quality', 'Labs', 'Agents', 'Autopilot'],
   },
   {
     title: 'Govern',
-    caption: 'Release gates and response controls',
-    items: ['SLOs', 'Risk Register', 'Control Center', 'Evidence', 'Autopilot', 'Policies', 'Detection', 'Automations'],
+    caption: 'Policy, SLOs, risk, proof',
+    items: ['Policies', 'SLOs', 'Risk Register', 'Control Center', 'Evidence', 'Detection', 'Automations'],
   },
   {
     title: 'Admin',
-    caption: 'Access, readiness, configuration',
-    items: ['Access', 'Readiness', 'Settings'],
+    caption: 'Access and configuration',
+    items: ['Access', 'Settings'],
   },
 ];
 
+const routeByTab = {
+  'Action Center': '/',
+  Dashboard: '/home/dashboard',
+  Readiness: '/admin/readiness',
+  Connect: '/connect',
+  Gateway: '/gateway',
+  Estate: '/observe/estate',
+  Traces: '/observe/traces',
+  Incidents: '/observe/incidents',
+  Cost: '/observe/cost',
+  Prompts: '/release/prompts',
+  Evaluations: '/release/evaluations',
+  'RAG Quality': '/release/rag-quality',
+  Labs: '/release/replay-gate',
+  Agents: '/release/agents',
+  Autopilot: '/release/autopilot',
+  Policies: '/govern/policies',
+  SLOs: '/govern/slos',
+  'Risk Register': '/govern/risk-register',
+  'Control Center': '/govern/control-center',
+  Evidence: '/govern/evidence',
+  Detection: '/govern/detection',
+  Automations: '/govern/automations',
+  Access: '/admin/access',
+  Settings: '/admin/settings',
+};
+
+const tabByRoute = Object.entries(routeByTab)
+  .sort((a, b) => b[1].length - a[1].length)
+  .map(([tab, path]) => ({ tab, path }));
+
+const navigateTab = (navigate, tab, options = {}) => {
+  const path = routeByTab[tab] || routeByTab.Dashboard;
+  navigate(path, options);
+};
+
+const activeTabFromPath = (pathname) => {
+  const match = tabByRoute.find(({ path }) => pathname === path || (path !== '/' && pathname.startsWith(`${path}/`)));
+  return match?.tab || 'Action Center';
+};
+
 export default function App() {
+  return (
+    <BrowserRouter>
+      <AppShell />
+    </BrowserRouter>
+  );
+}
+
+function AppRoutes(props) {
+  return (
+    <Routes>
+      <Route path="/" element={<ActionCenter addToast={props.addToast} setActiveTab={props.setActiveTab} />} />
+      <Route path="/home/dashboard" element={<DashboardRoute {...props} />} />
+      <Route path="/connect" element={<ConnectCenter addToast={props.addToast} refreshDashboard={props.refreshDashboard} />} />
+      <Route path="/gateway" element={<GatewayCenter addToast={props.addToast} />} />
+      <Route path="/observe/estate" element={<EstateCenter addToast={props.addToast} setActiveTab={props.setActiveTab} />} />
+      <Route path="/observe/traces" element={<TraceRoute {...props} />} />
+      <Route path="/observe/traces/:traceId" element={<TraceRoute {...props} />} />
+      <Route path="/observe/incidents" element={<IncidentTimeline incidents={props.incidents} setIncidents={props.setIncidents} addToast={props.addToast} />} />
+      <Route path="/observe/cost" element={<CostDashboard addToast={props.addToast} />} />
+      <Route path="/release/prompts" element={<PromptRegistry addToast={props.addToast} />} />
+      <Route path="/release/evaluations" element={<EvalCenter addToast={props.addToast} />} />
+      <Route path="/release/rag-quality" element={<RAGQuality addToast={props.addToast} />} />
+      <Route path="/release/replay-gate" element={<NeuralLabs addToast={props.addToast} refreshDashboard={props.refreshDashboard} />} />
+      <Route path="/release/agents" element={<Agents addToast={props.addToast} onTraceCreated={props.handleTraceCreated} />} />
+      <Route path="/release/autopilot" element={<ReleaseAutopilot addToast={props.addToast} />} />
+      <Route path="/govern/policies" element={<PolicyManager addToast={props.addToast} />} />
+      <Route path="/govern/slos" element={<SloCenter addToast={props.addToast} />} />
+      <Route path="/govern/risk-register" element={<RiskRegister addToast={props.addToast} />} />
+      <Route path="/govern/control-center" element={<ControlCenter addToast={props.addToast} />} />
+      <Route path="/govern/evidence" element={<EvidenceCenter addToast={props.addToast} />} />
+      <Route path="/govern/detection" element={<DetectionResponse addToast={props.addToast} refreshDashboard={props.refreshDashboard} />} />
+      <Route path="/govern/automations" element={<AutomationCenter addToast={props.addToast} />} />
+      <Route path="/admin/access" element={<AccessCenter addToast={props.addToast} />} />
+      <Route path="/admin/readiness" element={<ProductionReadiness addToast={props.addToast} />} />
+      <Route path="/admin/settings" element={<Settings addToast={props.addToast} onNavigate={props.handleNavClick} />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  );
+}
+
+function DashboardRoute(props) {
+  return (
+    <Overview
+      stats={props.stats}
+      traces={props.traces}
+      incidents={props.incidents}
+      systemStatus={props.systemStatus}
+      apiStatus={props.apiStatus}
+      setActiveTab={props.setActiveTab}
+      setSelectedTrace={props.setSelectedTrace}
+      setDrawerOpen={props.setDrawerOpen}
+      timerActive={props.timerActive}
+      setTimerActive={props.setTimerActive}
+      timerSeconds={props.timerSeconds}
+      formatTime={props.formatTime}
+    />
+  );
+}
+
+function TraceRoute(props) {
+  const { traceId } = useParams();
+  const {
+    traces,
+    selectedTrace,
+    setSelectedTrace,
+    drawerOpen,
+    setDrawerOpen,
+  } = props;
+
+  useEffect(() => {
+    if (!traceId || traces.length === 0) return;
+    const trace = traces.find((item) => item.id === traceId);
+    if (!trace) return;
+    setSelectedTrace(trace);
+    setDrawerOpen(true);
+  }, [traceId, traces, setSelectedTrace, setDrawerOpen]);
+
+  return (
+    <TraceExplorer
+      traces={traces}
+      selectedTrace={selectedTrace}
+      setSelectedTrace={setSelectedTrace}
+      drawerOpen={drawerOpen}
+      setDrawerOpen={setDrawerOpen}
+      onTraceOpen={(trace) => {
+        if (trace?.id) {
+          props.navigate(`/observe/traces/${trace.id}`);
+        }
+      }}
+    />
+  );
+}
+
+function ScreenLoading({ activeTab }) {
+  return (
+    <div className="screen-loading-card" role="status" aria-live="polite">
+      <span className="badge badge-warning">Loading workflow</span>
+      <strong>{activeTab}</strong>
+      <p>Loading this enterprise surface as a separate route chunk.</p>
+    </div>
+  );
+}
+
+function WorkspaceLaunchChecklist({ systemStatus, traces, apiStatus, session, onNavigate }) {
+  const featureById = useMemo(() => {
+    return new Map((systemStatus?.features || []).map((feature) => [feature.id, feature]));
+  }, [systemStatus]);
+  const hasState = (id, accepted = ['persisted', 'live_provider']) => accepted.includes(featureById.get(id)?.state);
+  const launchSteps = [
+    {
+      label: 'Workspace',
+      tab: 'Access',
+      status: systemStatus?.authRequired ? (session ? 'complete' : 'blocked') : 'complete',
+      evidence: systemStatus?.authRequired ? 'Supabase auth is required for this workspace.' : 'Local development workspace is active.',
+      action: 'Review access',
+    },
+    {
+      label: 'Ingest key',
+      tab: 'Connect',
+      status: hasState('trace_ingest') || hasState('connect_sdk') ? 'complete' : 'not_configured',
+      evidence: featureById.get('trace_ingest')?.evidence || 'No ingest key evidence loaded yet.',
+      action: 'Open Connect',
+    },
+    {
+      label: 'First trace',
+      tab: 'Traces',
+      status: traces.length > 0 ? 'complete' : 'not_configured',
+      evidence: `${traces.length} trace record(s) currently loaded from backend.`,
+      action: 'Open Traces',
+    },
+    {
+      label: 'Provider gateway',
+      tab: 'Gateway',
+      status: hasState('policy_gateway') ? 'complete' : featureById.get('policy_gateway')?.state === 'live_provider' ? 'complete' : 'not_configured',
+      evidence: featureById.get('policy_gateway')?.evidence || 'Gateway readiness has not been verified.',
+      action: 'Open Gateway',
+    },
+    {
+      label: 'Release proof',
+      tab: 'Evidence',
+      status: hasState('release_gates') ? 'complete' : 'not_configured',
+      evidence: featureById.get('release_gates')?.evidence || 'No release gate run has been recorded.',
+      action: 'Open Evidence',
+    },
+    {
+      label: 'Evidence export',
+      tab: 'Control Center',
+      status: hasState('risk_register') || hasState('ai_slos') ? 'complete' : 'not_configured',
+      evidence: 'Control Center exports the cross-workflow evidence matrix.',
+      action: 'Open Controls',
+    },
+  ];
+  const mode = systemStatus?.environment || (apiStatus.state === 'connected' ? 'local' : 'offline');
+  const configured = launchSteps.filter((step) => step.status === 'complete').length;
+
+  return (
+    <section className="operator-launch-board workspace-launch-checklist" aria-label="Workspace launch checklist">
+      <div className="launch-board-copy">
+        <div className="launch-board-status-row">
+          <span className={`badge ${apiStatus.state === 'connected' ? 'badge-success' : 'badge-warning'}`}>
+            Data mode: {mode}
+          </span>
+          <span className="badge badge-success">{configured}/{launchSteps.length} launch steps ready</span>
+          {systemStatus?.storage && <span className="badge badge-warning">Storage: {systemStatus.storage}</span>}
+        </div>
+        <h3>Workspace Launch Checklist</h3>
+        <p>
+          NeuralOps should prove each step from connection to production evidence. These cards are derived from backend feature truth,
+          not static UI claims.
+        </p>
+      </div>
+      <div className="launch-step-grid">
+        {launchSteps.map((step) => (
+          <button
+            className={`launch-step-card launch-step-${step.status}`}
+            key={step.label}
+            onClick={() => onNavigate(step.tab)}
+          >
+            <span className={`badge ${step.status === 'complete' ? 'badge-success' : step.status === 'blocked' ? 'badge-error' : 'badge-warning'}`}>
+              {step.status === 'complete' ? 'Complete' : step.status === 'blocked' ? 'Blocked' : 'Not configured'}
+            </span>
+            <strong>{step.label}</strong>
+            <p>{step.evidence}</p>
+            <span>{step.action}</span>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AppShell() {
+  const navigate = useNavigate();
+  const location = useLocation();
   const [theme, setTheme] = useState(() => {
     return localStorage.getItem('neuralops-theme') || 'light';
   });
@@ -286,7 +541,6 @@ export default function App() {
     localStorage.setItem('neuralops-theme', theme);
   }, [theme]);
 
-  const [activeTab, setActiveTab] = useState('Dashboard');
   const [selectedTrace, setSelectedTrace] = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
@@ -337,6 +591,8 @@ export default function App() {
   const [traces, setTraces] = useState([]);
 
   const signedInEmail = session?.user?.email || 'Authenticated operator';
+  const activeTab = activeTabFromPath(location.pathname);
+  const setActiveTab = useCallback((tab) => navigateTab(navigate, tab), [navigate]);
 
   useEffect(() => {
     if (AUTH_ENABLED && !session) return undefined;
@@ -451,7 +707,7 @@ export default function App() {
   // Local visual anomaly marker for operator drills; it never mutates backend records.
   const [chaosActive, setChaosActive] = useState(false);
 
-  const refreshDashboard = () => {
+  const refreshDashboard = useCallback(() => {
     Promise.all([fetchDashboard(), fetchSystemStatus()])
       .then(([snapshot, status]) => {
         setStats(snapshot.stats);
@@ -463,7 +719,7 @@ export default function App() {
       .catch(() => {
         setApiStatus({ state: 'offline', message: 'Backend offline - no local sample data is being shown' });
       });
-  };
+  }, []);
 
   const handleTraceCreated = useCallback((trace) => {
     if (!trace?.id) return;
@@ -482,11 +738,11 @@ export default function App() {
   };
 
   // Time formatting (02:35 format)
-  const formatTime = (secs) => {
+  const formatTime = useCallback((secs) => {
     const mins = Math.floor(secs / 60);
     const remainingSecs = secs % 60;
     return `${mins.toString().padStart(2, '0')}:${remainingSecs.toString().padStart(2, '0')}`;
-  };
+  }, []);
 
   // Uptime clock ticking logic
   useEffect(() => {
@@ -513,97 +769,52 @@ export default function App() {
   }, []);
 
   // Nav menu item click
-  const handleNavClick = (tab) => {
+  const handleNavClick = useCallback((tab) => {
     setActiveTab(tab);
     setCmdPaletteOpen(false);
-  };
+  }, [setActiveTab]);
 
   const navItems = Array.from(new Set(navGroups.flatMap((group) => group.items)));
 
-  // Map active tab to component
-  const renderActiveScreen = () => {
-    switch (activeTab) {
-      case 'Action Center':
-        return <ActionCenter addToast={addToast} setActiveTab={setActiveTab} />;
-      case 'Dashboard':
-        return (
-          <Overview
-            stats={stats}
-            traces={traces}
-            incidents={incidents}
-            systemStatus={systemStatus}
-            apiStatus={apiStatus}
-            setActiveTab={setActiveTab}
-            setSelectedTrace={setSelectedTrace}
-            setDrawerOpen={setDrawerOpen}
-            timerActive={timerActive}
-            setTimerActive={setTimerActive}
-            timerSeconds={timerSeconds}
-            formatTime={formatTime}
-          />
-        );
-      case 'Estate':
-        return <EstateCenter addToast={addToast} setActiveTab={setActiveTab} />;
-      case 'Traces':
-        return (
-          <TraceExplorer
-            traces={traces}
-            selectedTrace={selectedTrace}
-            setSelectedTrace={setSelectedTrace}
-            drawerOpen={drawerOpen}
-            setDrawerOpen={setDrawerOpen}
-          />
-        );
-      case 'Prompts':
-        return <PromptRegistry addToast={addToast} />;
-      case 'Evaluations':
-        return <EvalCenter addToast={addToast} />;
-      case 'RAG Quality':
-        return <RAGQuality addToast={addToast} />;
-      case 'Cost':
-        return <CostDashboard addToast={addToast} />;
-      case 'Policies':
-        return <PolicyManager addToast={addToast} />;
-      case 'Incidents':
-        return (
-          <IncidentTimeline
-            incidents={incidents}
-            setIncidents={setIncidents}
-            addToast={addToast}
-          />
-        );
-      case 'Agents':
-        return <Agents addToast={addToast} onTraceCreated={handleTraceCreated} />;
-      case 'Labs':
-        return <NeuralLabs addToast={addToast} refreshDashboard={refreshDashboard} />;
-      case 'Connect':
-        return <ConnectCenter addToast={addToast} refreshDashboard={refreshDashboard} />;
-      case 'Gateway':
-        return <GatewayCenter addToast={addToast} />;
-      case 'SLOs':
-        return <SloCenter addToast={addToast} />;
-      case 'Risk Register':
-        return <RiskRegister addToast={addToast} />;
-      case 'Control Center':
-        return <ControlCenter addToast={addToast} />;
-      case 'Autopilot':
-        return <ReleaseAutopilot addToast={addToast} />;
-      case 'Evidence':
-        return <EvidenceCenter addToast={addToast} />;
-      case 'Detection':
-        return <DetectionResponse addToast={addToast} refreshDashboard={refreshDashboard} />;
-      case 'Automations':
-        return <AutomationCenter addToast={addToast} />;
-      case 'Access':
-        return <AccessCenter addToast={addToast} />;
-      case 'Readiness':
-        return <ProductionReadiness addToast={addToast} />;
-      case 'Settings':
-        return <Settings addToast={addToast} onNavigate={handleNavClick} />;
-      default:
-        return <Overview stats={stats} traces={traces} incidents={incidents} />;
-    }
-  };
+  const screenProps = useMemo(() => ({
+    addToast,
+    navigate,
+    setActiveTab,
+    stats,
+    traces,
+    incidents,
+    systemStatus,
+    apiStatus,
+    setSelectedTrace,
+    selectedTrace,
+    drawerOpen,
+    setDrawerOpen,
+    setIncidents,
+    timerActive,
+    setTimerActive,
+    timerSeconds,
+    formatTime,
+    handleTraceCreated,
+    refreshDashboard,
+    handleNavClick,
+  }), [
+    addToast,
+    navigate,
+    setActiveTab,
+    stats,
+    traces,
+    incidents,
+    systemStatus,
+    apiStatus,
+    selectedTrace,
+    drawerOpen,
+    timerActive,
+    timerSeconds,
+    formatTime,
+    handleTraceCreated,
+    refreshDashboard,
+    handleNavClick,
+  ]);
 
   // Command palette search filtering
   const filteredCommands = navItems.filter(cmd =>
@@ -859,7 +1070,17 @@ export default function App() {
           </div>
         </div>
 
-        {renderActiveScreen()}
+        <WorkspaceLaunchChecklist
+          systemStatus={systemStatus}
+          traces={traces}
+          apiStatus={apiStatus}
+          session={session}
+          onNavigate={handleNavClick}
+        />
+
+        <Suspense fallback={<ScreenLoading activeTab={activeTab} />}>
+          <AppRoutes {...screenProps} />
+        </Suspense>
       </div>
 
       {/* Toast notifications portal */}
@@ -947,7 +1168,8 @@ export default function App() {
                       key={trace.id}
                       className="cmd-item"
                       onClick={() => {
-                        handleNavClick('Traces');
+                        navigate(`/observe/traces/${trace.id}`);
+                        setCmdPaletteOpen(false);
                         setSelectedTrace(trace);
                         setDrawerOpen(true);
                         addToast(`Deep link: opened trace drawer for ${trace.id}`, 'success');

@@ -6,7 +6,8 @@ export default function TraceExplorer({
   selectedTrace,
   setSelectedTrace,
   drawerOpen,
-  setDrawerOpen
+  setDrawerOpen,
+  onTraceOpen
 }) {
   const [modelFilter, setModelFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -40,6 +41,7 @@ export default function TraceExplorer({
   });
 
   const handleRowClick = async (trace) => {
+    onTraceOpen?.(trace);
     setSelectedTrace(trace);
     setDrawerOpen(true);
     setDrawerLoading(true);
