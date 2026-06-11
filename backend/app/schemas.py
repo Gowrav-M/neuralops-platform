@@ -1020,6 +1020,55 @@ class AgentRunRequest(BaseModel):
     environment: Literal["prod", "staging", "dev"] = "staging"
 
 
+AgentIdentityStatus = Literal["active", "pending_approval", "disabled"]
+AgentProductionAccessStatus = Literal["pending_review", "approved", "blocked"]
+
+
+class AgentIdentity(BaseModel):
+    id: str
+    agentId: str
+    displayName: str
+    owner: str
+    environment: Literal["prod", "staging", "dev", "all"] = "staging"
+    status: AgentIdentityStatus = "active"
+    riskLevel: Severity
+    permissions: list[str]
+    providerAccess: list[str]
+    requiresApproval: bool = True
+    killSwitchReason: str | None = None
+    createdAt: str
+    updatedAt: str
+    lastApprovedAt: str | None = None
+
+
+class AgentIdentityPatch(BaseModel):
+    owner: str | None = None
+    environment: Literal["prod", "staging", "dev", "all"] | None = None
+    status: AgentIdentityStatus | None = None
+    permissions: list[str] | None = None
+    providerAccess: list[str] | None = None
+    requiresApproval: bool | None = None
+    killSwitchReason: str | None = None
+
+
+class AgentProductionAccessRequest(BaseModel):
+    agentId: str
+    targetEnvironment: Literal["prod", "staging"] = "prod"
+    justification: str = Field(min_length=12)
+
+
+class AgentProductionAccessDecision(BaseModel):
+    id: str
+    agentId: str
+    targetEnvironment: Literal["prod", "staging"]
+    status: AgentProductionAccessStatus
+    decision: Literal["allow", "review", "block"]
+    justification: str
+    evidenceId: str
+    createdAt: str
+    reviewedAt: str | None = None
+
+
 JobStatus = Literal["queued", "running", "succeeded", "blocked", "failed", "cancelled"]
 
 

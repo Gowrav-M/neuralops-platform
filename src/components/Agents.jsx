@@ -1,14 +1,18 @@
 import { useEffect, useState } from 'react';
 import {
   cancelAgentJob,
+  fetchAgentIdentities,
   fetchAgentDefinitions,
   fetchAgentJobs,
   fetchAgentJobSummary,
+  fetchAgentProductionAccessRequests,
   fetchAgentProviders,
   fetchAgentRuns,
   fetchAgents,
+  patchAgentIdentity,
   processAgentJob,
   processNextAgentJob,
+  requestAgentProductionAccess,
   retryAgentJob,
   runAgent,
   submitAgentJob,
@@ -18,6 +22,8 @@ export default function Agents({ addToast, onTraceCreated }) {
   const [agentsList, setAgentsList] = useState([]);
   const [dataSource, setDataSource] = useState('loading');
   const [agentDefinitions, setAgentDefinitions] = useState([]);
+  const [agentIdentities, setAgentIdentities] = useState([]);
+  const [accessRequests, setAccessRequests] = useState([]);
   const [providers, setProviders] = useState([]);
   const [agentRuns, setAgentRuns] = useState([]);
   const [agentJobs, setAgentJobs] = useState([]);
@@ -59,13 +65,15 @@ export default function Agents({ addToast, onTraceCreated }) {
 
     Promise.all([
       fetchAgents(),
+      fetchAgentIdentities(),
+      fetchAgentProductionAccessRequests(),
       fetchAgentDefinitions(),
       fetchAgentProviders(),
       fetchAgentRuns(),
       fetchAgentJobs(),
       fetchAgentJobSummary(),
     ])
-      .then(([agents, definitions, providerItems, runs, jobs, summary]) => {
+      .then(([agents, identities, productionRequests, definitions, providerItems, runs, jobs, summary]) => {
         if (cancelled) return;
         setAgentsList(agents.map((agent) => ({
           id: agent.id,
@@ -76,6 +84,8 @@ export default function Agents({ addToast, onTraceCreated }) {
           sandbox: agent.status === 'blocked' ? 'Unsandboxed' : 'Isolated',
           health: agent.status === 'healthy' ? 'Healthy' : 'Warning'
         })));
+        setAgentIdentities(identities);
+        setAccessRequests(productionRequests.slice(0, 5));
         setAgentDefinitions(definitions);
         setProviders(providerItems);
         setAgentRuns(runs.slice(0, 5));
@@ -108,6 +118,15 @@ export default function Agents({ addToast, onTraceCreated }) {
       .catch(() => {});
   };
 
+  const refreshAgentControl = () => {
+    Promise.all([fetchAgentIdentities(), fetchAgentProductionAccessRequests()])
+      .then(([identities, productionRequests]) => {
+        setAgentIdentities(identities);
+        setAccessRequests(productionRequests.slice(0, 5));
+      })
+      .catch(() => {});
+  };
+
   const handleRunAgent = async () => {
     setRuntimeBusy(true);
     try {
@@ -125,6 +144,35 @@ export default function Agents({ addToast, onTraceCreated }) {
       addToast(`Agent runtime failed: ${error.message}`, 'error');
     } finally {
       setRuntimeBusy(false);
+    }
+  };
+
+  const handleProductionAccess = async (identity) => {
+    try {
+      const result = await requestAgentProductionAccess({
+        agentId: identity.agentId,
+        targetEnvironment: 'prod',
+        justification: `Requesting governed production access for ${identity.displayName} after NeuralOps release evidence and policy checks.`,
+      });
+      setAccessRequests((current) => [result, ...current.filter((item) => item.id !== result.id)].slice(0, 5));
+      addToast(`Production access request ${result.status}: ${result.evidenceId}.`, result.decision === 'block' ? 'error' : 'warning');
+    } catch (error) {
+      addToast(`Production access request failed: ${error.message}`, 'error');
+    }
+  };
+
+  const handleToggleIdentity = async (identity) => {
+    try {
+      const nextStatus = identity.status === 'disabled' ? 'active' : 'disabled';
+      const result = await patchAgentIdentity(identity.agentId, {
+        status: nextStatus,
+        killSwitchReason: nextStatus === 'disabled' ? 'Operator kill switch from Agent Control Plane.' : null,
+      });
+      setAgentIdentities((current) => current.map((item) => (item.agentId === result.agentId ? result : item)));
+      addToast(`${result.displayName} is now ${result.status}.`, result.status === 'disabled' ? 'warning' : 'success');
+      refreshAgentControl();
+    } catch (error) {
+      addToast(`Agent identity update failed: ${error.message}`, 'error');
     }
   };
 
@@ -227,6 +275,68 @@ export default function Agents({ addToast, onTraceCreated }) {
             {dataSource === 'api' ? ' Backend connected.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
           </p>
         </div>
+      </div>
+
+      <div className="table-container" style={{ padding: '22px', display: 'flex', flexDirection: 'column', gap: '16px', marginBottom: '24px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <div>
+            <span style={{ fontSize: '16px', fontWeight: 700 }}>Agent Control Plane</span>
+            <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px', maxWidth: '760px' }}>
+              Managed Agent Identities tie every agent to an owner, permission set, provider boundary, production approval state, and kill switch before runtime execution.
+            </p>
+          </div>
+          <span className="badge badge-info">{agentIdentities.length} managed identities</span>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '12px' }}>
+          {agentIdentities.map((identity) => (
+            <div
+              className={`agent-identity-card connectivity-check ${identity.status === 'disabled' ? 'missing' : identity.status === 'pending_approval' ? 'degraded' : 'ready'}`}
+              key={identity.id}
+            >
+              <div className="connectivity-check-header">
+                <span className={`badge ${identity.status === 'disabled' ? 'badge-error' : identity.status === 'pending_approval' ? 'badge-warning' : 'badge-success'}`}>
+                  {identity.status}
+                </span>
+                <span className="code-font">{identity.environment}</span>
+              </div>
+              <strong>{identity.displayName}</strong>
+              <p>
+                Owner: {identity.owner}. Risk: {identity.riskLevel}. Provider access: {identity.providerAccess.join(', ')}.
+              </p>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                {identity.permissions.slice(0, 5).map((permission) => (
+                  <span className="badge badge-info" style={{ fontSize: '8px' }} key={permission}>{permission}</span>
+                ))}
+              </div>
+              {identity.killSwitchReason && (
+                <span className="code-font" style={{ color: 'var(--color-error)', overflowWrap: 'anywhere' }}>
+                  {identity.killSwitchReason}
+                </span>
+              )}
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '4px' }}>
+                <button className="btn-secondary" style={{ padding: '6px 9px', fontSize: '10px' }} onClick={() => handleProductionAccess(identity)}>
+                  Request Production Access
+                </button>
+                <button className="btn-secondary" style={{ padding: '6px 9px', fontSize: '10px' }} onClick={() => handleToggleIdentity(identity)}>
+                  {identity.status === 'disabled' ? 'Restore Agent' : 'Kill Switch'}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {accessRequests.length > 0 && (
+          <div className="connect-proof">
+            <span className="badge badge-warning">review</span>
+            <strong>Production access request queue</strong>
+            {accessRequests.map((request) => (
+              <span className="code-font" key={request.id}>
+                {request.agentId}{' -> '}{request.targetEnvironment}: {request.status} ({request.evidenceId})
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="agent-runtime-grid">

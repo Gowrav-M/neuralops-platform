@@ -464,6 +464,28 @@ export function fetchAgents() {
   return request('/api/agents');
 }
 
+export function fetchAgentIdentities() {
+  return request('/api/agent-control/identities');
+}
+
+export function patchAgentIdentity(agentId, patch) {
+  return request(`/api/agent-control/identities/${agentId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function requestAgentProductionAccess(payload) {
+  return request('/api/agent-control/production-access', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchAgentProductionAccessRequests() {
+  return request('/api/agent-control/production-access');
+}
+
 export function fetchAgentDefinitions() {
   return request('/api/agent-runtime/definitions');
 }

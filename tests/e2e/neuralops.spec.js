@@ -356,6 +356,23 @@ test('Estate page discovers systems from connected trace records', async ({ page
   expect(overflow).toBe(false);
 });
 
+test('Agents page exposes managed identities and production access workflow', async ({ page }) => {
+  await page.goto('/');
+  await waitForBackend(page);
+  const sidebar = page.locator('.sidebar-container');
+  await sidebar.getByRole('button', { name: 'Agents', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Agent Runtime Studio' })).toBeVisible();
+  await expect(page.getByText('Agent Control Plane')).toBeVisible();
+  await expect(page.getByText('Managed Agent Identities')).toBeVisible();
+  await expect(page.locator('.agent-identity-card', { hasText: 'Support Triage Agent' })).toContainText('active');
+
+  const requestResponse = page.waitForResponse((response) => response.url().includes('/api/agent-control/production-access'));
+  await page.locator('.agent-identity-card', { hasText: 'Support Triage Agent' }).getByRole('button', { name: /Request Production Access/i }).click();
+  const response = await requestResponse;
+  expect(response.ok()).toBe(true);
+  await expect(page.getByText(/support_triage -> prod: pending_review/i)).toBeVisible();
+});
+
 test('Settings workspace members persist through backend RBAC API', async ({ page }, testInfo) => {
   await page.goto('/');
   const sidebar = page.locator('.sidebar-container');

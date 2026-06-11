@@ -62,6 +62,10 @@ from .schemas import (
     AgentJobSubmitRequest,
     AgentJobSubmitResponse,
     AgentRuntime,
+    AgentIdentity,
+    AgentIdentityPatch,
+    AgentProductionAccessDecision,
+    AgentProductionAccessRequest,
     AiSloCheck,
     AiSloDashboard,
     AiSloEvaluation,
@@ -7146,9 +7150,148 @@ def test_policy(request: PolicyTestRequest) -> PolicyTestResult:
     return PolicyTestResult(decision="allow", severity=None, reason="No configured policy matched.", matchedPatterns=[])
 
 
+def default_agent_identity(definition: AgentDefinition) -> AgentIdentity:
+    now = datetime.now().isoformat()
+    risk_level = "Critical" if any(capability in {"external_tool_use", "code_review"} for capability in definition.capabilities) else "Major"
+    permissions = ["trace:ingest", "gateway:invoke", "agent:run"]
+    if "cost_monitoring" in definition.capabilities:
+        permissions.append("cost:read")
+    if "retrieval" in definition.capabilities:
+        permissions.append("rag:read")
+    if "code_review" in definition.capabilities:
+        permissions.append("repo:read")
+    return AgentIdentity(
+        id=f"agent_identity_{definition.id}",
+        agentId=definition.id,
+        displayName=definition.name,
+        owner="AI Platform",
+        environment="staging",
+        status="active",
+        riskLevel=risk_level,
+        permissions=permissions,
+        providerAccess=["local", "gateway"],
+        requiresApproval=True,
+        createdAt=now,
+        updatedAt=now,
+    )
+
+
+def get_agent_identity(agent_id: str) -> AgentIdentity | None:
+    payload = get_scoped_record("agent_identities", f"agent_identity_{agent_id}")
+    if payload is not None:
+        return AgentIdentity.model_validate(payload)
+    definition = next((agent for agent in AGENT_DEFINITIONS if agent.id == agent_id), None)
+    if definition is None:
+        return None
+    identity = default_agent_identity(definition)
+    save_scoped_record("agent_identities", identity.id, identity.model_dump())
+    return identity
+
+
+def agent_control_identities() -> list[AgentIdentity]:
+    identities: list[AgentIdentity] = []
+    for definition in AGENT_DEFINITIONS:
+        identity = get_agent_identity(definition.id)
+        if identity is not None:
+            identities.append(identity)
+    return sorted(identities, key=lambda item: item.displayName)
+
+
+def ensure_agent_runtime_allowed(agent_id: str) -> AgentIdentity:
+    identity = get_agent_identity(agent_id)
+    if identity is None:
+        raise HTTPException(status_code=404, detail=f"Unknown agentId: {agent_id}")
+    if identity.status == "disabled":
+        raise HTTPException(
+            status_code=423,
+            detail=f"Agent {agent_id} is disabled by kill switch: {identity.killSwitchReason or 'no reason recorded'}",
+        )
+    if "agent:run" not in identity.permissions:
+        raise HTTPException(status_code=403, detail=f"Agent {agent_id} does not have agent:run permission")
+    return identity
+
+
+def patch_agent_identity_record(agent_id: str, request: AgentIdentityPatch) -> AgentIdentity:
+    identity = get_agent_identity(agent_id)
+    if identity is None:
+        raise HTTPException(status_code=404, detail="Agent identity not found")
+    payload = identity.model_dump()
+    patch = request.model_dump(exclude_unset=True)
+    for key, value in patch.items():
+        payload[key] = value
+    if payload.get("status") == "disabled" and not payload.get("killSwitchReason"):
+        payload["killSwitchReason"] = "Disabled by operator kill switch."
+    if payload.get("status") != "disabled":
+        payload["killSwitchReason"] = None
+    payload["updatedAt"] = datetime.now().isoformat()
+    saved = save_scoped_record("agent_identities", payload["id"], payload)
+    result = AgentIdentity.model_validate(saved)
+    save_audit_event(
+        "agent.identity.update",
+        current_user_email(),
+        agent_id,
+        "block" if result.status == "disabled" else "allow",
+        f"Agent identity {agent_id} updated to {result.status}.",
+    )
+    return result
+
+
+def create_agent_production_access_request(request: AgentProductionAccessRequest) -> AgentProductionAccessDecision:
+    identity = get_agent_identity(request.agentId)
+    if identity is None:
+        raise HTTPException(status_code=404, detail="Agent identity not found")
+    now = datetime.now().isoformat()
+    decision = "block" if identity.status == "disabled" else "review" if identity.requiresApproval else "allow"
+    status = "blocked" if decision == "block" else "pending_review" if decision == "review" else "approved"
+    evidence_id = f"agent_access_{sha256(f'{current_workspace_id()}:{request.agentId}:{request.targetEnvironment}:{now}'.encode('utf-8')).hexdigest()[:12]}"
+    access = AgentProductionAccessDecision(
+        id=f"agent_access_req_{token_hex(6)}",
+        agentId=request.agentId,
+        targetEnvironment=request.targetEnvironment,
+        status=status,
+        decision=decision,
+        justification=request.justification,
+        evidenceId=evidence_id,
+        createdAt=now,
+        reviewedAt=now if decision != "review" else None,
+    )
+    save_scoped_record("agent_access_requests", access.id, access.model_dump())
+    save_audit_event(
+        "agent.production_access.request",
+        current_user_email(),
+        request.agentId,
+        decision,
+        f"Production access requested for {request.agentId} in {request.targetEnvironment}.",
+    )
+    return access
+
+
 @app.get("/api/agents", response_model=list[AgentRuntime])
 def agents() -> list[AgentRuntime]:
     return [AgentRuntime.model_validate(item) for item in scoped_records("agents")]
+
+
+@app.get("/api/agent-control/identities", response_model=list[AgentIdentity])
+def list_agent_identities() -> list[AgentIdentity]:
+    return agent_control_identities()
+
+
+@app.patch("/api/agent-control/identities/{agent_id}", response_model=AgentIdentity)
+def patch_agent_identity(agent_id: str, request: AgentIdentityPatch) -> AgentIdentity:
+    require_permission("gateway:operate", agent_id)
+    return patch_agent_identity_record(agent_id, request)
+
+
+@app.get("/api/agent-control/production-access", response_model=list[AgentProductionAccessDecision])
+def list_agent_production_access_requests() -> list[AgentProductionAccessDecision]:
+    requests = [AgentProductionAccessDecision.model_validate(item) for item in scoped_records("agent_access_requests")]
+    return sorted(requests, key=lambda item: item.createdAt, reverse=True)
+
+
+@app.post("/api/agent-control/production-access", response_model=AgentProductionAccessDecision)
+def request_agent_production_access(request: AgentProductionAccessRequest) -> AgentProductionAccessDecision:
+    require_permission("release:gate", request.agentId)
+    return create_agent_production_access_request(request)
 
 
 @app.get("/api/agent-runtime/definitions", response_model=list[AgentDefinition])
@@ -7233,6 +7376,7 @@ def agent_run_detail(run_id: str) -> AgentRunRecord:
 @app.post("/api/agent-runtime/run", response_model=AgentRunResponse)
 def execute_agent(request: AgentRunRequest) -> AgentRunResponse:
     require_permission("gateway:operate", "agent_runtime.run")
+    ensure_agent_runtime_allowed(request.agentId)
     try:
         run, trace = run_agent(request)
     except ValueError as exc:
@@ -7377,6 +7521,7 @@ def agent_job_detail(job_id: str) -> AgentJob:
 @app.post("/api/agent-runtime/jobs", response_model=AgentJobSubmitResponse)
 def submit_agent_job(request: AgentJobSubmitRequest) -> AgentJobSubmitResponse:
     require_permission("gateway:operate", "agent_jobs.submit")
+    ensure_agent_runtime_allowed(request.agentId)
     return AgentJobSubmitResponse(job=submit_job(request))
 
 

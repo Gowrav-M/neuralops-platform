@@ -2608,6 +2608,60 @@ def test_agent_runtime_rejects_unknown_agent(client: TestClient) -> None:
     assert response.status_code == 404
 
 
+def test_agent_control_plane_lists_managed_identities_with_permissions(client: TestClient) -> None:
+    response = client.get("/api/agent-control/identities")
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) >= 4
+    support = next(identity for identity in payload if identity["agentId"] == "support_triage")
+    assert support["status"] == "active"
+    assert support["owner"] == "AI Platform"
+    assert "gateway:invoke" in support["permissions"]
+    assert support["requiresApproval"] is True
+    assert support["riskLevel"] in {"Major", "Critical"}
+
+
+def test_agent_control_plane_records_production_access_request(client: TestClient) -> None:
+    response = client.post(
+        "/api/agent-control/production-access",
+        json={
+            "agentId": "support_triage",
+            "targetEnvironment": "prod",
+            "justification": "Route customer support triage through the governed gateway after release evidence passes.",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["agentId"] == "support_triage"
+    assert payload["decision"] == "review"
+    assert payload["status"] == "pending_review"
+    assert payload["evidenceId"].startswith("agent_access_")
+
+    requests = client.get("/api/agent-control/production-access").json()
+    assert any(item["id"] == payload["id"] for item in requests)
+
+
+def test_agent_kill_switch_blocks_runtime_execution_and_records_audit(client: TestClient) -> None:
+    patched = client.patch(
+        "/api/agent-control/identities/support_triage",
+        json={"status": "disabled", "killSwitchReason": "Suspected tool misuse during production review."},
+    )
+    assert patched.status_code == 200
+    identity = patched.json()
+    assert identity["status"] == "disabled"
+    assert identity["killSwitchReason"] == "Suspected tool misuse during production review."
+
+    response = client.post(
+        "/api/agent-runtime/run",
+        json={"agentId": "support_triage", "input": "Classify this support issue.", "providerMode": "local"},
+    )
+    assert response.status_code == 423
+    assert "disabled by kill switch" in response.text
+
+    audit = client.get("/api/audit").json()
+    assert any(event["type"] == "agent.identity.update" and event["subject"] == "support_triage" for event in audit)
+
+
 def test_labs_start_empty(client: TestClient) -> None:
     response = client.get("/api/labs/experiments")
     assert response.status_code == 200
