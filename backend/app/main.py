@@ -182,6 +182,9 @@ from .schemas import (
     RiskExceptionPatch,
     RiskRegisterResponse,
     RiskRegisterSummary,
+    ServiceAccount,
+    ServiceAccountCreateRequest,
+    ServiceAccountCreateResponse,
     SettingsPayload,
     Stats,
     SystemStatus,
@@ -311,6 +314,15 @@ def api_key_has_scope(api_key: dict[str, Any], required_scope: str) -> bool:
     return "admin" in scopes or required_scope in scopes
 
 
+def token_is_expired(expires_at: str | None) -> bool:
+    if not expires_at:
+        return False
+    try:
+        return datetime.fromisoformat(expires_at) < datetime.now()
+    except ValueError:
+        return True
+
+
 def record_api_key_use(payload: dict[str, Any], key_id: str, required_scope: str) -> dict[str, Any]:
     now = datetime.now().isoformat()
     for api_key in payload.get("apiKeys", []):
@@ -321,6 +333,102 @@ def record_api_key_use(payload: dict[str, Any], key_id: str, required_scope: str
             save_record("settings", settings_record_id(), payload)
             return api_key
     raise HTTPException(status_code=401, detail="Invalid NeuralOps API key")
+
+
+def public_service_account_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    keys = payload.get("keys", [])
+    active_keys = [
+        key for key in keys
+        if key.get("status") == "active" and not token_is_expired(key.get("expiresAt"))
+    ]
+    return {
+        "id": payload["id"],
+        "workspaceId": payload.get("workspaceId", current_workspace_id()),
+        "name": payload["name"],
+        "owner": payload["owner"],
+        "environment": payload.get("environment", "staging"),
+        "scopes": payload.get("scopes", ["trace:ingest"]),
+        "status": payload.get("status", "active"),
+        "keyCount": len(keys),
+        "activeKeyCount": len(active_keys) if payload.get("status") == "active" else 0,
+        "lastUsedAt": payload.get("lastUsedAt"),
+        "createdAt": payload["createdAt"],
+        "updatedAt": payload["updatedAt"],
+    }
+
+
+def service_accounts_payload() -> list[dict[str, Any]]:
+    return sorted(scoped_records("service_accounts"), key=lambda item: item.get("createdAt", ""), reverse=True)
+
+
+def service_account_or_404(account_id: str) -> dict[str, Any]:
+    payload = get_scoped_record("service_accounts", account_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Service account not found")
+    return payload
+
+
+def create_service_account_token() -> str:
+    return f"nop_sa_{token_hex(18)}"
+
+
+def append_service_account_key(payload: dict[str, Any], expires_in_days: int) -> tuple[dict[str, Any], str]:
+    now = datetime.now()
+    token = create_service_account_token()
+    payload.setdefault("keys", []).insert(
+        0,
+        {
+            "id": f"sak_{token_hex(5)}",
+            "prefix": token[:10],
+            "tokenHash": hash_token(token),
+            "status": "active",
+            "createdAt": now.isoformat(),
+            "expiresAt": (now + timedelta(days=expires_in_days)).isoformat(),
+            "lastUsedAt": None,
+            "useCount": 0,
+        },
+    )
+    payload["updatedAt"] = now.isoformat()
+    return payload, token
+
+
+def authenticate_service_account(token_hash: str, required_scope: str) -> dict[str, Any] | None:
+    for account in service_accounts_payload():
+        if account.get("status") != "active":
+            continue
+        if not api_key_has_scope(account, required_scope):
+            continue
+        keys = account.get("keys", [])
+        for key in keys:
+            if key.get("status") != "active" or token_is_expired(key.get("expiresAt")):
+                continue
+            stored_hash = key.get("tokenHash")
+            if stored_hash and compare_digest(stored_hash, token_hash):
+                now = datetime.now().isoformat()
+                key["lastUsedAt"] = now
+                key["useCount"] = int(key.get("useCount", 0)) + 1
+                key["lastScope"] = required_scope
+                account["lastUsedAt"] = now
+                account["updatedAt"] = now
+                save_scoped_record("service_accounts", account["id"], account)
+                save_audit_event(
+                    "service_account.use",
+                    account.get("name", account["id"]),
+                    account["id"],
+                    "allow",
+                    f"Service account used with scope {required_scope}.",
+                )
+                return {
+                    "id": account["id"],
+                    "name": account.get("name", account["id"]),
+                    "role": "ServiceAccount",
+                    "environment": account.get("environment", "all"),
+                    "scopes": account.get("scopes", []),
+                    "lastUsedAt": now,
+                    "useCount": key["useCount"],
+                    "lastScope": required_scope,
+                }
+    return None
 
 
 def authenticate_api_key(authorization: str | None, neuralops_key: str | None, required_scope: str = "trace:ingest") -> dict[str, Any]:
@@ -341,6 +449,9 @@ def authenticate_api_key(authorization: str | None, neuralops_key: str | None, r
                 f"API key used with scope {required_scope}.",
             )
             return used_key
+    service_account = authenticate_service_account(token_hash, required_scope)
+    if service_account is not None:
+        return service_account
     raise HTTPException(status_code=401, detail="Invalid NeuralOps API key")
 
 
@@ -7791,6 +7902,87 @@ def delete_workspace_member(member_id: str) -> dict[str, str]:
         f"Removed workspace member {payload['email']}.",
     )
     return {"deleted": member_id}
+
+
+@app.get("/api/service-accounts", response_model=list[ServiceAccount])
+def list_service_accounts() -> list[ServiceAccount]:
+    require_permission("settings:read", "service_accounts")
+    return [ServiceAccount.model_validate(public_service_account_payload(item)) for item in service_accounts_payload()]
+
+
+@app.post("/api/service-accounts", response_model=ServiceAccountCreateResponse)
+def create_service_account(request: ServiceAccountCreateRequest) -> ServiceAccountCreateResponse:
+    require_permission("settings:write", "service_accounts")
+    now = datetime.now().isoformat()
+    account_id = f"sa_{token_hex(6)}"
+    payload = {
+        "id": account_id,
+        "workspaceId": current_workspace_id(),
+        "name": request.name,
+        "owner": request.owner,
+        "environment": request.environment,
+        "scopes": request.scopes,
+        "status": "active",
+        "keys": [],
+        "lastUsedAt": None,
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    payload, token = append_service_account_key(payload, request.expiresInDays)
+    saved = save_scoped_record("service_accounts", account_id, payload)
+    save_audit_event(
+        "service_account.create",
+        current_user_email(),
+        account_id,
+        "allow",
+        f"Created service account {request.name} with {', '.join(request.scopes)} scopes.",
+    )
+    return ServiceAccountCreateResponse(
+        serviceAccount=ServiceAccount.model_validate(public_service_account_payload(saved)),
+        token=token,
+    )
+
+
+@app.post("/api/service-accounts/{account_id}/rotate", response_model=ServiceAccountCreateResponse)
+def rotate_service_account(account_id: str) -> ServiceAccountCreateResponse:
+    require_permission("settings:write", "service_accounts")
+    payload = service_account_or_404(account_id)
+    if payload.get("status") != "active":
+        raise HTTPException(status_code=409, detail="Cannot rotate a revoked service account")
+    payload, token = append_service_account_key(payload, 90)
+    saved = save_scoped_record("service_accounts", account_id, payload)
+    save_audit_event(
+        "service_account.rotate",
+        current_user_email(),
+        account_id,
+        "allow",
+        f"Rotated service account key for {payload.get('name', account_id)}.",
+    )
+    return ServiceAccountCreateResponse(
+        serviceAccount=ServiceAccount.model_validate(public_service_account_payload(saved)),
+        token=token,
+    )
+
+
+@app.post("/api/service-accounts/{account_id}/revoke", response_model=ServiceAccount)
+def revoke_service_account(account_id: str) -> ServiceAccount:
+    require_permission("settings:write", "service_accounts")
+    payload = service_account_or_404(account_id)
+    now = datetime.now().isoformat()
+    payload["status"] = "revoked"
+    payload["updatedAt"] = now
+    for key in payload.get("keys", []):
+        key["status"] = "revoked"
+        key["revokedAt"] = now
+    saved = save_scoped_record("service_accounts", account_id, payload)
+    save_audit_event(
+        "service_account.revoke",
+        current_user_email(),
+        account_id,
+        "block",
+        f"Revoked service account {payload.get('name', account_id)} and all active keys.",
+    )
+    return ServiceAccount.model_validate(public_service_account_payload(saved))
 
 
 @app.get("/api/settings", response_model=SettingsPayload)

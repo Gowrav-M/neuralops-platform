@@ -410,6 +410,7 @@ test('Access page exposes role matrix and records permission checks', async ({ p
   await expect(page.getByText('Role Permission Matrix')).toBeVisible();
   await expect(page.getByText('Permission Simulator')).toBeVisible();
   await expect(page.getByText('Workspace Invites')).toBeVisible();
+  await expect(page.getByText('Service Account Control')).toBeVisible();
 
   await page.locator('.dark-panel-container select').selectOption('settings:write');
   await page.getByRole('textbox', { name: 'Subject' }).fill('settings.api_keys');
@@ -425,6 +426,29 @@ test('Access page exposes role matrix and records permission checks', async ({ p
   expect((await inviteResponse).ok()).toBe(true);
   await expect(page.getByText(/Invite created for/i)).toBeVisible();
   await expect(page.locator('.mono-text', { hasText: /^wsi_/ }).first()).toBeVisible();
+
+  const serviceCard = page.locator('.card-container', { hasText: 'Service Account Control' });
+  const serviceName = `gateway-worker-${Date.now()}`;
+  await serviceCard.getByLabel('Service Name').fill(serviceName);
+  await serviceCard.getByLabel('Owner').fill('Platform Engineering');
+  await serviceCard.getByLabel('Environment').selectOption('prod');
+  await serviceCard.getByLabel('Scope').selectOption('gateway:invoke');
+  const serviceResponse = page.waitForResponse((response) => response.url().includes('/api/service-accounts') && response.request().method() === 'POST');
+  await serviceCard.getByRole('button', { name: 'Create Service Account' }).click();
+  expect((await serviceResponse).ok()).toBe(true);
+  await expect(serviceCard.getByText(serviceName)).toBeVisible();
+  await expect(serviceCard.getByText(/^nop_sa_/)).toBeVisible();
+
+  const serviceRow = serviceCard.locator('tr', { hasText: serviceName });
+  const rotateResponse = page.waitForResponse((response) => response.url().includes('/rotate'));
+  await serviceRow.getByRole('button', { name: 'Rotate' }).click();
+  expect((await rotateResponse).ok()).toBe(true);
+  await expect(serviceRow.getByText('2/2 active')).toBeVisible();
+
+  const revokeResponse = page.waitForResponse((response) => response.url().includes('/revoke'));
+  await serviceRow.getByRole('button', { name: 'Revoke' }).click();
+  expect((await revokeResponse).ok()).toBe(true);
+  await expect(serviceRow.getByText('revoked')).toBeVisible();
 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
   expect(overflow).toBe(false);

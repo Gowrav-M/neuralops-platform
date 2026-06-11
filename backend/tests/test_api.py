@@ -2553,6 +2553,64 @@ def test_provider_connection_test_requires_key_for_bearer_provider(client: TestC
     assert "API key" in payload["message"]
 
 
+def test_service_account_create_rotate_revoke_and_audit(client: TestClient) -> None:
+    created = client.post(
+        "/api/service-accounts",
+        json={
+            "name": "Production Gateway Worker",
+            "owner": "Platform Engineering",
+            "environment": "prod",
+            "scopes": ["gateway:invoke", "trace:ingest"],
+            "expiresInDays": 30,
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    account = payload["serviceAccount"]
+    first_token = payload["token"]
+    assert account["name"] == "Production Gateway Worker"
+    assert account["status"] == "active"
+    assert account["keyCount"] == 1
+    assert account["activeKeyCount"] == 1
+    assert first_token.startswith("nop_sa_")
+    assert "tokenHash" not in account
+
+    listed = client.get("/api/service-accounts")
+    assert listed.status_code == 200
+    assert any(item["id"] == account["id"] for item in listed.json())
+
+    connect = client.post(
+        "/api/connect/verify",
+        headers={"x-neuralops-key": first_token},
+        json={"serviceName": "service-account-worker", "environment": "prod", "sdk": "curl"},
+    )
+    assert connect.status_code == 200
+
+    rotated = client.post(f"/api/service-accounts/{account['id']}/rotate")
+    assert rotated.status_code == 200
+    rotated_payload = rotated.json()
+    second_token = rotated_payload["token"]
+    assert second_token.startswith("nop_sa_")
+    assert rotated_payload["serviceAccount"]["keyCount"] == 2
+    assert rotated_payload["serviceAccount"]["activeKeyCount"] == 2
+
+    revoked = client.post(f"/api/service-accounts/{account['id']}/revoke")
+    assert revoked.status_code == 200
+    assert revoked.json()["status"] == "revoked"
+    assert revoked.json()["activeKeyCount"] == 0
+
+    rejected = client.post(
+        "/api/connect/verify",
+        headers={"x-neuralops-key": second_token},
+        json={"serviceName": "revoked-service-account", "environment": "prod", "sdk": "curl"},
+    )
+    assert rejected.status_code == 401
+
+    audit = client.get("/api/audit").json()
+    event_types = {event["type"] for event in audit}
+    assert {"service_account.create", "service_account.rotate", "service_account.revoke"}.issubset(event_types)
+
+
 def test_live_agent_runtime_uses_configured_provider_connection(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     import app.agent_runtime as agent_runtime
 

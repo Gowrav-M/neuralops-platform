@@ -1273,6 +1273,37 @@ class ApiKeyCreateResponse(BaseModel):
     token: str
 
 
+ServiceAccountStatus = Literal["active", "revoked"]
+
+
+class ServiceAccountCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    owner: str = Field(min_length=1, max_length=120)
+    environment: Literal["prod", "staging", "dev", "all"] = "staging"
+    scopes: list[ApiKeyScope] = Field(default_factory=lambda: ["trace:ingest"], min_length=1)
+    expiresInDays: int = Field(default=90, ge=1, le=365)
+
+
+class ServiceAccount(BaseModel):
+    id: str
+    workspaceId: str
+    name: str
+    owner: str
+    environment: Literal["prod", "staging", "dev", "all"]
+    scopes: list[ApiKeyScope]
+    status: ServiceAccountStatus
+    keyCount: int = Field(ge=0)
+    activeKeyCount: int = Field(ge=0)
+    lastUsedAt: str | None = None
+    createdAt: str
+    updatedAt: str
+
+
+class ServiceAccountCreateResponse(BaseModel):
+    serviceAccount: ServiceAccount
+    token: str
+
+
 class WebhookCreateRequest(BaseModel):
     name: str = Field(min_length=1)
     url: str = Field(min_length=1)

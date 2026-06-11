@@ -304,6 +304,25 @@ export function fetchAccessAudit() {
   return request('/api/access/audit');
 }
 
+export function fetchServiceAccounts() {
+  return request('/api/service-accounts');
+}
+
+export function createServiceAccount(payload) {
+  return request('/api/service-accounts', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function rotateServiceAccount(accountId) {
+  return request(`/api/service-accounts/${accountId}/rotate`, { method: 'POST' });
+}
+
+export function revokeServiceAccount(accountId) {
+  return request(`/api/service-accounts/${accountId}/revoke`, { method: 'POST' });
+}
+
 export function verifyConnectIngest(payload, apiKey) {
   return request('/api/connect/verify', {
     method: 'POST',
