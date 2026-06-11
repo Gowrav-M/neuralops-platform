@@ -3,7 +3,7 @@ description: Run a NeuralOps AI release gate and fail CI when safety, eval, late
 
 inputs:
   mode:
-    description: Gate mode to run: release-gate or production-ready.
+    description: "Gate mode to run: release-gate or production-ready."
     required: false
     default: release-gate
   base-url:
@@ -19,7 +19,7 @@ inputs:
     required: false
     default: ci
   fail-on:
-    description: Decision threshold that fails CI: review or block.
+    description: "Decision threshold that fails CI: review or block."
     required: false
     default: block
   require-auth:
