@@ -5,8 +5,13 @@ import {
   fetchConnectGuide,
   fetchConnectivity,
   fetchOnboarding,
+  fetchOnboardingStatus,
+  fetchReadinessScore,
   fetchSyntheticCanaryLatest,
   routeGatewayChatCompletion,
+  runOnboardingProofDrill,
+  runReadinessCheck,
+  sendOnboardingTestTrace,
   runSyntheticCanary,
   verifyConnectIngest,
 } from '../lib/api';
@@ -26,6 +31,10 @@ const canaryBadgeClass = {
 export default function ConnectCenter({ addToast, refreshDashboard }) {
   const [guide, setGuide] = useState(null);
   const [onboarding, setOnboarding] = useState(null);
+  const [proofStatus, setProofStatus] = useState(null);
+  const [readinessScore, setReadinessScore] = useState(null);
+  const [proofResult, setProofResult] = useState(null);
+  const [readinessRun, setReadinessRun] = useState(null);
   const [activeSnippet, setActiveSnippet] = useState('javascript');
   const [serviceName, setServiceName] = useState('checkout-agent-service');
   const [environment, setEnvironment] = useState('staging');
@@ -40,11 +49,20 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchConnectGuide(), fetchOnboarding(), fetchConnectivity(), fetchSyntheticCanaryLatest()])
-      .then(([guidePayload, onboardingPayload, connectivityPayload, canaryPayload]) => {
+    Promise.all([
+      fetchConnectGuide(),
+      fetchOnboarding(),
+      fetchOnboardingStatus(),
+      fetchReadinessScore(),
+      fetchConnectivity(),
+      fetchSyntheticCanaryLatest(),
+    ])
+      .then(([guidePayload, onboardingPayload, proofPayload, readinessPayload, connectivityPayload, canaryPayload]) => {
         if (cancelled) return;
         setGuide(guidePayload);
         setOnboarding(onboardingPayload);
+        setProofStatus(proofPayload);
+        setReadinessScore(readinessPayload);
         setConnectivity(connectivityPayload);
         setSyntheticCanary(canaryPayload);
         setActiveSnippet(guidePayload.snippets[0]?.id || 'javascript');
@@ -63,8 +81,14 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
   const completedSteps = onboarding?.steps.filter((step) => step.state === 'complete').length || 0;
 
   const refreshOnboarding = async () => {
-    const payload = await fetchOnboarding();
+    const [payload, proofPayload, readinessPayload] = await Promise.all([
+      fetchOnboarding(),
+      fetchOnboardingStatus(),
+      fetchReadinessScore(),
+    ]);
     setOnboarding(payload);
+    setProofStatus(proofPayload);
+    setReadinessScore(readinessPayload);
     return payload;
   };
 
@@ -117,6 +141,49 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
       addToast('Created one-time ingest key. Store it in your server environment.', 'success');
     } catch (error) {
       addToast(`Could not create ingest key: ${error.message}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSendTestTrace = async () => {
+    setBusy(true);
+    try {
+      const result = await sendOnboardingTestTrace();
+      await Promise.all([refreshOnboarding(), refreshConnectivity()]);
+      refreshDashboard?.();
+      addToast(`Onboarding test trace stored: ${result.trace.id}.`, 'success');
+    } catch (error) {
+      addToast(`Could not store onboarding trace: ${error.message}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleProofDrill = async (type) => {
+    setBusy(true);
+    try {
+      const result = await runOnboardingProofDrill(type);
+      setProofResult(result);
+      await Promise.all([refreshOnboarding(), refreshConnectivity()]);
+      refreshDashboard?.();
+      addToast(`Proof drill ${result.decision.toUpperCase()}: ${result.evidenceId}.`, result.decision === 'block' ? 'warning' : 'success');
+    } catch (error) {
+      addToast(`Proof drill failed: ${error.message}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleReadinessRun = async () => {
+    setBusy(true);
+    try {
+      const result = await runReadinessCheck();
+      setReadinessRun(result);
+      await refreshOnboarding();
+      addToast(`Readiness evidence created: ${result.evidenceId}.`, result.decision === 'block' ? 'warning' : 'success');
+    } catch (error) {
+      addToast(`Readiness run failed: ${error.message}`, 'error');
     } finally {
       setBusy(false);
     }
@@ -246,6 +313,65 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
           </button>
           <span className="code-font">workspace: {onboarding?.workspace.id || 'loading'}</span>
         </div>
+      </div>
+
+      <div className="connectivity-panel proof-loop-panel">
+        <div className="connectivity-summary">
+          <div>
+            <span className="card-title">5-Minute Production Proof Loop</span>
+            <p>
+              Create real backend evidence: one persisted trace, one local guardrail block, one readiness report.
+              {proofStatus ? ` ${proofStatus.progress}/100 onboarding proof.` : ' Loading proof-loop truth.'}
+            </p>
+          </div>
+          <div className="connectivity-score">
+            <strong>{readinessScore?.score ?? 0}</strong>
+            <span>{readinessScore?.decision || 'loading'}</span>
+          </div>
+        </div>
+        <div className="connectivity-check-grid">
+          {proofStatus?.steps?.map((step) => (
+            <div className={`connectivity-check ${step.state === 'complete' ? 'ready' : 'missing'}`} key={step.id}>
+              <div className="connectivity-check-header">
+                <span className={`badge ${step.state === 'complete' ? 'badge-success' : 'badge-warning'}`}>{step.state}</span>
+                <span className="code-font">{step.id}</span>
+              </div>
+              <strong>{step.label}</strong>
+              <p>{step.detail}</p>
+            </div>
+          ))}
+        </div>
+        <div className="onboarding-actions">
+          <button className="btn-primary" onClick={handleSendTestTrace} disabled={busy}>
+            Send Test Trace
+          </button>
+          <button className="btn-secondary" onClick={() => handleProofDrill('prompt_injection')} disabled={busy}>
+            Run Prompt-Injection Drill
+          </button>
+          <button className="btn-secondary" onClick={handleReadinessRun} disabled={busy}>
+            Run Readiness Evidence
+          </button>
+        </div>
+        {proofResult && (
+          <div className="connect-proof">
+            <span className={`badge ${proofResult.decision === 'block' ? 'badge-warning' : 'badge-success'}`}>
+              {proofResult.decision.toUpperCase()}
+            </span>
+            <strong>{proofResult.summary}</strong>
+            {proofResult.trace?.id && <span className="code-font">trace: {proofResult.trace.id}</span>}
+            <span className="code-font">evidence: {proofResult.evidenceId}</span>
+          </div>
+        )}
+        {readinessRun && (
+          <div className="connect-proof">
+            <span className={`badge ${readinessRun.decision === 'block' ? 'badge-warning' : 'badge-success'}`}>
+              {readinessRun.decision.toUpperCase()}
+            </span>
+            <strong>Readiness evidence {readinessRun.evidenceId} created.</strong>
+            <span className="code-font">score: {readinessRun.score}/100</span>
+            <span className="code-font">evidence: {readinessRun.evidenceId}</span>
+          </div>
+        )}
       </div>
 
       <div className="connectivity-panel">

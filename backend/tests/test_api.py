@@ -78,6 +78,83 @@ def test_system_status_exposes_truth_contract(client: TestClient) -> None:
     assert payload["readinessScore"] < 100
 
 
+def test_onboarding_status_alias_exposes_proof_loop_truth(client: TestClient) -> None:
+    response = client.get("/api/onboarding/status")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schemaVersion"] == "neuralops.onboarding.status.v1"
+    assert payload["workspaceId"] == "local-workspace"
+    assert payload["states"]["database"]["state"] == "persisted"
+    assert payload["states"]["firstTrace"]["state"] == "not_configured"
+    assert payload["states"]["gateway"]["state"] == "not_configured"
+    assert payload["nextAction"]
+    assert {step["id"] for step in payload["steps"]} >= {
+        "workspace",
+        "database",
+        "ingest_key",
+        "first_trace",
+        "provider",
+        "gateway",
+        "policy_proof",
+        "release_gate",
+        "evidence",
+    }
+
+
+def test_onboarding_send_test_trace_creates_persisted_trace_and_audit(client: TestClient) -> None:
+    created = client.post("/api/onboarding/send-test-trace")
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload["accepted"] is True
+    assert payload["trace"]["source"] == "local"
+    assert payload["trace"]["environment"] == "dev"
+    assert "onboarding_test" in payload["trace"]["riskFlags"]
+    assert payload["auditId"].startswith("aud_")
+
+    status = client.get("/api/onboarding/status").json()
+    assert status["states"]["firstTrace"]["state"] == "persisted"
+    assert status["states"]["firstTrace"]["traceId"] == payload["trace"]["id"]
+
+    traces = client.get("/api/traces").json()
+    assert any(trace["id"] == payload["trace"]["id"] for trace in traces)
+
+
+def test_onboarding_prompt_injection_proof_drill_blocks_and_records_evidence(client: TestClient) -> None:
+    response = client.post("/api/onboarding/run-proof-drill", json={"type": "prompt_injection"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "prompt_injection"
+    assert payload["decision"] == "block"
+    assert payload["trace"]["status"] == "blocked"
+    assert "prompt_injection" in payload["trace"]["riskFlags"]
+    assert payload["evidenceId"].startswith("proof_")
+
+    status = client.get("/api/onboarding/status").json()
+    assert status["states"]["policyProof"]["state"] == "persisted"
+    assert status["states"]["policyProof"]["evidenceId"] == payload["evidenceId"]
+
+
+def test_readiness_score_and_run_are_derived_from_real_records(client: TestClient) -> None:
+    score_before = client.get("/api/readiness/score")
+    assert score_before.status_code == 200
+    before_payload = score_before.json()
+    assert before_payload["schemaVersion"] == "neuralops.readiness.score.v1"
+    assert before_payload["decision"] in {"review", "block"}
+    assert "No first trace has been persisted." in before_payload["blockers"]
+
+    client.post("/api/onboarding/send-test-trace")
+    run = client.post("/api/readiness/run")
+    assert run.status_code == 200
+    run_payload = run.json()
+    assert run_payload["schemaVersion"] == "neuralops.readiness.run.v1"
+    assert run_payload["report"]["workspaceId"] == "local-workspace"
+    assert run_payload["evidenceId"].startswith("ready_")
+
+    latest = client.get("/api/readiness/latest")
+    assert latest.status_code == 200
+    assert latest.json()["id"] == run_payload["evidenceId"]
+
+
 def test_action_center_returns_prioritized_operator_queue(client: TestClient) -> None:
     response = client.get("/api/action-center")
     assert response.status_code == 200

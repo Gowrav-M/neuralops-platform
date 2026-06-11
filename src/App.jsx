@@ -9,7 +9,7 @@ import {
   useParams,
 } from 'react-router-dom';
 import './index.css';
-import { fetchDashboard, fetchSystemStatus, setApiAuthToken, setApiWorkspaceId, setQaAuthToken } from './lib/api';
+import { fetchDashboard, fetchOnboardingStatus, fetchSystemStatus, setApiAuthToken, setApiWorkspaceId, setQaAuthToken } from './lib/api';
 import { AUTH_ENABLED, supabase } from './lib/supabase';
 
 // Import Screens
@@ -441,12 +441,31 @@ function ScreenLoading({ activeTab }) {
   );
 }
 
-function WorkspaceLaunchChecklist({ systemStatus, traces, apiStatus, session, onNavigate }) {
+function WorkspaceLaunchChecklist({ systemStatus, onboardingTruth, traces, apiStatus, session, onNavigate }) {
   const featureById = useMemo(() => {
     return new Map((systemStatus?.features || []).map((feature) => [feature.id, feature]));
   }, [systemStatus]);
   const hasState = (id, accepted = ['persisted', 'live_provider']) => accepted.includes(featureById.get(id)?.state);
-  const launchSteps = [
+  const routeForProofStep = {
+    workspace: 'Access',
+    database: 'Readiness',
+    auth: 'Access',
+    ingest_key: 'Connect',
+    first_trace: 'Traces',
+    provider: 'Settings',
+    gateway: 'Gateway',
+    policy_proof: 'Connect',
+    release_gate: 'Evidence',
+    evidence: 'Evidence',
+  };
+  const proofLoopSteps = (onboardingTruth?.steps || []).map((step) => ({
+    label: step.label,
+    tab: routeForProofStep[step.id] || 'Connect',
+    status: step.state === 'complete' ? 'complete' : 'not_configured',
+    evidence: step.detail,
+    action: step.state === 'complete' ? 'Review evidence' : 'Complete step',
+  }));
+  const fallbackSteps = [
     {
       label: 'Workspace',
       tab: 'Access',
@@ -490,6 +509,7 @@ function WorkspaceLaunchChecklist({ systemStatus, traces, apiStatus, session, on
       action: 'Open Controls',
     },
   ];
+  const launchSteps = proofLoopSteps.length ? proofLoopSteps : fallbackSteps;
   const mode = systemStatus?.environment || (apiStatus.state === 'connected' ? 'local' : 'offline');
   const configured = launchSteps.filter((step) => step.status === 'complete').length;
 
@@ -502,6 +522,7 @@ function WorkspaceLaunchChecklist({ systemStatus, traces, apiStatus, session, on
           </span>
           <span className="badge badge-success">{configured}/{launchSteps.length} launch steps ready</span>
           {systemStatus?.storage && <span className="badge badge-warning">Storage: {systemStatus.storage}</span>}
+          {onboardingTruth?.schemaVersion && <span className="badge badge-success">Proof loop live</span>}
         </div>
         <h3>Workspace Launch Checklist</h3>
         <p>
@@ -548,6 +569,7 @@ function AppShell() {
   const [toasts, setToasts] = useState([]);
   const [apiStatus, setApiStatus] = useState({ state: 'loading', message: 'Connecting to FastAPI backend...' });
   const [systemStatus, setSystemStatus] = useState(null);
+  const [onboardingTruth, setOnboardingTruth] = useState(null);
   const [session, setSession] = useState(null);
 
   useEffect(() => {
@@ -598,13 +620,14 @@ function AppShell() {
     if (AUTH_ENABLED && !session) return undefined;
     let cancelled = false;
 
-    Promise.all([fetchDashboard(), fetchSystemStatus()])
-      .then(([snapshot, status]) => {
+    Promise.all([fetchDashboard(), fetchSystemStatus(), fetchOnboardingStatus().catch(() => null)])
+      .then(([snapshot, status, proofStatus]) => {
         if (cancelled) return;
         setStats(snapshot.stats);
         setTraces(snapshot.traces);
         setIncidents(snapshot.incidents);
         setSystemStatus(status);
+        setOnboardingTruth(proofStatus);
         setApiStatus({ state: 'connected', message: 'Live backend data store connected' });
       })
       .catch(() => {
@@ -690,6 +713,7 @@ function AppShell() {
     setApiWorkspaceId(null);
     setQaAuthToken(null);
     setSystemStatus(null);
+    setOnboardingTruth(null);
     setTraces([]);
     setIncidents([]);
     setStats({
@@ -708,12 +732,13 @@ function AppShell() {
   const [chaosActive, setChaosActive] = useState(false);
 
   const refreshDashboard = useCallback(() => {
-    Promise.all([fetchDashboard(), fetchSystemStatus()])
-      .then(([snapshot, status]) => {
+    Promise.all([fetchDashboard(), fetchSystemStatus(), fetchOnboardingStatus().catch(() => null)])
+      .then(([snapshot, status, proofStatus]) => {
         setStats(snapshot.stats);
         setTraces(snapshot.traces);
         setIncidents(snapshot.incidents);
         setSystemStatus(status);
+        setOnboardingTruth(proofStatus);
         setApiStatus({ state: 'connected', message: 'Live backend data store connected' });
       })
       .catch(() => {
@@ -1070,17 +1095,18 @@ function AppShell() {
           </div>
         </div>
 
+        <Suspense fallback={<ScreenLoading activeTab={activeTab} />}>
+          <AppRoutes {...screenProps} />
+        </Suspense>
+
         <WorkspaceLaunchChecklist
           systemStatus={systemStatus}
+          onboardingTruth={onboardingTruth}
           traces={traces}
           apiStatus={apiStatus}
           session={session}
           onNavigate={handleNavClick}
         />
-
-        <Suspense fallback={<ScreenLoading activeTab={activeTab} />}>
-          <AppRoutes {...screenProps} />
-        </Suspense>
       </div>
 
       {/* Toast notifications portal */}

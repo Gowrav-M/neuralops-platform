@@ -64,7 +64,7 @@ test('all product tabs render without console errors and Evidence gate runs', as
   await expect(page.getByRole('heading', { name: 'Feature Truth Contract' })).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('.dark-panel-title', { hasText: 'Saved Release Gates' })).toBeVisible();
   await page.getByRole('button', { name: /Run Current Config/i }).click();
-  await expect(page.getByText(/Release gate completed|Deployment Blockers/i)).toBeVisible();
+  await expect(page.locator('.dark-panel-title', { hasText: 'Deployment Blockers' })).toBeVisible();
   const datasetReplayResponse = page.waitForResponse((response) => response.url().includes('/api/replay-gate/dataset/run'));
   await page.getByRole('button', { name: /Run Dataset Replay/i }).click();
   expect((await datasetReplayResponse).ok()).toBe(true);
@@ -162,8 +162,24 @@ test('Connect page creates a key and stores a verification trace', async ({ page
   await expect(page.getByRole('heading', { name: 'Connect Your AI App' })).toBeVisible();
   await expect(page.getByText('Production Connect Checklist')).toBeVisible();
   await expect(page.getByText('Connectivity Command Center')).toBeVisible();
+  await expect(page.getByText('5-Minute Production Proof Loop')).toBeVisible();
   await expect(page.locator('.connectivity-check', { hasText: 'Database storage' })).toContainText('ready');
   await expect(page.locator('.onboarding-score')).toContainText('%');
+
+  const onboardingTraceResponse = page.waitForResponse((response) => response.url().includes('/api/onboarding/send-test-trace'));
+  await page.getByRole('button', { name: 'Send Test Trace' }).click();
+  expect((await onboardingTraceResponse).ok()).toBe(true);
+  await expect(page.getByText(/Onboarding test trace stored/i)).toBeVisible();
+
+  const proofDrillResponse = page.waitForResponse((response) => response.url().includes('/api/onboarding/run-proof-drill'));
+  await page.getByRole('button', { name: 'Run Prompt-Injection Drill' }).click();
+  expect((await proofDrillResponse).ok()).toBe(true);
+  await expect(page.getByText(/Prompt injection attempted credential exfiltration/i)).toBeVisible();
+
+  const readinessRunResponse = page.waitForResponse((response) => response.url().includes('/api/readiness/run'));
+  await page.getByRole('button', { name: 'Run Readiness Evidence' }).click();
+  expect((await readinessRunResponse).ok()).toBe(true);
+  await expect(page.locator('.connect-proof').filter({ hasText: /ready_/ })).toBeVisible();
 
   await page.getByPlaceholder('service name').fill('playwright-service');
   await page.getByRole('button', { name: 'Create Ingest Key' }).click();

@@ -239,8 +239,31 @@ export function fetchOnboarding() {
   return request('/api/onboarding');
 }
 
+export function fetchOnboardingStatus() {
+  return request('/api/onboarding/status');
+}
+
+export function sendOnboardingTestTrace() {
+  return request('/api/onboarding/send-test-trace', { method: 'POST' });
+}
+
+export function runOnboardingProofDrill(type) {
+  return request('/api/onboarding/run-proof-drill', {
+    method: 'POST',
+    body: JSON.stringify({ type }),
+  });
+}
+
 export function fetchProductionReadiness() {
   return request('/api/production/readiness');
+}
+
+export function fetchReadinessScore() {
+  return request('/api/readiness/score');
+}
+
+export function runReadinessCheck() {
+  return request('/api/readiness/run', { method: 'POST' });
 }
 
 export function fetchConnectivity() {
