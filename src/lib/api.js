@@ -270,6 +270,10 @@ export function fetchConnectivity() {
   return request('/api/connectivity');
 }
 
+export function fetchConnectivityContract() {
+  return request('/api/connectivity/contract');
+}
+
 export function fetchSyntheticCanaryLatest() {
   return request('/api/synthetic/latest');
 }

@@ -950,12 +950,40 @@ class ConnectivityAction(BaseModel):
     priority: Literal["high", "medium", "low"]
 
 
+ConnectivityRequirementSeverity = Literal["required", "recommended"]
+ConnectivityContractDecision = Literal["allow", "review", "block"]
+
+
+class ConnectivityRequirement(BaseModel):
+    id: str
+    label: str
+    category: ConnectivityCategory
+    status: ConnectivityStatus
+    severity: ConnectivityRequirementSeverity
+    evidence: str
+    endpoint: str | None = None
+    lastSeenAt: str | None = None
+    action: str
+
+
 class ConnectivityMap(BaseModel):
     workspaceId: str
     storage: Literal["sqlite", "postgres"]
     overallStatus: ConnectivityStatus
     score: int = Field(ge=0, le=100)
     checks: list[ConnectivityCheck]
+    nextActions: list[ConnectivityAction]
+    generatedAt: str
+
+
+class ConnectivityContract(BaseModel):
+    schemaVersion: Literal["neuralops.connectivity.contract.v1"] = "neuralops.connectivity.contract.v1"
+    workspaceId: str
+    decision: ConnectivityContractDecision
+    score: int = Field(ge=0, le=100)
+    required: list[ConnectivityRequirement]
+    recommended: list[ConnectivityRequirement]
+    blockers: list[str]
     nextActions: list[ConnectivityAction]
     generatedAt: str
 

@@ -4,6 +4,7 @@ import {
   createApiKey,
   fetchConnectGuide,
   fetchConnectivity,
+  fetchConnectivityContract,
   fetchOnboarding,
   fetchOnboardingStatus,
   fetchReadinessScore,
@@ -42,6 +43,7 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
   const [verification, setVerification] = useState(null);
   const [gatewayResult, setGatewayResult] = useState(null);
   const [connectivity, setConnectivity] = useState(null);
+  const [connectivityContract, setConnectivityContract] = useState(null);
   const [syntheticCanary, setSyntheticCanary] = useState(null);
   const [busy, setBusy] = useState(false);
   const [canaryBusy, setCanaryBusy] = useState(false);
@@ -55,15 +57,17 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
       fetchOnboardingStatus(),
       fetchReadinessScore(),
       fetchConnectivity(),
+      fetchConnectivityContract(),
       fetchSyntheticCanaryLatest(),
     ])
-      .then(([guidePayload, onboardingPayload, proofPayload, readinessPayload, connectivityPayload, canaryPayload]) => {
+      .then(([guidePayload, onboardingPayload, proofPayload, readinessPayload, connectivityPayload, contractPayload, canaryPayload]) => {
         if (cancelled) return;
         setGuide(guidePayload);
         setOnboarding(onboardingPayload);
         setProofStatus(proofPayload);
         setReadinessScore(readinessPayload);
         setConnectivity(connectivityPayload);
+        setConnectivityContract(contractPayload);
         setSyntheticCanary(canaryPayload);
         setActiveSnippet(guidePayload.snippets[0]?.id || 'javascript');
         setDataSource('api');
@@ -93,8 +97,12 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
   };
 
   const refreshConnectivity = async () => {
-    const payload = await fetchConnectivity();
+    const [payload, contractPayload] = await Promise.all([
+      fetchConnectivity(),
+      fetchConnectivityContract(),
+    ]);
     setConnectivity(payload);
+    setConnectivityContract(contractPayload);
     return payload;
   };
 
@@ -372,6 +380,53 @@ export default function ConnectCenter({ addToast, refreshDashboard }) {
             <span className="code-font">evidence: {readinessRun.evidenceId}</span>
           </div>
         )}
+      </div>
+
+      <div className="connectivity-panel">
+        <div className="connectivity-summary">
+          <div>
+            <span className="card-title">Enterprise Connectivity Contract</span>
+            <p>
+              Required for production: auth, ingest key, trace evidence, live provider, and gateway policy must be ready before public rollout.
+              {connectivityContract ? ` Current decision: ${connectivityContract.decision}.` : ' Loading production contract.'}
+            </p>
+          </div>
+          <div className="connectivity-score">
+            <strong>{connectivityContract?.score ?? 0}</strong>
+            <span>{connectivityContract?.decision || 'loading'}</span>
+          </div>
+        </div>
+        {connectivityContract?.blockers?.length > 0 && (
+          <div className="connect-proof gateway-not-configured">
+            <span className="badge badge-error">blocked</span>
+            <strong>{connectivityContract.blockers.length} production blocker(s)</strong>
+            {connectivityContract.blockers.slice(0, 3).map((blocker) => (
+              <span className="code-font" key={blocker}>{blocker}</span>
+            ))}
+          </div>
+        )}
+        <div className="connectivity-check-grid">
+          {connectivityContract?.required?.map((item) => (
+            <div className={`connectivity-check ${item.status}`} key={item.id}>
+              <div className="connectivity-check-header">
+                <span className={`badge ${connectivityBadgeClass[item.status] || 'badge-warning'}`}>{item.status}</span>
+                <span className="code-font">required</span>
+              </div>
+              <strong>{item.label}</strong>
+              <p>{item.evidence}</p>
+              <span className="code-font">{item.action}</span>
+            </div>
+          ))}
+        </div>
+        <div className="connectivity-actions">
+          {connectivityContract?.recommended?.map((item) => (
+            <div key={item.id}>
+              <span className={`badge ${connectivityBadgeClass[item.status] || 'badge-warning'}`}>{item.status}</span>
+              <strong>{item.label}</strong>
+              <p>{item.action}</p>
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="connectivity-panel">

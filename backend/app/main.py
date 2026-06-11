@@ -118,7 +118,9 @@ from .schemas import (
     ConnectVerifyResponse,
     ConnectivityAction,
     ConnectivityCheck,
+    ConnectivityContract,
     ConnectivityMap,
+    ConnectivityRequirement,
     ControlCenterExport,
     ControlCenterReport,
     ControlCenterSummary,
@@ -5364,6 +5366,69 @@ def build_connectivity_map() -> ConnectivityMap:
     )
 
 
+def connectivity_requirement(check: ConnectivityCheck, severity: str) -> ConnectivityRequirement:
+    return ConnectivityRequirement(
+        id=check.id,
+        label=check.label,
+        category=check.category,
+        status=check.status,
+        severity=severity,
+        evidence=check.evidence,
+        endpoint=check.endpoint,
+        lastSeenAt=check.lastSeenAt,
+        action=check.action,
+    )
+
+
+def build_connectivity_contract() -> ConnectivityContract:
+    connectivity = build_connectivity_map()
+    checks_by_id = {check.id: check for check in connectivity.checks}
+    required_ids = ["database", "auth", "ingest_key", "trace_ingest", "provider_gateway", "gateway_policy"]
+    recommended_ids = ["otel_ingest", "webhook_delivery", "automation_worker"]
+    required = [
+        connectivity_requirement(checks_by_id[check_id], "required")
+        for check_id in required_ids
+        if check_id in checks_by_id
+    ]
+    recommended = [
+        connectivity_requirement(checks_by_id[check_id], "recommended")
+        for check_id in recommended_ids
+        if check_id in checks_by_id
+    ]
+    blockers = [
+        f"{item.label} is {item.status}: {item.action}"
+        for item in required
+        if item.status != "ready"
+    ]
+    required_score = (
+        round(sum(connectivity_status_score(item.status) for item in required) / len(required))
+        if required
+        else 0
+    )
+    recommended_score = (
+        round(sum(connectivity_status_score(item.status) for item in recommended) / len(recommended))
+        if recommended
+        else 100
+    )
+    score = round((required_score * 0.75) + (recommended_score * 0.25))
+    if blockers:
+        decision = "block"
+    elif any(item.status != "ready" for item in recommended):
+        decision = "review"
+    else:
+        decision = "allow"
+    return ConnectivityContract(
+        workspaceId=connectivity.workspaceId,
+        decision=decision,
+        score=score,
+        required=required,
+        recommended=recommended,
+        blockers=blockers,
+        nextActions=connectivity.nextActions,
+        generatedAt=datetime.now().isoformat(),
+    )
+
+
 def synthetic_check(
     check_id: str,
     label: str,
@@ -5664,6 +5729,11 @@ def revoke_risk_exception(exception_id: str) -> RiskException:
 @app.get("/api/connectivity", response_model=ConnectivityMap)
 def connectivity_map() -> ConnectivityMap:
     return build_connectivity_map()
+
+
+@app.get("/api/connectivity/contract", response_model=ConnectivityContract)
+def connectivity_contract() -> ConnectivityContract:
+    return build_connectivity_contract()
 
 
 @app.post("/api/synthetic/run", response_model=SyntheticCanaryRun)

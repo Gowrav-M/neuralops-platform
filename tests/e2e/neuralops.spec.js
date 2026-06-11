@@ -162,8 +162,10 @@ test('Connect page creates a key and stores a verification trace', async ({ page
   await expect(page.getByRole('heading', { name: 'Connect Your AI App' })).toBeVisible();
   await expect(page.getByText('Production Connect Checklist')).toBeVisible();
   await expect(page.getByText('Connectivity Command Center')).toBeVisible();
+  await expect(page.getByText('Enterprise Connectivity Contract')).toBeVisible();
+  await expect(page.getByText(/required for production/i)).toBeVisible();
   await expect(page.getByText('5-Minute Production Proof Loop')).toBeVisible();
-  await expect(page.locator('.connectivity-check', { hasText: 'Database storage' })).toContainText('ready');
+  await expect(page.locator('.connectivity-check', { hasText: 'Database storage' }).first()).toContainText('ready');
   await expect(page.locator('.onboarding-score')).toContainText('%');
 
   const onboardingTraceResponse = page.waitForResponse((response) => response.url().includes('/api/onboarding/send-test-trace'));
@@ -185,7 +187,7 @@ test('Connect page creates a key and stores a verification trace', async ({ page
   await page.getByRole('button', { name: 'Create Ingest Key' }).click();
   await expect(page.getByPlaceholder(/Paste NEURALOPS_API_KEY/i)).toHaveValue(/nop_sk_/);
   await expect(page.locator('.onboarding-step', { hasText: 'Ingest key created' })).toContainText('complete');
-  await expect(page.locator('.connectivity-check', { hasText: 'Scoped NeuralOps API key' })).toContainText('ready');
+  await expect(page.locator('.connectivity-check', { hasText: 'Scoped NeuralOps API key' }).first()).toContainText('ready');
 
   const canaryResponse = page.waitForResponse((response) => response.url().includes('/api/synthetic/run'));
   await page.getByRole('button', { name: 'Run Synthetic Canary' }).click();

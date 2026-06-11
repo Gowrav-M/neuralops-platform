@@ -101,6 +101,55 @@ def test_onboarding_status_alias_exposes_proof_loop_truth(client: TestClient) ->
     }
 
 
+def test_connectivity_contract_blocks_public_production_until_required_integrations_are_ready(client: TestClient) -> None:
+    response = client.get("/api/connectivity/contract")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schemaVersion"] == "neuralops.connectivity.contract.v1"
+    assert payload["workspaceId"] == "local-workspace"
+    assert payload["decision"] == "block"
+    assert payload["score"] < 100
+
+    required = {item["id"]: item for item in payload["required"]}
+    assert required["database"]["status"] == "ready"
+    assert required["auth"]["status"] == "missing"
+    assert required["provider_gateway"]["status"] == "missing"
+    assert required["gateway_policy"]["status"] == "missing"
+    assert required["trace_ingest"]["status"] == "missing"
+    assert any("Workspace authentication" in blocker for blocker in payload["blockers"])
+    assert any(action["priority"] == "high" for action in payload["nextActions"])
+
+
+def test_connectivity_contract_updates_from_real_key_and_trace_evidence(client: TestClient) -> None:
+    token = client.post(
+        "/api/settings/api-keys",
+        json={"name": "contract key", "role": "Developer", "environment": "all", "scopes": ["trace:ingest", "gateway:invoke"]},
+    ).json()["token"]
+    client.post(
+        "/api/traces/ingest",
+        headers={"x-neuralops-key": token},
+        json={
+            "session": "contract-proof",
+            "environment": "dev",
+            "model": "contract-model",
+            "tokens": 90,
+            "latencyMs": 120,
+            "status": "success",
+            "score": 0.97,
+            "prompt": "Connectivity contract trace",
+            "output": "Trace evidence persisted.",
+        },
+    )
+
+    payload = client.get("/api/connectivity/contract").json()
+    required = {item["id"]: item for item in payload["required"]}
+    assert required["ingest_key"]["status"] == "ready"
+    assert required["trace_ingest"]["status"] == "ready"
+    assert required["gateway_policy"]["status"] == "degraded"
+    assert payload["decision"] == "block"
+    assert all("Scoped NeuralOps API key" not in blocker for blocker in payload["blockers"])
+
+
 def test_onboarding_send_test_trace_creates_persisted_trace_and_audit(client: TestClient) -> None:
     created = client.post("/api/onboarding/send-test-trace")
     assert created.status_code == 200
