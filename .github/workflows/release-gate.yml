@@ -44,6 +44,52 @@ jobs:
           done
           exit 1
 
+      - name: Seed CI release evidence
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import urllib.request
+
+          base_url = "http://127.0.0.1:8000"
+
+          def request(path, payload, token=None):
+              data = json.dumps(payload).encode("utf-8")
+              headers = {"Content-Type": "application/json"}
+              if token:
+                  headers["x-neuralops-key"] = token
+              req = urllib.request.Request(f"{base_url}{path}", data=data, headers=headers, method="POST")
+              with urllib.request.urlopen(req, timeout=10) as response:
+                  return json.loads(response.read().decode("utf-8"))
+
+          key = request(
+              "/api/settings/api-keys",
+              {
+                  "name": "ci release gate ingest",
+                  "role": "Developer",
+                  "environment": "all",
+                  "scopes": ["trace:ingest"],
+              },
+          )["token"]
+
+          for index in range(3):
+              request(
+                  "/api/traces/ingest",
+                  {
+                      "session": f"ci-proof-{index}",
+                      "environment": "dev",
+                      "model": "ci-release-proof",
+                      "tokens": 120,
+                      "latencyMs": 180,
+                      "status": "success",
+                      "score": 0.98,
+                      "prompt": "CI release evidence trace",
+                      "output": "Release evidence path passed deterministic policy checks.",
+                  },
+                  token=key,
+              )
+          PY
+
       - name: Run local release gate
         uses: ./
         with:
@@ -51,4 +97,3 @@ jobs:
           target: ci
           require-auth: "false"
           fail-on: block
-
