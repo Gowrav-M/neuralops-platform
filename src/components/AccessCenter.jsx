@@ -6,9 +6,12 @@ import {
   createWorkspaceInvite,
   fetchAccessAudit,
   fetchAccessPolicy,
+  fetchAccessPosture,
+  fetchSettings,
   fetchServiceAccounts,
   fetchWorkspaceInvites,
   fetchWorkspaceMembers,
+  revokeApiKey,
   revokeServiceAccount,
   rotateServiceAccount,
   setApiWorkspaceId,
@@ -40,6 +43,8 @@ export default function AccessCenter({ addToast }) {
   const [members, setMembers] = useState([]);
   const [invites, setInvites] = useState([]);
   const [serviceAccounts, setServiceAccounts] = useState([]);
+  const [apiKeys, setApiKeys] = useState([]);
+  const [posture, setPosture] = useState(null);
   const [audit, setAudit] = useState([]);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState('Developer');
@@ -67,17 +72,21 @@ export default function AccessCenter({ addToast }) {
   const load = async () => {
     setError('');
     try {
-      const [nextPolicy, nextMembers, nextInvites, nextServiceAccounts, nextAudit] = await Promise.all([
+      const [nextPolicy, nextMembers, nextInvites, nextServiceAccounts, nextPosture, nextSettings, nextAudit] = await Promise.all([
         fetchAccessPolicy(),
         fetchWorkspaceMembers(),
         fetchWorkspaceInvites(),
         fetchServiceAccounts(),
+        fetchAccessPosture(),
+        fetchSettings(),
         fetchAccessAudit(),
       ]);
       setPolicy(nextPolicy);
       setMembers(nextMembers);
       setInvites(nextInvites);
       setServiceAccounts(nextServiceAccounts);
+      setPosture(nextPosture);
+      setApiKeys(nextSettings.apiKeys || []);
       setAudit(nextAudit);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Access control data unavailable');
@@ -86,13 +95,15 @@ export default function AccessCenter({ addToast }) {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchAccessPolicy(), fetchWorkspaceMembers(), fetchWorkspaceInvites(), fetchServiceAccounts(), fetchAccessAudit()])
-      .then(([nextPolicy, nextMembers, nextInvites, nextServiceAccounts, nextAudit]) => {
+    Promise.all([fetchAccessPolicy(), fetchWorkspaceMembers(), fetchWorkspaceInvites(), fetchServiceAccounts(), fetchAccessPosture(), fetchSettings(), fetchAccessAudit()])
+      .then(([nextPolicy, nextMembers, nextInvites, nextServiceAccounts, nextPosture, nextSettings, nextAudit]) => {
         if (cancelled) return;
         setPolicy(nextPolicy);
         setMembers(nextMembers);
         setInvites(nextInvites);
         setServiceAccounts(nextServiceAccounts);
+        setPosture(nextPosture);
+        setApiKeys(nextSettings.apiKeys || []);
         setAudit(nextAudit);
       })
       .catch((err) => {
@@ -224,6 +235,22 @@ export default function AccessCenter({ addToast }) {
     }
   };
 
+  const revokeDeveloperKey = async (keyId) => {
+    setBusy(true);
+    setError('');
+    try {
+      const settings = await revokeApiKey(keyId);
+      setApiKeys(settings.apiKeys || []);
+      addToast('API key revoked. Existing copied tokens will no longer authenticate.', 'warning');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'API key revocation failed');
+      addToast('API key revocation failed.', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="main-panel">
       <div className="page-header">
@@ -326,6 +353,104 @@ export default function AccessCenter({ addToast }) {
             </label>
             <button className="btn-secondary" type="submit" disabled={busy}>Accept Invite + Switch Workspace</button>
           </form>
+        </div>
+      </div>
+
+      <div className="content-grid two-col">
+        <div className="card-container">
+          <div className="section-header">
+            <div>
+              <h3>Access Posture Review</h3>
+              <p>Continuous review for broad keys, unused credentials, revoked records, and missing machine identities.</p>
+            </div>
+            <span className={`badge ${posture?.decision === 'allow' ? 'badge-success' : posture?.decision === 'block' ? 'badge-error' : 'badge-warning'}`}>
+              {posture?.decision || 'loading'}
+            </span>
+          </div>
+          <div className="summary-grid compact">
+            <div className="stat-card">
+              <span className="stat-label">Score</span>
+              <strong className="stat-value">{posture?.score ?? '--'}</strong>
+              <span className="stat-trend positive">access posture</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">Admin Keys</span>
+              <strong className="stat-value">{posture?.summary?.adminApiKeys ?? 0}</strong>
+              <span className="stat-trend negative">broad scopes</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">Revoked Keys</span>
+              <strong className="stat-value">{posture?.summary?.revokedApiKeys ?? 0}</strong>
+              <span className="stat-trend positive">blocked tokens</span>
+            </div>
+          </div>
+          <div className="event-list" style={{ marginTop: '14px' }}>
+            {(posture?.findings || []).slice(0, 5).map((finding) => (
+              <div className="event-row" key={finding.id}>
+                <span className={`badge ${finding.severity === 'high' || finding.severity === 'critical' ? 'badge-error' : finding.severity === 'medium' ? 'badge-warning' : 'badge-info'}`}>
+                  {finding.severity}
+                </span>
+                <div>
+                  <strong>{finding.subject}</strong>
+                  <p>{finding.summary} {finding.recommendation}</p>
+                </div>
+              </div>
+            ))}
+            {(!posture || posture.findings.length === 0) && (
+              <div className="state-container compact">
+                <strong>No posture findings</strong>
+                <span>Credential and access controls are currently clean for this workspace.</span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="card-container">
+          <div className="section-header">
+            <div>
+              <h3>Developer API Key Lifecycle</h3>
+              <p>Revoke copied or temporary keys. Prefer service accounts for CI, SDK, and gateway automation.</p>
+            </div>
+          </div>
+          <div className="table-wrap">
+            <table className="dense-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Env</th>
+                  <th>Scopes</th>
+                  <th>Status</th>
+                  <th>Uses</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {apiKeys.map((key) => (
+                  <tr key={key.id}>
+                    <td><strong>{key.name}</strong></td>
+                    <td><span className="badge badge-info">{key.environment || 'all'}</span></td>
+                    <td>
+                      <div className="chip-row">
+                        {(key.scopes || []).map((scope) => <span className="mini-chip" key={scope}>{scope}</span>)}
+                      </div>
+                    </td>
+                    <td><span className={`badge ${key.status === 'revoked' ? 'badge-error' : 'badge-success'}`}>{key.status || 'active'}</span></td>
+                    <td>{key.useCount || 0}</td>
+                    <td>
+                      <button className="btn-secondary" type="button" disabled={busy || key.status === 'revoked'} onClick={() => revokeDeveloperKey(key.id)}>
+                        Revoke
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {apiKeys.length === 0 && (
+                  <tr>
+                    <td colSpan="6">No developer API keys exist yet.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 

@@ -1638,6 +1638,24 @@ class AccessCheckResult(BaseModel):
     reason: str
 
 
+class AccessPostureFinding(BaseModel):
+    id: str
+    severity: Literal["critical", "high", "medium", "low"]
+    subject: str
+    summary: str
+    recommendation: str
+
+
+class AccessPostureReport(BaseModel):
+    schemaVersion: str = "neuralops.access.posture.v1"
+    workspaceId: str
+    decision: Literal["allow", "review", "block"]
+    score: int = Field(ge=0, le=100)
+    summary: dict[str, int]
+    findings: list[AccessPostureFinding]
+    generatedAt: str
+
+
 class ProductionReadinessCheck(BaseModel):
     id: str
     label: str

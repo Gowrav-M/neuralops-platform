@@ -403,13 +403,26 @@ test('Settings workspace members persist through backend RBAC API', async ({ pag
 });
 
 test('Access page exposes role matrix and records permission checks', async ({ page }) => {
+  const lifecycleKeyName = `temporary ingest key ${Date.now()}`;
   await page.goto('/');
   const sidebar = page.locator('.sidebar-container');
+  await waitForBackend(page);
+  await sidebar.getByRole('button', { name: 'Settings', exact: true }).click();
+  const keyCard = page.locator('.card-container', { hasText: 'Developer API Access Keys' });
+  await keyCard.getByPlaceholder('e.g. production_nextjs_server').fill(lifecycleKeyName);
+  await keyCard.locator('select').nth(1).selectOption('prod');
+  await keyCard.locator('select').nth(2).selectOption('trace:ingest');
+  const keyCreateResponse = page.waitForResponse((response) => response.url().includes('/api/settings/api-keys') && response.request().method() === 'POST');
+  await keyCard.getByRole('button', { name: 'Create Token' }).click();
+  expect((await keyCreateResponse).ok()).toBe(true);
+
   await sidebar.getByRole('button', { name: 'Access', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Access Control' })).toBeVisible();
   await expect(page.getByText('Role Permission Matrix')).toBeVisible();
   await expect(page.getByText('Permission Simulator')).toBeVisible();
   await expect(page.getByText('Workspace Invites')).toBeVisible();
+  await expect(page.getByText('Access Posture Review')).toBeVisible();
+  await expect(page.getByText('Developer API Key Lifecycle')).toBeVisible();
   await expect(page.getByText('Service Account Control')).toBeVisible();
 
   await page.locator('.dark-panel-container select').selectOption('settings:write');
@@ -426,6 +439,13 @@ test('Access page exposes role matrix and records permission checks', async ({ p
   expect((await inviteResponse).ok()).toBe(true);
   await expect(page.getByText(/Invite created for/i)).toBeVisible();
   await expect(page.locator('.mono-text', { hasText: /^wsi_/ }).first()).toBeVisible();
+
+  await expect(page.getByText(lifecycleKeyName)).toBeVisible();
+  const keyRow = page.locator('tr', { hasText: lifecycleKeyName }).first();
+  const revokeKeyResponse = page.waitForResponse((response) => response.url().includes('/api/settings/api-keys/') && response.url().endsWith('/revoke'));
+  await keyRow.getByRole('button', { name: 'Revoke' }).click();
+  expect((await revokeKeyResponse).ok()).toBe(true);
+  await expect(keyRow.getByText('revoked')).toBeVisible();
 
   const serviceCard = page.locator('.card-container', { hasText: 'Service Account Control' });
   const serviceName = `gateway-worker-${Date.now()}`;

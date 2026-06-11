@@ -304,6 +304,10 @@ export function fetchAccessAudit() {
   return request('/api/access/audit');
 }
 
+export function fetchAccessPosture() {
+  return request('/api/access/posture');
+}
+
 export function fetchServiceAccounts() {
   return request('/api/service-accounts');
 }
@@ -630,6 +634,10 @@ export function patchDetectionAction(caseId, payload) {
 
 export function fetchSettings() {
   return request('/api/settings');
+}
+
+export function revokeApiKey(keyId) {
+  return request(`/api/settings/api-keys/${keyId}/revoke`, { method: 'POST' });
 }
 
 export function fetchWorkspace() {

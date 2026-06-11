@@ -53,6 +53,8 @@ from .schemas import (
     AccessCurrentUser,
     AccessPermission,
     AccessPolicyMatrix,
+    AccessPostureFinding,
+    AccessPostureReport,
     AccessRolePolicy,
     ActionCenterItem,
     ActionCenterResponse,
@@ -436,6 +438,8 @@ def authenticate_api_key(authorization: str | None, neuralops_key: str | None, r
     token_hash = hash_token(token)
     settings_payload = settings_payload_or_404()
     for api_key in settings_payload.get("apiKeys", []):
+        if api_key.get("status") == "revoked" or token_is_expired(api_key.get("expiresAt")):
+            continue
         stored_hash = api_key.get("tokenHash")
         if stored_hash and compare_digest(stored_hash, token_hash):
             if not api_key_has_scope(api_key, required_scope):
@@ -692,6 +696,77 @@ def access_check_result(permission: AccessPermission, subject: str) -> AccessChe
         permission=permission,
         subject=subject or permission,
         reason=reason,
+    )
+
+
+def access_posture_report() -> AccessPostureReport:
+    settings_payload = settings_payload_or_404()
+    api_keys = settings_payload.get("apiKeys", [])
+    service_accounts = service_accounts_payload()
+    findings: list[AccessPostureFinding] = []
+    active_api_keys = [
+        key for key in api_keys
+        if key.get("status", "active") != "revoked" and not token_is_expired(key.get("expiresAt"))
+    ]
+    revoked_api_keys = [key for key in api_keys if key.get("status") == "revoked"]
+    admin_keys = [key for key in active_api_keys if "admin" in key.get("scopes", []) or key.get("role") in {"Admin", "Full Admin"}]
+    unused_keys = [key for key in active_api_keys if not key.get("lastUsedAt") and key.get("useCount", 0) == 0]
+    active_service_accounts = [
+        account for account in service_accounts
+        if public_service_account_payload(account)["activeKeyCount"] > 0 and account.get("status") == "active"
+    ]
+
+    for key in admin_keys:
+        findings.append(AccessPostureFinding(
+            id=f"admin-api-key:{key['id']}",
+            severity="high",
+            subject=key.get("name", key["id"]),
+            summary="Admin-scoped API key can bypass normal least-privilege boundaries.",
+            recommendation="Replace broad admin keys with service accounts scoped to gateway:invoke or trace:ingest.",
+        ))
+    for key in revoked_api_keys:
+        findings.append(AccessPostureFinding(
+            id=f"revoked-api-key:{key['id']}",
+            severity="low",
+            subject=key.get("name", key["id"]),
+            summary="Revoked API key remains in history for audit evidence.",
+            recommendation="Keep revoked records for audit; remove any copied token from CI or local env files.",
+        ))
+    if len(unused_keys) >= 3:
+        findings.append(AccessPostureFinding(
+            id="unused-api-keys",
+            severity="medium",
+            subject="developer-api-keys",
+            summary=f"{len(unused_keys)} active API keys have never been used.",
+            recommendation="Revoke unused keys or replace them with named service accounts.",
+        ))
+    if not active_service_accounts:
+        findings.append(AccessPostureFinding(
+            id="missing-service-account",
+            severity="medium",
+            subject="machine-identities",
+            summary="No active service account exists for production SDK, CI, or gateway traffic.",
+            recommendation="Create scoped service accounts for server-side automation instead of sharing human keys.",
+        ))
+
+    severity_rank = {"critical": 40, "high": 25, "medium": 12, "low": 3}
+    penalty = sum(severity_rank[finding.severity] for finding in findings)
+    score = max(0, min(100, 100 - penalty))
+    decision = "block" if any(finding.severity == "critical" for finding in findings) else "review" if findings else "allow"
+    return AccessPostureReport(
+        workspaceId=current_workspace_id(),
+        decision=decision,
+        score=score,
+        summary={
+            "activeApiKeys": len(active_api_keys),
+            "revokedApiKeys": len(revoked_api_keys),
+            "adminApiKeys": len(admin_keys),
+            "unusedApiKeys": len(unused_keys),
+            "serviceAccounts": len(service_accounts),
+            "activeServiceAccounts": len(active_service_accounts),
+        },
+        findings=findings,
+        generatedAt=datetime.now().isoformat(),
     )
 
 
@@ -7748,6 +7823,12 @@ def access_check(request: AccessCheckRequest) -> AccessCheckResult:
     return access_check_result(request.permission, request.subject)
 
 
+@app.get("/api/access/posture", response_model=AccessPostureReport)
+def access_posture() -> AccessPostureReport:
+    require_permission("settings:read", "access.posture")
+    return access_posture_report()
+
+
 @app.get("/api/access/audit", response_model=list[AuditEvent])
 def access_audit() -> list[AuditEvent]:
     events = [
@@ -8017,6 +8098,33 @@ def create_api_key(request: ApiKeyCreateRequest) -> ApiKeyCreateResponse:
     settings_payload = SettingsPayload.model_validate(public_settings_payload(saved_payload))
     save_audit_event("api_key.create", request.role, key_id, "allow", f"Created API key record {request.name}.")
     return ApiKeyCreateResponse(settings=settings_payload, token=token)
+
+
+@app.post("/api/settings/api-keys/{key_id}/revoke", response_model=SettingsPayload)
+def revoke_api_key(key_id: str) -> SettingsPayload:
+    require_permission("settings:write", "settings.api_keys")
+    with SETTINGS_WRITE_LOCK:
+        payload = settings_payload_or_404()
+        target = None
+        now = datetime.now().isoformat()
+        for api_key in payload.get("apiKeys", []):
+            if api_key.get("id") == key_id:
+                target = api_key
+                api_key["status"] = "revoked"
+                api_key["revokedAt"] = now
+                api_key["updatedAt"] = now
+                break
+        if target is None:
+            raise HTTPException(status_code=404, detail="API key not found")
+        saved_payload = save_record("settings", settings_record_id(), payload)
+    save_audit_event(
+        "api_key.revoke",
+        current_user_email(),
+        key_id,
+        "block",
+        f"Revoked API key {target.get('name', key_id)}.",
+    )
+    return SettingsPayload.model_validate(public_settings_payload(saved_payload))
 
 
 @app.post("/api/settings/webhooks", response_model=SettingsPayload)

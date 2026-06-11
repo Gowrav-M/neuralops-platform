@@ -2611,6 +2611,60 @@ def test_service_account_create_rotate_revoke_and_audit(client: TestClient) -> N
     assert {"service_account.create", "service_account.rotate", "service_account.revoke"}.issubset(event_types)
 
 
+def test_api_key_revoke_blocks_existing_token_and_records_posture(client: TestClient) -> None:
+    created = client.post(
+        "/api/settings/api-keys",
+        json={"name": "temporary ingest key", "role": "Developer", "environment": "prod", "scopes": ["trace:ingest"]},
+    )
+    assert created.status_code == 200
+    token = created.json()["token"]
+    key_id = created.json()["settings"]["apiKeys"][0]["id"]
+
+    accepted = client.post(
+        "/api/connect/verify",
+        headers={"x-neuralops-key": token},
+        json={"serviceName": "revocation-proof", "environment": "prod", "sdk": "curl"},
+    )
+    assert accepted.status_code == 200
+
+    revoked = client.post(f"/api/settings/api-keys/{key_id}/revoke")
+    assert revoked.status_code == 200
+    revoked_key = next(item for item in revoked.json()["apiKeys"] if item["id"] == key_id)
+    assert revoked_key["status"] == "revoked"
+    assert "tokenHash" not in revoked_key
+
+    rejected = client.post(
+        "/api/connect/verify",
+        headers={"x-neuralops-key": token},
+        json={"serviceName": "revoked-key-proof", "environment": "prod", "sdk": "curl"},
+    )
+    assert rejected.status_code == 401
+
+    posture = client.get("/api/access/posture")
+    assert posture.status_code == 200
+    payload = posture.json()
+    assert payload["summary"]["revokedApiKeys"] >= 1
+    assert any(finding["id"] == f"revoked-api-key:{key_id}" for finding in payload["findings"])
+
+
+def test_access_posture_flags_admin_key_and_missing_service_accounts(client: TestClient) -> None:
+    created = client.post(
+        "/api/settings/api-keys",
+        json={"name": "admin automation key", "role": "Admin", "environment": "all", "scopes": ["admin"]},
+    )
+    assert created.status_code == 200
+
+    posture = client.get("/api/access/posture")
+    assert posture.status_code == 200
+    payload = posture.json()
+    assert payload["schemaVersion"] == "neuralops.access.posture.v1"
+    assert payload["decision"] in {"review", "block"}
+    assert payload["summary"]["adminApiKeys"] >= 1
+    finding_ids = {finding["id"] for finding in payload["findings"]}
+    assert any(finding_id.startswith("admin-api-key:") for finding_id in finding_ids)
+    assert "missing-service-account" in finding_ids
+
+
 def test_live_agent_runtime_uses_configured_provider_connection(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     import app.agent_runtime as agent_runtime
 
