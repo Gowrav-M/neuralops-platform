@@ -1604,6 +1604,29 @@ class AuditEvent(BaseModel):
     createdAt: str
 
 
+class AuditLedgerEvent(BaseModel):
+    id: str
+    type: str
+    actor: str
+    subject: str
+    decision: Literal["allow", "review", "block"]
+    createdAt: str
+    eventHash: str
+    previousHash: str
+    chainHash: str
+
+
+class AuditLedgerExport(BaseModel):
+    schemaVersion: str = "neuralops.audit.ledger.v1"
+    workspaceId: str
+    eventCount: int = Field(ge=0)
+    chainValid: bool
+    digest: str
+    events: list[AuditLedgerEvent]
+    markdown: str
+    generatedAt: str
+
+
 class AccessRolePolicy(BaseModel):
     role: WorkspaceRole
     permissions: list[AccessPermission]

@@ -2665,6 +2665,32 @@ def test_access_posture_flags_admin_key_and_missing_service_accounts(client: Tes
     assert "missing-service-account" in finding_ids
 
 
+def test_audit_ledger_exports_tamper_evident_chain(client: TestClient) -> None:
+    client.post(
+        "/api/access/check",
+        json={"permission": "settings:write", "subject": "ledger-proof"},
+    )
+    client.post(
+        "/api/settings/api-keys",
+        json={"name": "ledger key", "role": "Developer", "environment": "dev", "scopes": ["trace:ingest"]},
+    )
+
+    ledger = client.get("/api/audit/ledger")
+    assert ledger.status_code == 200
+    payload = ledger.json()
+    assert payload["schemaVersion"] == "neuralops.audit.ledger.v1"
+    assert payload["workspaceId"] == "local-workspace"
+    assert payload["eventCount"] >= 2
+    assert payload["chainValid"] is True
+    assert payload["digest"].startswith("sha256=")
+    assert payload["events"][0]["eventHash"].startswith("sha256=")
+    assert payload["events"][-1]["chainHash"] == payload["digest"]
+    assert "# NeuralOps Audit Ledger" in payload["markdown"]
+
+    audit = client.get("/api/audit").json()
+    assert any(event["type"] == "audit.ledger.export" for event in audit)
+
+
 def test_live_agent_runtime_uses_configured_provider_connection(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     import app.agent_runtime as agent_runtime
 

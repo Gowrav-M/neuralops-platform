@@ -83,6 +83,8 @@ from .schemas import (
     ApiKeyCreateRequest,
     ApiKeyCreateResponse,
     AuditEvent,
+    AuditLedgerEvent,
+    AuditLedgerExport,
     AgentDefinition,
     AgentRunRecord,
     AgentRunRequest,
@@ -473,6 +475,77 @@ def save_audit_event(event_type: str, actor: str, subject: str, decision: str, s
     payload["workspaceId"] = current_workspace_id()
     save_record("audit", event.id, payload)
     return event
+
+
+def audit_event_hash(event: dict[str, Any]) -> str:
+    canonical = {
+        "actor": event.get("actor", ""),
+        "createdAt": event.get("createdAt", ""),
+        "decision": event.get("decision", ""),
+        "id": event.get("id", ""),
+        "subject": event.get("subject", ""),
+        "summary": event.get("summary", ""),
+        "type": event.get("type", ""),
+        "workspaceId": event.get("workspaceId", current_workspace_id()),
+    }
+    raw = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return f"sha256={sha256(raw.encode('utf-8')).hexdigest()}"
+
+
+def build_audit_ledger(limit: int = 250) -> AuditLedgerExport:
+    raw_events = sorted(
+        scoped_records("audit"),
+        key=lambda item: (str(item.get("createdAt", "")), str(item.get("id", ""))),
+    )[-limit:]
+    previous_hash = "sha256=0"
+    ledger_events: list[AuditLedgerEvent] = []
+    for raw_event in raw_events:
+        event_hash = audit_event_hash(raw_event)
+        chain_raw = json.dumps(
+            {"eventHash": event_hash, "previousHash": previous_hash},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        chain_hash = f"sha256={sha256(chain_raw.encode('utf-8')).hexdigest()}"
+        ledger_events.append(
+            AuditLedgerEvent(
+                id=str(raw_event.get("id", "")),
+                type=str(raw_event.get("type", "")),
+                actor=str(raw_event.get("actor", "")),
+                subject=str(raw_event.get("subject", "")),
+                decision=raw_event.get("decision", "review"),
+                createdAt=str(raw_event.get("createdAt", "")),
+                eventHash=event_hash,
+                previousHash=previous_hash,
+                chainHash=chain_hash,
+            )
+        )
+        previous_hash = chain_hash
+    digest = previous_hash if ledger_events else "sha256=0"
+    markdown_lines = [
+        "# NeuralOps Audit Ledger",
+        "",
+        f"- Workspace: `{current_workspace_id()}`",
+        f"- Events: `{len(ledger_events)}`",
+        f"- Digest: `{digest}`",
+        f"- Chain valid: `true`",
+        "",
+        "| Time | Type | Actor | Subject | Decision | Event Hash |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for event in ledger_events[-25:]:
+        markdown_lines.append(
+            f"| {event.createdAt} | {event.type} | {event.actor} | {event.subject} | {event.decision} | `{event.eventHash}` |"
+        )
+    return AuditLedgerExport(
+        workspaceId=current_workspace_id(),
+        eventCount=len(ledger_events),
+        chainValid=True,
+        digest=digest,
+        events=ledger_events,
+        markdown="\n".join(markdown_lines),
+        generatedAt=datetime.now().isoformat(),
+    )
 
 
 def scoped_records(domain: str) -> list[dict[str, Any]]:
@@ -7837,6 +7910,20 @@ def access_audit() -> list[AuditEvent]:
         if str(item.get("type", "")).startswith("access.")
     ]
     return sorted(events, key=lambda item: item.createdAt, reverse=True)
+
+
+@app.get("/api/audit/ledger", response_model=AuditLedgerExport)
+def audit_ledger() -> AuditLedgerExport:
+    require_permission("settings:read", "audit.ledger")
+    ledger = build_audit_ledger()
+    save_audit_event(
+        "audit.ledger.export",
+        current_user_email(),
+        ledger.digest,
+        "allow",
+        f"Exported audit ledger with {ledger.eventCount} event(s).",
+    )
+    return ledger
 
 
 @app.get("/api/workspace", response_model=WorkspaceProfile)

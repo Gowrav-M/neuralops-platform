@@ -7,6 +7,7 @@ import {
   fetchAccessAudit,
   fetchAccessPolicy,
   fetchAccessPosture,
+  fetchAuditLedger,
   fetchSettings,
   fetchServiceAccounts,
   fetchWorkspaceInvites,
@@ -45,6 +46,7 @@ export default function AccessCenter({ addToast }) {
   const [serviceAccounts, setServiceAccounts] = useState([]);
   const [apiKeys, setApiKeys] = useState([]);
   const [posture, setPosture] = useState(null);
+  const [ledger, setLedger] = useState(null);
   const [audit, setAudit] = useState([]);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState('Developer');
@@ -246,6 +248,22 @@ export default function AccessCenter({ addToast }) {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'API key revocation failed');
       addToast('API key revocation failed.', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const exportAuditLedger = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const result = await fetchAuditLedger();
+      setLedger(result);
+      addToast(`Audit ledger exported: ${result.digest}`, 'success');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Audit ledger export failed');
+      addToast('Audit ledger export failed.', 'error');
     } finally {
       setBusy(false);
     }
@@ -675,7 +693,18 @@ export default function AccessCenter({ addToast }) {
               <h3>Access Audit</h3>
               <p>Allow and block decisions written by the backend access layer.</p>
             </div>
+            <button className="btn-secondary" type="button" disabled={busy} onClick={exportAuditLedger}>
+              Export Ledger
+            </button>
           </div>
+          {ledger && (
+            <div className="evidence-card" style={{ marginBottom: '14px' }}>
+              <span className="meta-label">Tamper-evident audit ledger</span>
+              <h3>{ledger.eventCount} events chained</h3>
+              <p className="code-font" style={{ wordBreak: 'break-all' }}>{ledger.digest}</p>
+              <p>Chain valid: {ledger.chainValid ? 'true' : 'false'}. Markdown evidence generated from persisted audit records.</p>
+            </div>
+          )}
           <div className="event-list">
             {audit.slice(0, 8).map((event) => (
               <div className="event-row" key={event.id}>

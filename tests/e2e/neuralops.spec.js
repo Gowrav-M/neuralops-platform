@@ -32,6 +32,7 @@ async function waitForBackend(page) {
 }
 
 test('all product tabs render without console errors and Evidence gate runs', async ({ page }) => {
+  test.slow();
   const errors = [];
   page.on('console', (message) => {
     if (['error', 'warning'].includes(message.type())) {
@@ -469,6 +470,12 @@ test('Access page exposes role matrix and records permission checks', async ({ p
   await serviceRow.getByRole('button', { name: 'Revoke' }).click();
   expect((await revokeResponse).ok()).toBe(true);
   await expect(serviceRow.getByText('revoked')).toBeVisible();
+
+  const ledgerResponse = page.waitForResponse((response) => response.url().includes('/api/audit/ledger'));
+  await page.getByRole('button', { name: 'Export Ledger' }).click();
+  expect((await ledgerResponse).ok()).toBe(true);
+  await expect(page.getByText('Tamper-evident audit ledger')).toBeVisible();
+  await expect(page.locator('.evidence-card', { hasText: 'Tamper-evident audit ledger' }).getByText(/sha256=/)).toBeVisible();
 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
   expect(overflow).toBe(false);

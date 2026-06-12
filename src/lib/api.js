@@ -304,6 +304,10 @@ export function fetchAccessAudit() {
   return request('/api/access/audit');
 }
 
+export function fetchAuditLedger() {
+  return request('/api/audit/ledger');
+}
+
 export function fetchAccessPosture() {
   return request('/api/access/posture');
 }
