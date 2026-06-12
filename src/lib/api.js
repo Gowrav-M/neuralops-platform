@@ -536,6 +536,33 @@ export function createProviderConnection(payload) {
   });
 }
 
+export function updateProviderConnection(connectionId, payload) {
+  return request(`/api/providers/connections/${connectionId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function disableProviderConnection(connectionId, reason) {
+  return request(`/api/providers/connections/${connectionId}/disable`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export function enableProviderConnection(connectionId) {
+  return request(`/api/providers/connections/${connectionId}/enable`, {
+    method: 'POST',
+  });
+}
+
+export function rotateProviderConnectionKey(connectionId, apiKey) {
+  return request(`/api/providers/connections/${connectionId}/rotate-key`, {
+    method: 'POST',
+    body: JSON.stringify({ apiKey }),
+  });
+}
+
 export function testProviderConnection(connectionId) {
   return request(`/api/providers/connections/${connectionId}/test`, { method: 'POST' });
 }

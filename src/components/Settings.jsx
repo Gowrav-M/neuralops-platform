@@ -5,11 +5,15 @@ import {
   createWebhook,
   createWorkspaceMember,
   deleteWorkspaceMember,
+  disableProviderConnection,
+  enableProviderConnection,
   fetchProviderCatalog,
   fetchProviderConnections,
   fetchSettings,
   patchWorkspaceMember,
+  rotateProviderConnectionKey,
   testProviderConnection,
+  updateProviderConnection,
   updateRetention,
 } from '../lib/api';
 
@@ -31,6 +35,10 @@ export default function Settings({ addToast, onNavigate }) {
   const [providerEnvironment, setProviderEnvironment] = useState('staging');
   const [providerPriority, setProviderPriority] = useState(20);
   const [testingProviderId, setTestingProviderId] = useState('');
+  const [providerLifecycleBusyId, setProviderLifecycleBusyId] = useState('');
+  const [editingProviderId, setEditingProviderId] = useState('');
+  const [rotatingProviderId, setRotatingProviderId] = useState('');
+  const [rotatingProviderKey, setRotatingProviderKey] = useState('');
 
   const [webhooks, setWebhooks] = useState([]);
   const [newWebhookName, setNewWebhookName] = useState('');
@@ -62,6 +70,8 @@ export default function Settings({ addToast, onNavigate }) {
         access: member.access || (member.role === 'Viewer' ? 'Read Only' : 'All Workspace')
       }));
   };
+
+  const formatRouteDecision = (value) => (value ? value.replaceAll('_', ' ') : 'not routed');
 
   useEffect(() => {
     let cancelled = false;
@@ -198,20 +208,23 @@ export default function Settings({ addToast, onNavigate }) {
     }
     try {
       const preset = providerCatalog.find((provider) => provider.id === selectedProviderId);
-      const connection = await createProviderConnection({
+      const payload = {
         providerId: selectedProviderId,
         label: providerLabel,
         baseUrl: providerBaseUrl,
         defaultModel: providerModel,
-        apiKey: providerApiKey || null,
         environment: providerEnvironment,
         priority: Number(providerPriority),
         supportsChat: preset?.supportsChat ?? true,
         supportsEmbeddings: preset?.supportsEmbeddings ?? false,
         supportsVision: preset?.supportsVision ?? false,
-      });
+      };
+      const connection = editingProviderId
+        ? await updateProviderConnection(editingProviderId, payload)
+        : await createProviderConnection({ ...payload, apiKey: providerApiKey || null });
       setProviderConnections((current) => [connection, ...current.filter((item) => item.id !== connection.id)]);
       setProviderApiKey('');
+      setEditingProviderId('');
       addToast(`Provider connection saved: ${connection.label}.`, 'success');
     } catch {
       addToast('Backend rejected the provider connection.', 'error');
@@ -228,6 +241,62 @@ export default function Settings({ addToast, onNavigate }) {
       addToast('Provider test could not be completed by the backend.', 'error');
     } finally {
       setTestingProviderId('');
+    }
+  };
+
+  const startEditProviderConnection = (connection) => {
+    setEditingProviderId(connection.id);
+    setSelectedProviderId(connection.providerId);
+    setProviderLabel(connection.label);
+    setProviderBaseUrl(connection.baseUrl);
+    setProviderModel(connection.defaultModel);
+    setProviderEnvironment(connection.environment);
+    setProviderPriority(connection.priority);
+    setProviderApiKey('');
+  };
+
+  const handleDisableProviderConnection = async (connection) => {
+    setProviderLifecycleBusyId(connection.id);
+    try {
+      const disabled = await disableProviderConnection(connection.id, `Disabled from Settings for ${connection.environment} gateway operations.`);
+      setProviderConnections((current) => current.map((item) => (item.id === disabled.id ? disabled : item)));
+      addToast(`Provider disabled: ${disabled.label}.`, 'warning');
+    } catch {
+      addToast('Provider disable failed.', 'error');
+    } finally {
+      setProviderLifecycleBusyId('');
+    }
+  };
+
+  const handleEnableProviderConnection = async (connection) => {
+    setProviderLifecycleBusyId(connection.id);
+    try {
+      const enabled = await enableProviderConnection(connection.id);
+      setProviderConnections((current) => current.map((item) => (item.id === enabled.id ? enabled : item)));
+      addToast(`Provider enabled: ${enabled.label}. Test it before production routing.`, 'success');
+    } catch {
+      addToast('Provider enable failed.', 'error');
+    } finally {
+      setProviderLifecycleBusyId('');
+    }
+  };
+
+  const handleRotateProviderConnection = async (connection) => {
+    if (!rotatingProviderKey) {
+      addToast('Enter the replacement provider key before rotating.', 'error');
+      return;
+    }
+    setProviderLifecycleBusyId(connection.id);
+    try {
+      const rotated = await rotateProviderConnectionKey(connection.id, rotatingProviderKey);
+      setProviderConnections((current) => current.map((item) => (item.id === rotated.id ? rotated : item)));
+      setRotatingProviderId('');
+      setRotatingProviderKey('');
+      addToast(`Provider key rotated for ${rotated.label}. Test must pass before routing resumes.`, 'warning');
+    } catch {
+      addToast('Provider key rotation failed.', 'error');
+    } finally {
+      setProviderLifecycleBusyId('');
     }
   };
 
@@ -437,9 +506,11 @@ export default function Settings({ addToast, onNavigate }) {
                   <th>Connection</th>
                   <th>Env</th>
                   <th>Model</th>
-                  <th>Status</th>
+                  <th>Lifecycle</th>
+                  <th>Health</th>
                   <th>Key</th>
-                  <th>Action</th>
+                  <th>Last Route</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -454,12 +525,24 @@ export default function Settings({ addToast, onNavigate }) {
                     <td><span className="badge badge-info">{connection.environment}</span></td>
                     <td className="code-font">{connection.defaultModel}</td>
                     <td>
+                      <span className={`badge ${connection.status === 'active' ? 'badge-success' : connection.status === 'disabled' || connection.status === 'revoked' ? 'badge-danger' : 'badge-warning'}`}>
+                        {connection.status || 'active'}
+                      </span>
+                    </td>
+                    <td>
                       <span className={`badge ${connection.lastStatus === 'healthy' ? 'badge-success' : connection.lastStatus === 'failed' || connection.lastStatus === 'not_configured' ? 'badge-danger' : 'badge-warning'}`}>
                         {connection.lastStatus}
                       </span>
                     </td>
                     <td className="code-font">{connection.keyPreview || 'local/no-key'}</td>
                     <td>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                        <span>{formatRouteDecision(connection.lastRouteDecision)}</span>
+                        <span className="code-font" style={{ color: 'var(--text-secondary)' }}>{connection.lastUsedAt || connection.rotatedAt || connection.disabledAt || 'no lifecycle event'}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
                       <button
                         type="button"
                         className="btn-secondary"
@@ -468,12 +551,71 @@ export default function Settings({ addToast, onNavigate }) {
                       >
                         {testingProviderId === connection.id ? 'Testing...' : 'Test'}
                       </button>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          disabled={providerLifecycleBusyId === connection.id}
+                          onClick={() => startEditProviderConnection(connection)}
+                        >
+                          Edit
+                        </button>
+                        {connection.status === 'disabled' || connection.status === 'revoked' || connection.status === 'rotating' ? (
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            disabled={providerLifecycleBusyId === connection.id}
+                            onClick={() => handleEnableProviderConnection(connection)}
+                          >
+                            Enable
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            disabled={providerLifecycleBusyId === connection.id}
+                            onClick={() => handleDisableProviderConnection(connection)}
+                          >
+                            Disable
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          disabled={providerLifecycleBusyId === connection.id}
+                          onClick={() => {
+                            setRotatingProviderId((current) => (current === connection.id ? '' : connection.id));
+                            setRotatingProviderKey('');
+                          }}
+                        >
+                          Rotate
+                        </button>
+                      </div>
+                      {rotatingProviderId === connection.id && (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(140px, 1fr) auto', gap: '6px', marginTop: '8px' }}>
+                          <input
+                            type="password"
+                            className="filter-search-input"
+                            value={rotatingProviderKey}
+                            onChange={(event) => setRotatingProviderKey(event.target.value)}
+                            placeholder="new provider key"
+                            autoComplete="off"
+                          />
+                          <button
+                            type="button"
+                            className="btn-primary"
+                            disabled={providerLifecycleBusyId === connection.id}
+                            onClick={() => handleRotateProviderConnection(connection)}
+                          >
+                            Save
+                          </button>
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ))}
                 {providerConnections.length === 0 && (
                   <tr>
-                    <td colSpan="6" style={{ color: 'var(--text-secondary)' }}>
+                    <td colSpan="8" style={{ color: 'var(--text-secondary)' }}>
                       No live provider connections are saved yet. Local deterministic agent mode remains available.
                     </td>
                   </tr>
@@ -567,9 +709,23 @@ export default function Settings({ addToast, onNavigate }) {
                 />
               </div>
 
-              <button type="submit" className="btn-primary" style={{ alignSelf: 'end' }}>
-                Save Provider
-              </button>
+              <div style={{ display: 'flex', gap: '8px', alignSelf: 'end', flexWrap: 'wrap' }}>
+                <button type="submit" className="btn-primary">
+                  {editingProviderId ? 'Update Provider' : 'Save Provider'}
+                </button>
+                {editingProviderId && (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => {
+                      setEditingProviderId('');
+                      setProviderApiKey('');
+                    }}
+                  >
+                    Cancel Edit
+                  </button>
+                )}
+              </div>
             </form>
 
             <div className="settings-handoff-panel">

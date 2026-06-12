@@ -8,6 +8,7 @@ import {
   fetchGatewayRequests,
   fetchGatewayRoutingPolicy,
   fetchProviderCalibrations,
+  fetchProviderConnections,
   updateGatewayBudget,
   updateGatewayRoutingPolicy,
   runProviderCalibration,
@@ -55,6 +56,7 @@ export default function GatewayCenter({ addToast }) {
   const [policy, setPolicy] = useState(null);
   const [budgets, setBudgets] = useState([]);
   const [calibrations, setCalibrations] = useState([]);
+  const [providerConnections, setProviderConnections] = useState([]);
   const [calibrationForm, setCalibrationForm] = useState({
     environment: 'staging',
     prompt: 'Summarize this production AI incident in one sentence with safe operational wording.',
@@ -83,12 +85,14 @@ export default function GatewayCenter({ addToast }) {
         fetchGatewayBudgets(),
         fetchProviderCalibrations(),
       ]);
+      const nextProviderConnections = await fetchProviderConnections();
       setMetrics(nextMetrics);
       setRequests(nextRequests);
       setSuggestions(nextSuggestions);
       setPolicy(nextPolicy);
       setBudgets(nextBudgets);
       setCalibrations(nextCalibrations);
+      setProviderConnections(nextProviderConnections);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gateway backend unavailable');
     }
@@ -103,8 +107,9 @@ export default function GatewayCenter({ addToast }) {
       fetchGatewayRoutingPolicy(),
       fetchGatewayBudgets(),
       fetchProviderCalibrations(),
+      fetchProviderConnections(),
     ])
-      .then(([nextMetrics, nextRequests, nextSuggestions, nextPolicy, nextBudgets, nextCalibrations]) => {
+      .then(([nextMetrics, nextRequests, nextSuggestions, nextPolicy, nextBudgets, nextCalibrations, nextProviderConnections]) => {
         if (cancelled) return;
         setMetrics(nextMetrics);
         setRequests(nextRequests);
@@ -112,6 +117,7 @@ export default function GatewayCenter({ addToast }) {
         setPolicy(nextPolicy);
         setBudgets(nextBudgets);
         setCalibrations(nextCalibrations);
+        setProviderConnections(nextProviderConnections);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -130,6 +136,8 @@ export default function GatewayCenter({ addToast }) {
   }, [budgets, budgetForm.environment]);
 
   const latestCalibration = calibrations[0] || null;
+  const activeProviders = providerConnections.filter((provider) => provider.status === 'active');
+  const skippedProviders = providerConnections.filter((provider) => ['disabled', 'rotating', 'revoked'].includes(provider.status));
 
   const updatePolicyField = (field, value) => {
     setPolicy((current) => ({ ...(current || {}), [field]: value }));
@@ -442,7 +450,39 @@ export default function GatewayCenter({ addToast }) {
         <div className="dark-panel-container">
           <div className="dark-panel-title-row">
             <span className="dark-panel-title">Provider Health</span>
-            <span className="badge badge-success">{metrics.providerBreakdown.length}</span>
+            <span className="badge badge-success">{activeProviders.length} eligible</span>
+          </div>
+          <div className="dark-list" style={{ marginBottom: '12px' }}>
+            {providerConnections.length ? providerConnections.map((provider) => (
+              <div className="dark-list-item" key={provider.id}>
+                <div className="item-meta">
+                  <span className="item-title">{provider.label}</span>
+                  <span className="item-subtitle">
+                    {provider.environment} | {provider.defaultModel} | {provider.lastRouteDecision || 'not routed'}
+                  </span>
+                </div>
+                <span className={`badge ${provider.status === 'active' ? 'badge-success' : provider.status === 'disabled' || provider.status === 'revoked' ? 'badge-error' : 'badge-warning'}`}>
+                  {provider.status}
+                </span>
+              </div>
+            )) : (
+              <div className="dark-list-item">
+                <div className="item-meta">
+                  <span className="item-title">No provider connections</span>
+                  <span className="item-subtitle">Add one in Settings before live gateway routing.</span>
+                </div>
+              </div>
+            )}
+          </div>
+          {skippedProviders.length > 0 && (
+            <div className="state-container" style={{ padding: '14px', alignItems: 'flex-start', textAlign: 'left', marginBottom: '12px' }}>
+              <strong>{skippedProviders.length} provider(s) skipped by lifecycle control</strong>
+              <span>{skippedProviders.map((provider) => `${provider.label}: ${provider.status}`).join(' | ')}</span>
+            </div>
+          )}
+          <div className="dark-panel-title-row" style={{ marginTop: '6px' }}>
+            <span className="dark-panel-title">Route Evidence</span>
+            <span className="badge badge-info">{metrics.providerBreakdown.length}</span>
           </div>
           <div className="dark-list">
             {metrics.providerBreakdown.length ? metrics.providerBreakdown.map((provider) => (

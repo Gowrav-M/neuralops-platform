@@ -1471,6 +1471,121 @@ def test_gateway_lowest_cost_routing_cache_and_metrics(client: TestClient, monke
     assert metrics.json()["providerBreakdown"][0]["label"] == "Cheap Gateway"
 
 
+def test_provider_lifecycle_disable_skips_routing_and_rotate_audits(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    token = client.post(
+        "/api/settings/api-keys",
+        json={"name": "provider lifecycle", "role": "Developer", "environment": "all", "scopes": ["gateway:invoke"]},
+    ).json()["token"]
+    primary = client.post(
+        "/api/providers/connections",
+        json={
+            "providerId": "custom",
+            "label": "Primary Lifecycle",
+            "baseUrl": "https://primary-lifecycle.example.test/v1",
+            "defaultModel": "gpt-4o",
+            "apiKey": "primary-lifecycle-secret",
+            "environment": "staging",
+            "priority": 1,
+        },
+    ).json()
+    fallback = client.post(
+        "/api/providers/connections",
+        json={
+            "providerId": "custom",
+            "label": "Fallback Lifecycle",
+            "baseUrl": "https://fallback-lifecycle.example.test/v1",
+            "defaultModel": "gpt-4o-mini",
+            "apiKey": "fallback-lifecycle-secret",
+            "environment": "staging",
+            "priority": 2,
+        },
+    ).json()
+
+    disabled = client.post(
+        f"/api/providers/connections/{primary['id']}/disable",
+        json={"reason": "Leaked key investigation"},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["status"] == "disabled"
+    assert disabled.json()["disabledReason"] == "Leaked key investigation"
+
+    rotated = client.post(
+        f"/api/providers/connections/{primary['id']}/rotate-key",
+        json={"apiKey": "rotated-primary-lifecycle-secret"},
+    )
+    assert rotated.status_code == 200
+    assert rotated.json()["id"] == primary["id"]
+    assert rotated.json()["status"] == "rotating"
+    assert rotated.json()["keyPreview"] != primary["keyPreview"]
+    assert "rotated-primary-lifecycle-secret" not in str(rotated.json())
+
+    calls: list[str] = []
+
+    def fake_provider_chat_completion(provider: Any, request: Any) -> dict[str, Any]:
+        calls.append(provider.label)
+        return {
+            "id": f"chatcmpl_{provider.id}",
+            "choices": [{"message": {"content": f"{provider.label} answered."}}],
+            "usage": {"total_tokens": 24},
+        }
+
+    monkeypatch.setattr("app.main.provider_chat_completion", fake_provider_chat_completion)
+
+    response = client.post(
+        "/api/gateway/openai/v1/chat/completions",
+        headers={"x-neuralops-key": token},
+        json={"messages": [{"role": "user", "content": "Check lifecycle routing."}], "metadata": {"environment": "staging"}},
+    )
+
+    assert response.status_code == 200
+    assert calls == ["Fallback Lifecycle"]
+    assert response.json()["neuralops"]["provider"]["label"] == fallback["label"]
+    route = client.get("/api/gateway/routes").json()[0]
+    assert route["selectedProvider"]["label"] == "Fallback Lifecycle"
+    assert any(attempt["provider"]["label"] == "Primary Lifecycle" and attempt["status"] == "skipped" for attempt in route["attempts"])
+    assert "primary-lifecycle-secret" not in str(route)
+    assert "rotated-primary-lifecycle-secret" not in str(route)
+
+    audit = client.get("/api/audit").json()
+    assert any(event["type"] == "provider.connection.disable" for event in audit)
+    assert any(event["type"] == "provider.connection.rotate" for event in audit)
+
+
+def test_gateway_returns_not_configured_when_only_provider_is_disabled(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    token = client.post(
+        "/api/settings/api-keys",
+        json={"name": "disabled provider", "role": "Developer", "environment": "all", "scopes": ["gateway:invoke"]},
+    ).json()["token"]
+    provider = client.post(
+        "/api/providers/connections",
+        json={
+            "providerId": "custom",
+            "label": "Disabled Only",
+            "baseUrl": "https://disabled-only.example.test/v1",
+            "defaultModel": "gpt-4o-mini",
+            "apiKey": "disabled-only-secret",
+            "environment": "staging",
+            "priority": 1,
+        },
+    ).json()
+    client.post(f"/api/providers/connections/{provider['id']}/disable", json={"reason": "maintenance"})
+    calls: list[str] = []
+    monkeypatch.setattr("app.main.provider_chat_completion", lambda provider, request: calls.append(provider.label) or {})
+
+    response = client.post(
+        "/api/gateway/openai/v1/chat/completions",
+        headers={"x-neuralops-key": token},
+        json={"messages": [{"role": "user", "content": "This should not route."}], "metadata": {"environment": "staging"}},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "not_configured"
+    assert calls == []
+    route = client.get("/api/gateway/routes").json()[0]
+    assert route["status"] == "not_configured"
+    assert any(attempt["provider"]["label"] == "Disabled Only" and attempt["status"] == "skipped" for attempt in route["attempts"])
+
+
 def test_gateway_budget_and_rate_limit_blocks_before_provider_call(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     token = client.post(
         "/api/settings/api-keys",

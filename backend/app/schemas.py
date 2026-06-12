@@ -394,7 +394,7 @@ class ProviderStatus(BaseModel):
     supportsChat: bool = True
     supportsEmbeddings: bool = False
     supportsVision: bool = False
-    status: Literal["configured", "not_configured", "healthy", "failed"] | None = None
+    status: Literal["active", "configured", "disabled", "revoked", "rotating", "not_configured", "healthy", "failed"] | None = None
 
 
 class ProviderPreset(BaseModel):
@@ -423,6 +423,25 @@ class ProviderConnectionCreate(BaseModel):
     supportsVision: bool = False
 
 
+class ProviderConnectionPatch(BaseModel):
+    label: str | None = Field(default=None, min_length=1)
+    baseUrl: str | None = Field(default=None, min_length=1)
+    defaultModel: str | None = Field(default=None, min_length=1)
+    environment: Literal["prod", "staging", "dev", "all"] | None = None
+    priority: int | None = Field(default=None, ge=1, le=999)
+    supportsChat: bool | None = None
+    supportsEmbeddings: bool | None = None
+    supportsVision: bool | None = None
+
+
+class ProviderConnectionDisableRequest(BaseModel):
+    reason: str = Field(default="Operator disabled provider connection.", min_length=1, max_length=240)
+
+
+class ProviderConnectionRotateKeyRequest(BaseModel):
+    apiKey: str = Field(min_length=1)
+
+
 class ProviderConnection(BaseModel):
     id: str
     providerId: str
@@ -436,6 +455,13 @@ class ProviderConnection(BaseModel):
     supportsChat: bool = True
     supportsEmbeddings: bool = False
     supportsVision: bool = False
+    status: Literal["active", "disabled", "rotating", "revoked"] = "active"
+    disabledAt: str | None = None
+    disabledReason: str | None = None
+    rotatedAt: str | None = None
+    rotatedBy: str | None = None
+    lastUsedAt: str | None = None
+    lastRouteDecision: str | None = None
     lastTestedAt: str | None = None
     lastStatus: Literal["untested", "healthy", "failed", "not_configured"] = "untested"
     lastError: str | None = None
@@ -1473,7 +1499,7 @@ class GatewayRouteProvider(BaseModel):
 
 class GatewayRouteAttempt(BaseModel):
     provider: GatewayRouteProvider
-    status: Literal["failed", "succeeded"]
+    status: Literal["failed", "succeeded", "skipped"]
     latencyMs: int = Field(ge=0)
     error: str | None = None
 

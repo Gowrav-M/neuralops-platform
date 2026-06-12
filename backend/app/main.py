@@ -46,7 +46,19 @@ from . import seed
 from .job_queue import cancel_job, get_job, list_jobs, process_job, process_next_job, queue_summary, retry_job, submit_job
 from .metrics import build_stats
 from .otel import normalize_otel_payload, replay_trace
-from .provider_catalog import RuntimeProvider, create_provider_connection, list_provider_presets, provider_connections, runtime_providers, test_provider_connection
+from .provider_catalog import (
+    RuntimeProvider,
+    create_provider_connection,
+    disable_provider_connection,
+    enable_provider_connection,
+    list_provider_presets,
+    mark_provider_connection_route,
+    patch_provider_connection,
+    provider_connections,
+    rotate_provider_connection_key,
+    runtime_providers,
+    test_provider_connection,
+)
 from .schemas import (
     AccessCheckRequest,
     AccessCheckResult,
@@ -161,6 +173,9 @@ from .schemas import (
     ProviderCalibrationRun,
     ProviderConnection,
     ProviderConnectionCreate,
+    ProviderConnectionDisableRequest,
+    ProviderConnectionPatch,
+    ProviderConnectionRotateKeyRequest,
     ProviderConnectionTestResult,
     ProviderPreset,
     PromptVersion,
@@ -1113,7 +1128,9 @@ def build_production_readiness() -> ProductionReadinessReport:
     ensure_workspace_bootstrap()
     status = build_system_status()
     member_count = len(workspace_members_payload())
-    provider_count = len(provider_connections(current_workspace_id()))
+    all_provider_connections = provider_connections(current_workspace_id())
+    provider_count = sum(1 for provider in all_provider_connections if provider.status == "active" and provider.configured)
+    skipped_provider_count = sum(1 for provider in all_provider_connections if provider.status in {"disabled", "rotating", "revoked"})
     latest_calibration = latest_provider_calibration()
     gateway_policy = gateway_routing_policy()
     access_audit_count = len([item for item in scoped_records("audit") if str(item.get("type", "")).startswith("access.")])
@@ -1146,7 +1163,7 @@ def build_production_readiness() -> ProductionReadinessReport:
             "provider_gateway",
             "Live provider gateway",
             "pass" if provider_count > 0 else "review",
-            f"{provider_count} provider connection(s) are configured for this workspace.",
+            f"{provider_count} active provider connection(s), {skipped_provider_count} skipped by lifecycle control.",
         ),
         readiness_check(
             "provider_calibration",
@@ -1545,7 +1562,11 @@ def build_system_status() -> SystemStatus:
         record_counts = {domain: count_domain(domain) for domain in domains}
     settings_payload = settings_payload_or_404()
     providers = list_providers()
-    live_configured = any(provider.configured for provider in providers if provider.id != "local")
+    connection_records = provider_connections(current_workspace_id())
+    active_connection_count = sum(1 for provider in connection_records if provider.status == "active" and provider.configured)
+    skipped_connection_count = sum(1 for provider in connection_records if provider.status in {"disabled", "rotating", "revoked"})
+    env_live_configured = any(provider.configured for provider in providers if provider.id != "local" and provider.source == "env")
+    live_configured = env_live_configured or active_connection_count > 0
     auth_required_enabled = os.getenv("NEURALOPS_AUTH_REQUIRED", "false").lower() in {"1", "true", "yes"}
     webhook_count = len(settings_payload.get("webhooks", []))
     api_key_count = len(settings_payload.get("apiKeys", []))
@@ -1667,7 +1688,7 @@ def build_system_status() -> SystemStatus:
             id="provider_gateway",
             label="Provider Gateway",
             state="live_provider" if live_configured else "not_configured",
-            evidence=f"{record_counts['provider_connections']} provider connection record(s), {len(providers)} catalog/status entries",
+            evidence=f"{active_connection_count} active provider connection(s), {skipped_connection_count} skipped lifecycle connection(s), {len(providers)} catalog/status entries",
             action="Add a provider connection for OpenRouter, Vercel AI Gateway, Groq, NVIDIA, Ollama, vLLM, or a custom endpoint.",
         ),
         FeatureTruth(
@@ -4556,6 +4577,10 @@ def gateway_route_provider(provider: RuntimeProvider) -> GatewayRouteProvider:
     return GatewayRouteProvider(id=provider.id, label=provider.label, source=provider.source, priority=provider.priority)
 
 
+def gateway_connection_route_provider(connection: ProviderConnection) -> GatewayRouteProvider:
+    return GatewayRouteProvider(id=connection.id, label=connection.label, source="connection", priority=connection.priority)
+
+
 def sanitize_gateway_error(error: str) -> str:
     sanitized = re.sub(r"(?i)(bearer|authorization|api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+", r"\1=[redacted]", error)
     sanitized = re.sub(r"\b(sk|gsk|sb_secret|sb_publishable|nop_sk)_[A-Za-z0-9_\-]{8,}\b", "[redacted-key]", sanitized)
@@ -4569,6 +4594,26 @@ def gateway_route_attempt(provider: RuntimeProvider, status: str, latency_ms: in
         latencyMs=max(0, latency_ms),
         error=sanitize_gateway_error(error) if error else None,
     )
+
+
+def gateway_skipped_connection_attempt(connection: ProviderConnection) -> GatewayRouteAttempt:
+    reason = connection.disabledReason or f"Provider lifecycle status is {connection.status}."
+    return GatewayRouteAttempt(
+        provider=gateway_connection_route_provider(connection),
+        status="skipped",
+        latencyMs=0,
+        error=sanitize_gateway_error(reason),
+    )
+
+
+def gateway_lifecycle_skipped_attempts(environment: str) -> list[GatewayRouteAttempt]:
+    attempts: list[GatewayRouteAttempt] = []
+    for connection in provider_connections(current_workspace_id()):
+        if connection.environment not in ("all", environment):
+            continue
+        if connection.status in {"disabled", "rotating", "revoked"}:
+            attempts.append(gateway_skipped_connection_attempt(connection))
+    return attempts
 
 
 def gateway_route_response_attempt(attempt: GatewayRouteAttempt) -> dict[str, Any]:
@@ -4611,7 +4656,7 @@ def save_gateway_route_event(
         attempts=attempts,
         routingStrategy=routing_strategy,  # type: ignore[arg-type]
         selectedReason=selected_reason,
-        retryCount=max(0, len(attempts) - 1),
+        retryCount=max(0, sum(1 for attempt in attempts if attempt.status != "skipped") - 1),
         cacheStatus=cache_status,  # type: ignore[arg-type]
         budgetDecision=budget_decision,  # type: ignore[arg-type]
         estimatedCostUsd=estimated_cost_usd,
@@ -6304,6 +6349,7 @@ def gateway_chat_completions(
         )
         raise HTTPException(status_code=403, detail={"decision": pre_policy.decision, "stage": pre_policy.stage, "findings": pre_policy.findings, "reason": pre_policy.reason, "traceId": trace.id})
 
+    skipped_attempts = gateway_lifecycle_skipped_attempts(environment)
     providers = gateway_providers_for_environment(environment)
     if not providers:
         route_event = save_gateway_route_event(
@@ -6311,7 +6357,7 @@ def gateway_chat_completions(
             requested_model=requested_model,
             status="not_configured",
             decision="review",
-            attempts=[],
+            attempts=skipped_attempts,
             findings=[],
             routing_strategy=routing_policy.strategy,
             selected_reason="not_configured",
@@ -6462,7 +6508,8 @@ def gateway_chat_completions(
         }
         return cached_payload
 
-    provider, provider_payload, route_attempts = route_gateway_provider(providers, request, prompt, routing_policy)
+    provider, provider_payload, routed_attempts = route_gateway_provider(providers, request, prompt, routing_policy)
+    route_attempts = [*skipped_attempts, *routed_attempts]
     if provider is None or provider_payload is None:
         route_event = save_gateway_route_event(
             environment=environment,
@@ -6499,6 +6546,8 @@ def gateway_chat_completions(
         )
 
     output = gateway_response_text(provider_payload)
+    if provider.connection_id:
+        mark_provider_connection_route(provider.connection_id, "routed")
     latency_ms = max(1, int((datetime.now() - started).total_seconds() * 1000))
     post_policy = evaluate_gateway_policy("post_policy", prompt, output)
     usage = provider_payload.get("usage") if isinstance(provider_payload.get("usage"), dict) else None
@@ -7583,6 +7632,70 @@ def add_provider_connection(request: ProviderConnectionCreate) -> ProviderConnec
         connection.id,
         "allow",
         f"Created provider connection {connection.label} for {connection.environment}.",
+    )
+    return connection
+
+
+@app.patch("/api/providers/connections/{connection_id}", response_model=ProviderConnection)
+def update_provider_connection(connection_id: str, request: ProviderConnectionPatch) -> ProviderConnection:
+    require_permission("provider:write", connection_id)
+    connection = patch_provider_connection(connection_id, request, current_workspace_id())
+    if connection is None:
+        raise HTTPException(status_code=404, detail="Provider connection not found")
+    save_audit_event(
+        "provider.connection.update",
+        current_user_email(),
+        connection.id,
+        "allow",
+        f"Updated provider connection {connection.label}.",
+    )
+    return connection
+
+
+@app.post("/api/providers/connections/{connection_id}/disable", response_model=ProviderConnection)
+def disable_provider_connection_endpoint(connection_id: str, request: ProviderConnectionDisableRequest) -> ProviderConnection:
+    require_permission("provider:write", connection_id)
+    connection = disable_provider_connection(connection_id, request, current_workspace_id())
+    if connection is None:
+        raise HTTPException(status_code=404, detail="Provider connection not found")
+    save_audit_event(
+        "provider.connection.disable",
+        current_user_email(),
+        connection.id,
+        "review",
+        f"Disabled provider connection {connection.label}: {connection.disabledReason}.",
+    )
+    return connection
+
+
+@app.post("/api/providers/connections/{connection_id}/enable", response_model=ProviderConnection)
+def enable_provider_connection_endpoint(connection_id: str) -> ProviderConnection:
+    require_permission("provider:write", connection_id)
+    connection = enable_provider_connection(connection_id, current_workspace_id())
+    if connection is None:
+        raise HTTPException(status_code=404, detail="Provider connection not found")
+    save_audit_event(
+        "provider.connection.enable",
+        current_user_email(),
+        connection.id,
+        "allow",
+        f"Enabled provider connection {connection.label}.",
+    )
+    return connection
+
+
+@app.post("/api/providers/connections/{connection_id}/rotate-key", response_model=ProviderConnection)
+def rotate_provider_connection_key_endpoint(connection_id: str, request: ProviderConnectionRotateKeyRequest) -> ProviderConnection:
+    require_permission("provider:write", connection_id)
+    connection = rotate_provider_connection_key(connection_id, request, current_user_email(), current_workspace_id())
+    if connection is None:
+        raise HTTPException(status_code=404, detail="Provider connection not found")
+    save_audit_event(
+        "provider.connection.rotate",
+        current_user_email(),
+        connection.id,
+        "review",
+        f"Rotated provider connection key for {connection.label}. Test before routing production traffic.",
     )
     return connection
 

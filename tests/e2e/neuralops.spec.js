@@ -495,7 +495,7 @@ test('Production Readiness page reports deployment gate state', async ({ page })
   expect(overflow).toBe(false);
 });
 
-test('Settings provider gateway connection persists and reports missing key truthfully', async ({ page }) => {
+test('Settings provider gateway lifecycle persists and reports missing key truthfully', async ({ page }) => {
   await page.goto('/');
   const sidebar = page.locator('.sidebar-container');
   await sidebar.getByRole('button', { name: 'Settings', exact: true }).click();
@@ -516,12 +516,33 @@ test('Settings provider gateway connection persists and reports missing key trut
   const row = card.locator('tr', { hasText: label });
   await expect(row).toBeVisible();
   await expect(row.getByText('untested')).toBeVisible();
+  await expect(row.getByText('active', { exact: true })).toBeVisible();
 
   const testResponse = page.waitForResponse((response) => response.url().includes('/api/providers/connections/') && response.url().endsWith('/test'));
   await row.getByRole('button', { name: 'Test' }).click();
   expect((await testResponse).ok()).toBe(true);
-  await expect(row.getByText('not_configured')).toBeVisible();
+  await expect(row.getByText('not_configured', { exact: true })).toBeVisible();
   await expect(page.getByText(/Provider test failed/i)).toBeVisible();
+
+  const disableResponse = page.waitForResponse((response) => response.url().includes('/api/providers/connections/') && response.url().endsWith('/disable'));
+  await row.getByRole('button', { name: 'Disable' }).click();
+  expect((await disableResponse).ok()).toBe(true);
+  await expect(row.getByText('disabled', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Provider disabled/i)).toBeVisible();
+
+  const enableResponse = page.waitForResponse((response) => response.url().includes('/api/providers/connections/') && response.url().endsWith('/enable'));
+  await row.getByRole('button', { name: 'Enable' }).click();
+  expect((await enableResponse).ok()).toBe(true);
+  await expect(row.getByText('active', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Provider enabled/i)).toBeVisible();
+
+  await row.getByRole('button', { name: 'Rotate' }).click();
+  await row.getByPlaceholder('new provider key').fill('playwright-rotated-provider-secret');
+  const rotateResponse = page.waitForResponse((response) => response.url().includes('/api/providers/connections/') && response.url().endsWith('/rotate-key'));
+  await row.getByRole('button', { name: 'Save' }).click();
+  expect((await rotateResponse).ok()).toBe(true);
+  await expect(row.getByText('rotating', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Provider key rotated/i)).toBeVisible();
 });
 
 test('Gateway page manages routing policy budgets and cache controls', async ({ page }) => {

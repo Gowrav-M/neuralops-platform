@@ -15,7 +15,16 @@ from cryptography.fernet import Fernet, InvalidToken
 from .config import load_local_env
 from .database import get_record, list_records, save_record
 from .auth import auth_required, current_claims, workspace_id_from_claims
-from .schemas import ProviderConnection, ProviderConnectionCreate, ProviderConnectionTestResult, ProviderPreset, ProviderStatus
+from .schemas import (
+    ProviderConnection,
+    ProviderConnectionCreate,
+    ProviderConnectionDisableRequest,
+    ProviderConnectionPatch,
+    ProviderConnectionRotateKeyRequest,
+    ProviderConnectionTestResult,
+    ProviderPreset,
+    ProviderStatus,
+)
 
 load_local_env()
 
@@ -212,6 +221,7 @@ class RuntimeProvider:
     source: str
     priority: int
     environment: str
+    connection_id: str | None = None
 
 
 def list_provider_presets() -> list[ProviderPreset]:
@@ -256,6 +266,13 @@ def create_provider_connection(request: ProviderConnectionCreate, workspace_id: 
         "supportsChat": request.supportsChat,
         "supportsEmbeddings": request.supportsEmbeddings,
         "supportsVision": request.supportsVision,
+        "status": "active",
+        "disabledAt": None,
+        "disabledReason": None,
+        "rotatedAt": None,
+        "rotatedBy": None,
+        "lastUsedAt": None,
+        "lastRouteDecision": None,
         "lastTestedAt": None,
         "lastStatus": "untested",
         "lastError": None,
@@ -264,6 +281,96 @@ def create_provider_connection(request: ProviderConnectionCreate, workspace_id: 
     }
     saved = save_record("provider_connections", payload["id"], payload)
     return public_provider_connection(saved)
+
+
+def patch_provider_connection(connection_id: str, request: ProviderConnectionPatch, workspace_id: str | None = None) -> ProviderConnection | None:
+    payload = get_record("provider_connections", connection_id)
+    if payload is None:
+        return None
+    if auth_required() and payload.get("workspaceId") != (workspace_id or current_provider_workspace_id()):
+        return None
+    patch = request.model_dump(exclude_none=True)
+    if "label" in patch:
+        payload["label"] = patch["label"].strip()
+    if "baseUrl" in patch:
+        payload["baseUrl"] = patch["baseUrl"].rstrip("/")
+    if "defaultModel" in patch:
+        payload["defaultModel"] = patch["defaultModel"].strip()
+    for field in ("environment", "priority", "supportsChat", "supportsEmbeddings", "supportsVision"):
+        if field in patch:
+            payload[field] = patch[field]
+    payload["updatedAt"] = datetime.now().isoformat()
+    saved = save_record("provider_connections", connection_id, payload)
+    return public_provider_connection(saved)
+
+
+def disable_provider_connection(connection_id: str, request: ProviderConnectionDisableRequest, workspace_id: str | None = None) -> ProviderConnection | None:
+    payload = get_record("provider_connections", connection_id)
+    if payload is None:
+        return None
+    if auth_required() and payload.get("workspaceId") != (workspace_id or current_provider_workspace_id()):
+        return None
+    now = datetime.now().isoformat()
+    payload["status"] = "disabled"
+    payload["disabledAt"] = now
+    payload["disabledReason"] = request.reason
+    payload["lastRouteDecision"] = "disabled_by_operator"
+    payload["updatedAt"] = now
+    saved = save_record("provider_connections", connection_id, payload)
+    return public_provider_connection(saved)
+
+
+def enable_provider_connection(connection_id: str, workspace_id: str | None = None) -> ProviderConnection | None:
+    payload = get_record("provider_connections", connection_id)
+    if payload is None:
+        return None
+    if auth_required() and payload.get("workspaceId") != (workspace_id or current_provider_workspace_id()):
+        return None
+    now = datetime.now().isoformat()
+    payload["status"] = "active"
+    payload["disabledAt"] = None
+    payload["disabledReason"] = None
+    payload["lastRouteDecision"] = "enabled_by_operator"
+    payload["updatedAt"] = now
+    saved = save_record("provider_connections", connection_id, payload)
+    return public_provider_connection(saved)
+
+
+def rotate_provider_connection_key(
+    connection_id: str,
+    request: ProviderConnectionRotateKeyRequest,
+    rotated_by: str,
+    workspace_id: str | None = None,
+) -> ProviderConnection | None:
+    payload = get_record("provider_connections", connection_id)
+    if payload is None:
+        return None
+    if auth_required() and payload.get("workspaceId") != (workspace_id or current_provider_workspace_id()):
+        return None
+    now = datetime.now().isoformat()
+    payload["encryptedApiKey"] = encrypt_secret(request.apiKey)
+    payload["keyPreview"] = key_preview_for(request.apiKey)
+    payload["configured"] = True
+    payload["status"] = "rotating"
+    payload["rotatedAt"] = now
+    payload["rotatedBy"] = rotated_by
+    payload["lastStatus"] = "untested"
+    payload["lastError"] = None
+    payload["lastRouteDecision"] = "rotation_pending_test"
+    payload["updatedAt"] = now
+    saved = save_record("provider_connections", connection_id, payload)
+    return public_provider_connection(saved)
+
+
+def mark_provider_connection_route(connection_id: str, decision: str) -> None:
+    payload = get_record("provider_connections", connection_id)
+    if payload is None:
+        return
+    now = datetime.now().isoformat()
+    payload["lastUsedAt"] = now
+    payload["lastRouteDecision"] = decision
+    payload["updatedAt"] = now
+    save_record("provider_connections", connection_id, payload)
 
 
 def test_provider_connection(connection_id: str, workspace_id: str | None = None) -> ProviderConnectionTestResult | None:
@@ -280,6 +387,7 @@ def test_provider_connection(connection_id: str, workspace_id: str | None = None
         payload["lastTestedAt"] = datetime.now().isoformat()
         payload["lastStatus"] = "not_configured"
         payload["lastError"] = "No server-side API key is stored for this provider."
+        payload["lastRouteDecision"] = "test_not_configured"
         payload["updatedAt"] = payload["lastTestedAt"]
         saved = save_record("provider_connections", connection_id, payload)
         return ProviderConnectionTestResult(
@@ -293,11 +401,15 @@ def test_provider_connection(connection_id: str, workspace_id: str | None = None
         ping_openai_compatible(payload["baseUrl"], api_key, payload["defaultModel"], auth_type)
         payload["lastStatus"] = "healthy"
         payload["lastError"] = None
+        if payload.get("status") == "rotating":
+            payload["status"] = "active"
+        payload["lastRouteDecision"] = "test_healthy"
         ok = True
         message = "Provider accepted the OpenAI-compatible test request."
     except Exception as exc:  # noqa: BLE001 - persist operator-facing health reason.
         payload["lastStatus"] = "failed"
         payload["lastError"] = str(exc)[:240]
+        payload["lastRouteDecision"] = "test_failed"
         ok = False
         message = payload["lastError"]
     payload["lastTestedAt"] = datetime.now().isoformat()
@@ -379,7 +491,7 @@ def list_provider_statuses() -> list[ProviderStatus]:
                 supportsChat=connection.supportsChat,
                 supportsEmbeddings=connection.supportsEmbeddings,
                 supportsVision=connection.supportsVision,
-                status=connection.lastStatus if connection.lastStatus != "untested" else "configured" if connection.configured else "not_configured",
+                status=connection.status if connection.status != "active" else connection.lastStatus if connection.lastStatus != "untested" else "configured" if connection.configured else "not_configured",
             )
         )
     return sorted(statuses, key=lambda item: (item.source != "local", item.priority, item.label.lower()))
@@ -399,6 +511,13 @@ def public_provider_connection(payload: dict[str, Any]) -> ProviderConnection:
         supportsChat=bool(payload.get("supportsChat", True)),
         supportsEmbeddings=bool(payload.get("supportsEmbeddings", False)),
         supportsVision=bool(payload.get("supportsVision", False)),
+        status=payload.get("status", "active"),
+        disabledAt=payload.get("disabledAt"),
+        disabledReason=payload.get("disabledReason"),
+        rotatedAt=payload.get("rotatedAt"),
+        rotatedBy=payload.get("rotatedBy"),
+        lastUsedAt=payload.get("lastUsedAt"),
+        lastRouteDecision=payload.get("lastRouteDecision"),
         lastTestedAt=payload.get("lastTestedAt"),
         lastStatus=payload.get("lastStatus", "untested"),
         lastError=payload.get("lastError"),
@@ -415,6 +534,8 @@ def configured_connection_providers() -> list[RuntimeProvider]:
         records = [record for record in records if record.get("workspaceId") == workspace_id]
     for record in records:
         api_key = decrypt_secret(record.get("encryptedApiKey"))
+        if record.get("status", "active") != "active":
+            continue
         if provider_auth_type(record.get("providerId", "custom")) != "none" and not api_key:
             continue
         if not record.get("configured"):
@@ -429,6 +550,7 @@ def configured_connection_providers() -> list[RuntimeProvider]:
                 source="connection",
                 priority=record.get("priority", 100),
                 environment=record.get("environment", "all"),
+                connection_id=record["id"],
             )
         )
     return providers
