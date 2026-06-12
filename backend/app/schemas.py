@@ -1211,6 +1211,105 @@ class SettingsPayload(BaseModel):
     nextInvoice: str | None = None
 
 
+DataGovernanceMode = Literal["monitor", "enforced"]
+LegalHoldStatus = Literal["active", "released"]
+
+
+class DataRetentionPolicy(BaseModel):
+    schemaVersion: Literal["neuralops.data-retention-policy.v1"] = "neuralops.data-retention-policy.v1"
+    retentionDays: int = Field(default=30, ge=1, le=3650)
+    domains: list[str] = Field(default_factory=list, min_length=1, max_length=64)
+    mode: DataGovernanceMode = "monitor"
+    updatedAt: str
+    updatedBy: str = "system"
+    workspaceId: str | None = None
+
+
+class DataRetentionPolicyUpdate(BaseModel):
+    retentionDays: int = Field(ge=1, le=3650)
+    domains: list[str] = Field(default_factory=list, min_length=1, max_length=64)
+    mode: DataGovernanceMode = "monitor"
+
+
+class DataInventoryDomain(BaseModel):
+    domain: str
+    totalRecords: int = Field(ge=0)
+    eligibleRecords: int = Field(ge=0)
+    protectedRecords: int = Field(ge=0)
+    oldestRecordAt: str | None = None
+    newestRecordAt: str | None = None
+    storageBackend: Literal["sqlite", "postgres"]
+    workspaceId: str
+
+
+class LegalHoldCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    domains: list[str] = Field(default_factory=list, min_length=1, max_length=64)
+    matchText: str = Field(default="", max_length=500)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class LegalHoldPatchRequest(BaseModel):
+    status: LegalHoldStatus | None = None
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class LegalHold(BaseModel):
+    id: str
+    name: str
+    domains: list[str]
+    matchText: str = ""
+    reason: str
+    status: LegalHoldStatus = "active"
+    createdAt: str
+    updatedAt: str
+    releasedAt: str | None = None
+    workspaceId: str | None = None
+
+
+class PurgeSimulationRequest(BaseModel):
+    domains: list[str] = Field(default_factory=list, max_length=64)
+
+
+class PurgeSimulation(BaseModel):
+    id: str
+    policy: DataRetentionPolicy
+    domains: list[DataInventoryDomain]
+    eligibleRecords: int = Field(ge=0)
+    protectedRecords: int = Field(ge=0)
+    confirmation: str
+    generatedAt: str
+    workspaceId: str
+
+
+class PurgeRunRequest(BaseModel):
+    simulationId: str = Field(min_length=1)
+    confirmation: str = Field(min_length=1)
+
+
+class PurgeJob(BaseModel):
+    id: str
+    simulationId: str
+    deletedRecords: int = Field(ge=0)
+    protectedRecords: int = Field(ge=0)
+    domains: list[str]
+    generatedAt: str
+    workspaceId: str
+
+
+class DataGovernanceEvidence(BaseModel):
+    schemaVersion: Literal["neuralops.data-governance.evidence.v1"] = "neuralops.data-governance.evidence.v1"
+    workspaceId: str
+    decision: Literal["allow", "review", "block"]
+    policy: DataRetentionPolicy
+    inventory: list[DataInventoryDomain]
+    legalHolds: list[LegalHold]
+    latestSimulation: PurgeSimulation | None = None
+    latestPurgeJob: PurgeJob | None = None
+    recommendations: list[str] = Field(default_factory=list)
+    generatedAt: str
+
+
 class WorkspaceMember(BaseModel):
     id: str
     workspaceId: str

@@ -78,6 +78,114 @@ def test_system_status_exposes_truth_contract(client: TestClient) -> None:
     assert payload["readinessScore"] < 100
 
 
+def test_data_governance_policy_hold_simulation_and_confirmed_purge(client: TestClient) -> None:
+    database.save_record(
+        "traces",
+        "tr_old_delete",
+        {
+            "id": "tr_old_delete",
+            "workspaceId": "local-workspace",
+            "timestamp": "2024-01-01T00:00:00",
+            "session": "delete_me",
+            "environment": "prod",
+            "model": "pytest-model",
+            "tokens": 100,
+            "latency": "1.00s",
+            "cost": "$0.001",
+            "status": "success",
+            "score": 0.95,
+            "prompt": "ordinary historical trace",
+            "output": "eligible for retention purge",
+        },
+    )
+    database.save_record(
+        "traces",
+        "tr_old_hold",
+        {
+            "id": "tr_old_hold",
+            "workspaceId": "local-workspace",
+            "timestamp": "2024-01-01T00:00:00",
+            "session": "legal_hold",
+            "environment": "prod",
+            "model": "pytest-model",
+            "tokens": 100,
+            "latency": "1.00s",
+            "cost": "$0.001",
+            "status": "success",
+            "score": 0.95,
+            "prompt": "VIP legal case customer trace",
+            "output": "must stay protected",
+        },
+    )
+
+    policy = client.put(
+        "/api/data-governance/policy",
+        json={"retentionDays": 30, "domains": ["traces"], "mode": "enforced"},
+    )
+    assert policy.status_code == 200
+    assert policy.json()["retentionDays"] == 30
+
+    hold = client.post(
+        "/api/data-governance/legal-holds",
+        json={
+            "name": "VIP litigation hold",
+            "domains": ["traces"],
+            "matchText": "VIP legal case",
+            "reason": "Customer dispute investigation",
+        },
+    )
+    assert hold.status_code == 200
+    assert hold.json()["status"] == "active"
+
+    inventory = client.get("/api/data-governance/inventory")
+    assert inventory.status_code == 200
+    traces_domain = next(domain for domain in inventory.json() if domain["domain"] == "traces")
+    assert traces_domain["totalRecords"] == 2
+    assert traces_domain["eligibleRecords"] == 1
+    assert traces_domain["protectedRecords"] == 1
+
+    simulation = client.post("/api/data-governance/purge/simulate", json={"domains": ["traces"]})
+    assert simulation.status_code == 200
+    simulation_payload = simulation.json()
+    assert simulation_payload["eligibleRecords"] == 1
+    assert simulation_payload["protectedRecords"] == 1
+    assert simulation_payload["confirmation"] == f"PURGE {simulation_payload['id']}"
+
+    rejected = client.post(
+        "/api/data-governance/purge/run",
+        json={"simulationId": simulation_payload["id"], "confirmation": "PURGE everything"},
+    )
+    assert rejected.status_code == 400
+
+    purge = client.post(
+        "/api/data-governance/purge/run",
+        json={"simulationId": simulation_payload["id"], "confirmation": simulation_payload["confirmation"]},
+    )
+    assert purge.status_code == 200
+    purge_payload = purge.json()
+    assert purge_payload["deletedRecords"] == 1
+    assert purge_payload["protectedRecords"] == 1
+
+    traces = client.get("/api/traces").json()
+    trace_ids = {trace["id"] for trace in traces}
+    assert "tr_old_delete" not in trace_ids
+    assert "tr_old_hold" in trace_ids
+
+    evidence = client.get("/api/data-governance/evidence")
+    assert evidence.status_code == 200
+    assert evidence.json()["latestPurgeJob"]["id"] == purge_payload["id"]
+    assert evidence.json()["legalHolds"][0]["id"] == hold.json()["id"]
+
+    audit = client.get("/api/audit").json()
+    event_types = {event["type"] for event in audit}
+    assert {
+        "data_governance.policy.update",
+        "data_governance.legal_hold.create",
+        "data_governance.purge.simulate",
+        "data_governance.purge.run",
+    }.issubset(event_types)
+
+
 def test_onboarding_status_alias_exposes_proof_loop_truth(client: TestClient) -> None:
     response = client.get("/api/onboarding/status")
     assert response.status_code == 200
@@ -334,6 +442,83 @@ def auth_header(email: str, workspace_id: str = "acme-workspace") -> dict[str, s
     return {"Authorization": f"Bearer {token}"}
 
 
+def test_data_governance_purge_is_workspace_scoped(tmp_path: Path) -> None:
+    database.DB_PATH = tmp_path / "neuralops-governance-scope-test.sqlite3"
+    database.POSTGRES_URL = None
+    os.environ["NEURALOPS_DB_PATH"] = str(database.DB_PATH)
+    os.environ["NEURALOPS_AUTH_REQUIRED"] = "true"
+    os.environ["SUPABASE_JWT_SECRET"] = "test-jwt-secret"
+    try:
+        with TestClient(app) as test_client:
+            owner_headers = auth_header("owner@example.com", "owner-workspace")
+            other_headers = auth_header("other@example.com", "other-workspace")
+            assert test_client.get("/api/workspace", headers=owner_headers).status_code == 200
+            assert test_client.get("/api/workspace", headers=other_headers).status_code == 200
+            database.save_record(
+                "traces",
+                "owner-workspace:tr_owner_old",
+                {
+                    "id": "tr_owner_old",
+                    "workspaceId": "owner-workspace",
+                    "timestamp": "2024-01-01T00:00:00",
+                    "session": "owner_session",
+                    "environment": "prod",
+                    "model": "pytest-model",
+                    "tokens": 1,
+                    "latency": "0.10s",
+                    "cost": "$0.001",
+                    "status": "success",
+                    "score": 0.9,
+                    "prompt": "owner old trace",
+                    "output": "delete only this workspace record",
+                },
+            )
+            database.save_record(
+                "traces",
+                "other-workspace:tr_other_old",
+                {
+                    "id": "tr_other_old",
+                    "workspaceId": "other-workspace",
+                    "timestamp": "2024-01-01T00:00:00",
+                    "session": "other_session",
+                    "environment": "prod",
+                    "model": "pytest-model",
+                    "tokens": 1,
+                    "latency": "0.10s",
+                    "cost": "$0.001",
+                    "status": "success",
+                    "score": 0.9,
+                    "prompt": "other old trace",
+                    "output": "must not be touched",
+                },
+            )
+
+            policy = test_client.put(
+                "/api/data-governance/policy",
+                headers=owner_headers,
+                json={"retentionDays": 30, "domains": ["traces"], "mode": "enforced"},
+            )
+            assert policy.status_code == 200
+            simulation = test_client.post(
+                "/api/data-governance/purge/simulate",
+                headers=owner_headers,
+                json={"domains": ["traces"]},
+            ).json()
+            assert simulation["eligibleRecords"] == 1
+            purge = test_client.post(
+                "/api/data-governance/purge/run",
+                headers=owner_headers,
+                json={"simulationId": simulation["id"], "confirmation": simulation["confirmation"]},
+            )
+            assert purge.status_code == 200
+            assert purge.json()["deletedRecords"] == 1
+            assert database.get_record("traces", "owner-workspace:tr_owner_old") is None
+            assert database.get_record("traces", "other-workspace:tr_other_old") is not None
+    finally:
+        os.environ.pop("NEURALOPS_AUTH_REQUIRED", None)
+        os.environ.pop("SUPABASE_JWT_SECRET", None)
+
+
 def test_workspace_rbac_denies_viewer_writes_and_records_access_audit(tmp_path: Path) -> None:
     database.DB_PATH = tmp_path / "neuralops-rbac-test.sqlite3"
     database.POSTGRES_URL = None
@@ -479,7 +664,8 @@ def test_production_readiness_reports_tenant_controls(tmp_path: Path) -> None:
             assert checks["workspace_isolation"]["state"] == "pass"
             assert checks["rbac_enforced"]["state"] == "pass"
             assert checks["database"]["state"] == "review"
-            assert payload["decision"] == "review"
+            assert checks["data_governance"]["state"] == "block"
+            assert payload["decision"] == "block"
             assert payload["workspaceId"] == "owner-workspace"
     finally:
         os.environ.pop("NEURALOPS_AUTH_REQUIRED", None)

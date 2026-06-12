@@ -137,6 +137,21 @@ test('all product tabs render without console errors and Evidence gate runs', as
   await page.getByRole('button', { name: 'Register Endpoint' }).click();
   expect((await webhookResponse).ok()).toBe(true);
   await expect(page.getByText(/Backend registered webhook/i)).toBeVisible();
+  await expect(page.getByText('Data Governance')).toBeVisible();
+  const policyResponse = page.waitForResponse((response) => response.url().includes('/api/data-governance/policy') && response.request().method() === 'PUT');
+  await page.getByRole('button', { name: 'Save Governance Policy' }).click();
+  expect((await policyResponse).ok()).toBe(true);
+  await page.getByPlaceholder('Hold name').fill(`Playwright Hold ${Date.now()}`);
+  await page.getByPlaceholder('Match text, case ID, customer, trace marker').fill('playwright-governance-hold');
+  await page.getByPlaceholder('Reason').fill('Playwright governance safety check');
+  const holdResponse = page.waitForResponse((response) => response.url().includes('/api/data-governance/legal-holds') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Create Legal Hold' }).click();
+  expect((await holdResponse).ok()).toBe(true);
+  await expect(page.getByText(/Legal hold created/i)).toBeVisible();
+  const purgeSimulationResponse = page.waitForResponse((response) => response.url().includes('/api/data-governance/purge/simulate'));
+  await page.getByRole('button', { name: 'Simulate Purge' }).click();
+  expect((await purgeSimulationResponse).ok()).toBe(true);
+  await expect(page.locator('.code-font', { hasText: /eligible.*protected/i }).last()).toBeVisible();
 
   await sidebar.getByRole('button', { name: 'Automations', exact: true }).click();
   await expect(page.getByText('Automation Center')).toBeVisible();

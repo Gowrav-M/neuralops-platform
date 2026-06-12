@@ -102,6 +102,10 @@ from .schemas import (
     AgentRunRequest,
     AgentRunResponse,
     DashboardSnapshot,
+    DataGovernanceEvidence,
+    DataInventoryDomain,
+    DataRetentionPolicy,
+    DataRetentionPolicyUpdate,
     EstateEdge,
     EstateGraph,
     EstateHealth,
@@ -120,6 +124,9 @@ from .schemas import (
     LabRunRequest,
     LabRunResponse,
     LabVariantResult,
+    LegalHold,
+    LegalHoldCreateRequest,
+    LegalHoldPatchRequest,
     OnboardingStatus,
     OnboardingStep,
     OtelIngestRequest,
@@ -179,6 +186,10 @@ from .schemas import (
     ProviderConnectionTestResult,
     ProviderPreset,
     PromptVersion,
+    PurgeJob,
+    PurgeRunRequest,
+    PurgeSimulation,
+    PurgeSimulationRequest,
     RagRetrievalTestRequest,
     RagQuery,
     ReleaseGateCheck,
@@ -237,6 +248,42 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="NeuralOps Platform API", version="0.1.0", lifespan=lifespan)
 SETTINGS_WRITE_LOCK = Lock()
+DATA_GOVERNANCE_DOMAINS = [
+    "traces",
+    "prompts",
+    "evals",
+    "rag",
+    "policies",
+    "incidents",
+    "costs",
+    "agent_runs",
+    "agent_jobs",
+    "lab_experiments",
+    "gateway_route_events",
+    "gateway_request_logs",
+    "gateway_budgets",
+    "gateway_cache_entries",
+    "provider_connections",
+    "provider_calibrations",
+    "release_gates",
+    "release_gate_definitions",
+    "replay_gates",
+    "dataset_replay_gates",
+    "evidence_reports",
+    "evidence_packs",
+    "control_exports",
+    "ai_systems",
+    "ai_system_edges",
+    "ai_system_health",
+    "ai_slos",
+    "ai_slo_evaluations",
+    "risk_exceptions",
+    "detections",
+    "automation_rules",
+    "automation_events",
+    "connector_deliveries",
+    "audit",
+]
 
 allowed_origins = [
     origin.strip()
@@ -1134,6 +1181,7 @@ def build_production_readiness() -> ProductionReadinessReport:
     latest_calibration = latest_provider_calibration()
     gateway_policy = gateway_routing_policy()
     access_audit_count = len([item for item in scoped_records("audit") if str(item.get("type", "")).startswith("access.")])
+    governance_evidence = build_data_governance_evidence()
     checks = [
         readiness_check(
             "auth_required",
@@ -1180,6 +1228,16 @@ def build_production_readiness() -> ProductionReadinessReport:
             "Gateway routing policy",
             "pass" if gateway_policy.rateLimitPerMinute > 0 else "block",
             f"Strategy {gateway_policy.strategy}, rate limit {gateway_policy.rateLimitPerMinute}/minute.",
+        ),
+        readiness_check(
+            "data_governance",
+            "Data governance and retention",
+            "pass" if governance_evidence.decision == "allow" else "block",
+            (
+                f"Retention policy covers {len(governance_evidence.policy.domains)} domain(s), "
+                f"{len(governance_evidence.legalHolds)} legal hold(s), "
+                f"latest simulation {governance_evidence.latestSimulation.id if governance_evidence.latestSimulation else 'missing'}."
+            ),
         ),
         readiness_check(
             "access_audit",
@@ -1554,6 +1612,10 @@ def build_system_status() -> SystemStatus:
         "ai_slo_evaluations",
         "risk_exceptions",
         "control_exports",
+        "data_retention_policies",
+        "legal_holds",
+        "data_purge_simulations",
+        "data_purge_jobs",
         "audit",
     ]
     if auth_required():
@@ -1576,6 +1638,10 @@ def build_system_status() -> SystemStatus:
     calibration_count = record_counts["provider_calibrations"]
     latest_calibration = latest_provider_calibration()
     member_count = record_counts["workspace_members"]
+    governance_policy_saved = explicit_data_retention_policy_exists()
+    governance_simulation_count = record_counts["data_purge_simulations"]
+    governance_purge_count = record_counts["data_purge_jobs"]
+    governance_hold_count = record_counts["legal_holds"]
     blockers: list[str] = []
 
     features = [
@@ -1585,6 +1651,17 @@ def build_system_status() -> SystemStatus:
             state="persisted",
             evidence=f"{storage_backend()} storage with {sum(record_counts.values())} record(s)",
             action="All product data is read from and written to the backend store.",
+        ),
+        FeatureTruth(
+            id="data_governance",
+            label="Data Governance + Retention",
+            state="persisted" if governance_policy_saved and governance_simulation_count else "not_configured",
+            evidence=(
+                f"{record_counts['data_retention_policies']} retention policy record(s), "
+                f"{governance_hold_count} legal hold(s), {governance_simulation_count} purge simulation(s), "
+                f"{governance_purge_count} confirmed purge job(s)"
+            ),
+            action="Create an explicit retention policy and run a purge simulation before public deployment.",
         ),
         FeatureTruth(
             id="workspace_rbac",
@@ -4034,6 +4111,7 @@ def build_evidence_report() -> EvidenceReport:
     gate = latest_release_gate()
     replay_gate = latest_replay_gate()
     dataset_replay_gate = latest_dataset_replay_gate()
+    governance_evidence = build_data_governance_evidence()
     saved_gates = list_release_gate_definitions()
     summary = {
         "decision": (
@@ -4049,6 +4127,9 @@ def build_evidence_report() -> EvidenceReport:
         "savedReleaseGates": len(saved_gates),
         "latestReplayGateDecision": replay_gate.decision if replay_gate else "not_run",
         "latestDatasetReplayGateDecision": dataset_replay_gate.decision if dataset_replay_gate else "not_run",
+        "dataGovernanceDecision": governance_evidence.decision,
+        "dataGovernanceProtectedRecords": sum(domain.protectedRecords for domain in governance_evidence.inventory),
+        "dataGovernanceEligibleRecords": sum(domain.eligibleRecords for domain in governance_evidence.inventory),
     }
     markdown_lines = [
         "# NeuralOps Evidence Report",
@@ -4061,9 +4142,19 @@ def build_evidence_report() -> EvidenceReport:
         f"- Latest gate decision: {gate.decision if gate else 'not_run'}",
         f"- Latest replay gate decision: {replay_gate.decision if replay_gate else 'not_run'}",
         f"- Latest dataset replay gate decision: {dataset_replay_gate.decision if dataset_replay_gate else 'not_run'}",
+        f"- Data governance decision: {governance_evidence.decision}",
         "",
         "## Feature Truth Contract",
         *[f"- **{feature.label}**: `{feature.state}` - {feature.evidence}" for feature in status.features],
+        "",
+        "## Data Governance",
+        f"- Retention policy: `{governance_evidence.policy.retentionDays}` day(s), `{governance_evidence.policy.mode}` mode",
+        f"- Inventory domains: `{len(governance_evidence.inventory)}`",
+        f"- Eligible records: `{sum(domain.eligibleRecords for domain in governance_evidence.inventory)}`",
+        f"- Protected records: `{sum(domain.protectedRecords for domain in governance_evidence.inventory)}`",
+        f"- Legal holds: `{len(governance_evidence.legalHolds)}`",
+        f"- Latest simulation: `{governance_evidence.latestSimulation.id if governance_evidence.latestSimulation else 'not_run'}`",
+        f"- Latest purge job: `{governance_evidence.latestPurgeJob.id if governance_evidence.latestPurgeJob else 'not_run'}`",
     ]
     if gate:
         markdown_lines.extend(
@@ -4334,6 +4425,159 @@ GATEWAY_PRICE_TABLE: dict[str, tuple[float, float]] = {
 
 def now_iso() -> str:
     return datetime.now().isoformat()
+
+
+def validate_governance_domains(domains: list[str] | None) -> list[str]:
+    selected = domains or DATA_GOVERNANCE_DOMAINS
+    unknown = sorted({domain for domain in selected if domain not in DATA_GOVERNANCE_DOMAINS})
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown data governance domain(s): {', '.join(unknown)}")
+    return list(dict.fromkeys(selected))
+
+
+def default_data_retention_policy() -> DataRetentionPolicy:
+    settings_payload = settings_payload_or_404()
+    return DataRetentionPolicy(
+        retentionDays=int(settings_payload.get("retentionDays", 30)),
+        domains=DATA_GOVERNANCE_DOMAINS,
+        mode="monitor",
+        updatedAt=now_iso(),
+        updatedBy="system",
+        workspaceId=current_workspace_id(),
+    )
+
+
+def data_retention_policy() -> DataRetentionPolicy:
+    record = get_scoped_record("data_retention_policies", "default")
+    if record is None:
+        return default_data_retention_policy()
+    return DataRetentionPolicy.model_validate(record)
+
+
+def explicit_data_retention_policy_exists() -> bool:
+    return get_scoped_record("data_retention_policies", "default") is not None
+
+
+def active_legal_holds() -> list[LegalHold]:
+    holds = [LegalHold.model_validate(item) for item in scoped_records("legal_holds")]
+    return sorted((hold for hold in holds if hold.status == "active"), key=lambda item: item.createdAt, reverse=True)
+
+
+def all_legal_holds() -> list[LegalHold]:
+    holds = [LegalHold.model_validate(item) for item in scoped_records("legal_holds")]
+    return sorted(holds, key=lambda item: item.createdAt, reverse=True)
+
+
+def record_time(record: dict[str, Any]) -> datetime | None:
+    for field in ("timestamp", "createdAt", "generatedAt", "updatedAt", "time", "date"):
+        value = record.get(field)
+        if not value:
+            continue
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=None)
+        except ValueError:
+            continue
+    return None
+
+
+def record_matches_hold(domain: str, record: dict[str, Any], holds: list[LegalHold]) -> bool:
+    serialized = json.dumps(record, default=str, separators=(",", ":")).lower()
+    for hold in holds:
+        if domain not in hold.domains:
+            continue
+        match_text = hold.matchText.strip().lower()
+        if not match_text or match_text in serialized:
+            return True
+    return False
+
+
+def governance_record_id(record: dict[str, Any]) -> str | None:
+    record_id = record.get("id")
+    return str(record_id) if record_id else None
+
+
+def governance_cutoff(policy: DataRetentionPolicy) -> datetime:
+    return datetime.now() - timedelta(days=policy.retentionDays)
+
+
+def governance_candidates(policy: DataRetentionPolicy, domains: list[str] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[DataInventoryDomain]]:
+    selected_domains = validate_governance_domains(domains or policy.domains)
+    cutoff = governance_cutoff(policy)
+    holds = active_legal_holds()
+    eligible: list[dict[str, Any]] = []
+    protected: list[dict[str, Any]] = []
+    inventory: list[DataInventoryDomain] = []
+    for domain in selected_domains:
+        records = scoped_records(domain)
+        timestamps = [timestamp for timestamp in (record_time(record) for record in records) if timestamp is not None]
+        domain_eligible: list[dict[str, Any]] = []
+        domain_protected: list[dict[str, Any]] = []
+        for record in records:
+            timestamp = record_time(record)
+            if timestamp is None or timestamp >= cutoff:
+                continue
+            record_id = governance_record_id(record)
+            if record_id is None:
+                continue
+            candidate = {"domain": domain, "id": record_id, "timestamp": timestamp.isoformat()}
+            if record_matches_hold(domain, record, holds):
+                domain_protected.append(candidate)
+            else:
+                domain_eligible.append(candidate)
+        eligible.extend(domain_eligible)
+        protected.extend(domain_protected)
+        inventory.append(
+            DataInventoryDomain(
+                domain=domain,
+                totalRecords=len(records),
+                eligibleRecords=len(domain_eligible),
+                protectedRecords=len(domain_protected),
+                oldestRecordAt=min(timestamps).isoformat() if timestamps else None,
+                newestRecordAt=max(timestamps).isoformat() if timestamps else None,
+                storageBackend=storage_backend(),
+                workspaceId=current_workspace_id(),
+            )
+        )
+    return eligible, protected, inventory
+
+
+def latest_governance_simulation() -> PurgeSimulation | None:
+    record = latest_scoped_record("data_purge_simulations", "generatedAt")
+    return PurgeSimulation.model_validate(record) if record else None
+
+
+def latest_governance_purge_job() -> PurgeJob | None:
+    record = latest_scoped_record("data_purge_jobs", "generatedAt")
+    return PurgeJob.model_validate(record) if record else None
+
+
+def build_data_governance_evidence() -> DataGovernanceEvidence:
+    policy = data_retention_policy()
+    _eligible, _protected, inventory = governance_candidates(policy)
+    legal_holds = all_legal_holds()
+    latest_simulation = latest_governance_simulation()
+    latest_purge = latest_governance_purge_job()
+    recommendations: list[str] = []
+    if not explicit_data_retention_policy_exists():
+        recommendations.append("Create an explicit retention policy before production launch.")
+    if latest_simulation is None:
+        recommendations.append("Run a purge simulation before launch so operators know what would be deleted.")
+    active_hold_count = sum(1 for hold in legal_holds if hold.status == "active")
+    if active_hold_count:
+        recommendations.append(f"{active_hold_count} active legal hold(s) protect matching records from purge.")
+    decision = "block" if not explicit_data_retention_policy_exists() or latest_simulation is None else "allow"
+    return DataGovernanceEvidence(
+        workspaceId=current_workspace_id(),
+        decision=decision,
+        policy=policy,
+        inventory=inventory,
+        legalHolds=legal_holds,
+        latestSimulation=latest_simulation,
+        latestPurgeJob=latest_purge,
+        recommendations=recommendations,
+        generatedAt=now_iso(),
+    )
 
 
 def default_gateway_routing_policy() -> GatewayRoutingPolicy:
@@ -8357,6 +8601,170 @@ def update_retention(request: RetentionUpdateRequest) -> SettingsPayload:
         payload["retentionDays"] = request.retentionDays
         saved = save_record("settings", settings_record_id(), payload)
     return SettingsPayload.model_validate(public_settings_payload(saved))
+
+
+@app.get("/api/data-governance/inventory", response_model=list[DataInventoryDomain])
+def data_governance_inventory() -> list[DataInventoryDomain]:
+    policy = data_retention_policy()
+    _eligible, _protected, inventory = governance_candidates(policy)
+    return inventory
+
+
+@app.get("/api/data-governance/policy", response_model=DataRetentionPolicy)
+def get_data_governance_policy() -> DataRetentionPolicy:
+    return data_retention_policy()
+
+
+@app.put("/api/data-governance/policy", response_model=DataRetentionPolicy)
+def put_data_governance_policy(request: DataRetentionPolicyUpdate) -> DataRetentionPolicy:
+    require_permission("settings:write", "data_governance.policy")
+    domains = validate_governance_domains(request.domains)
+    policy = DataRetentionPolicy(
+        retentionDays=request.retentionDays,
+        domains=domains,
+        mode=request.mode,
+        updatedAt=now_iso(),
+        updatedBy=current_user_email(),
+        workspaceId=current_workspace_id(),
+    )
+    save_scoped_record("data_retention_policies", "default", policy.model_dump())
+    with SETTINGS_WRITE_LOCK:
+        payload = settings_payload_or_404()
+        payload["retentionDays"] = request.retentionDays
+        save_record("settings", settings_record_id(), payload)
+    save_audit_event(
+        "data_governance.policy.update",
+        current_user_email(),
+        "data_retention_policy",
+        "allow",
+        f"Retention policy set to {request.retentionDays} day(s) for {len(domains)} domain(s).",
+    )
+    return policy
+
+
+@app.get("/api/data-governance/legal-holds", response_model=list[LegalHold])
+def list_data_governance_legal_holds() -> list[LegalHold]:
+    return all_legal_holds()
+
+
+@app.post("/api/data-governance/legal-holds", response_model=LegalHold)
+def create_data_governance_legal_hold(request: LegalHoldCreateRequest) -> LegalHold:
+    require_permission("settings:write", "data_governance.legal_hold")
+    domains = validate_governance_domains(request.domains)
+    now = now_iso()
+    hold = LegalHold(
+        id=f"hold_{token_hex(6)}",
+        name=request.name,
+        domains=domains,
+        matchText=request.matchText,
+        reason=request.reason,
+        status="active",
+        createdAt=now,
+        updatedAt=now,
+        workspaceId=current_workspace_id(),
+    )
+    save_scoped_record("legal_holds", hold.id, hold.model_dump())
+    save_audit_event(
+        "data_governance.legal_hold.create",
+        current_user_email(),
+        hold.id,
+        "review",
+        f"Created legal hold {hold.name} for {len(domains)} domain(s).",
+    )
+    return hold
+
+
+@app.patch("/api/data-governance/legal-holds/{hold_id}", response_model=LegalHold)
+def patch_data_governance_legal_hold(hold_id: str, request: LegalHoldPatchRequest) -> LegalHold:
+    require_permission("settings:write", f"data_governance.legal_hold.{hold_id}")
+    payload = get_scoped_record("legal_holds", hold_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Legal hold not found")
+    hold = LegalHold.model_validate(payload)
+    patch = request.model_dump(exclude_unset=True)
+    updated = hold.model_dump()
+    updated.update({key: value for key, value in patch.items() if value is not None})
+    updated["updatedAt"] = now_iso()
+    if updated.get("status") == "released" and hold.status != "released":
+        updated["releasedAt"] = now_iso()
+    saved = save_scoped_record("legal_holds", hold_id, updated)
+    result = LegalHold.model_validate(saved)
+    save_audit_event(
+        "data_governance.legal_hold.update",
+        current_user_email(),
+        result.id,
+        "allow" if result.status == "released" else "review",
+        f"Legal hold {result.name} updated to {result.status}.",
+    )
+    return result
+
+
+@app.post("/api/data-governance/purge/simulate", response_model=PurgeSimulation)
+def simulate_data_governance_purge(request: PurgeSimulationRequest) -> PurgeSimulation:
+    policy = data_retention_policy()
+    domains = validate_governance_domains(request.domains or policy.domains)
+    simulation_policy = policy.model_copy(update={"domains": domains})
+    eligible, protected, inventory = governance_candidates(simulation_policy, domains)
+    simulation = PurgeSimulation(
+        id=f"purge_sim_{token_hex(6)}",
+        policy=simulation_policy,
+        domains=inventory,
+        eligibleRecords=len(eligible),
+        protectedRecords=len(protected),
+        confirmation="",
+        generatedAt=now_iso(),
+        workspaceId=current_workspace_id(),
+    )
+    simulation.confirmation = f"PURGE {simulation.id}"
+    save_scoped_record("data_purge_simulations", simulation.id, simulation.model_dump())
+    save_audit_event(
+        "data_governance.purge.simulate",
+        current_user_email(),
+        simulation.id,
+        "review",
+        f"Purge simulation found {len(eligible)} eligible and {len(protected)} protected record(s).",
+    )
+    return simulation
+
+
+@app.post("/api/data-governance/purge/run", response_model=PurgeJob)
+def run_data_governance_purge(request: PurgeRunRequest) -> PurgeJob:
+    require_permission("settings:write", "data_governance.purge")
+    payload = get_scoped_record("data_purge_simulations", request.simulationId)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Purge simulation not found")
+    simulation = PurgeSimulation.model_validate(payload)
+    if request.confirmation != simulation.confirmation:
+        raise HTTPException(status_code=400, detail=f"Confirmation must exactly match: {simulation.confirmation}")
+    domains = [domain.domain for domain in simulation.domains]
+    eligible, protected, _inventory = governance_candidates(simulation.policy, domains)
+    deleted = 0
+    for candidate in eligible:
+        delete_scoped_record(candidate["domain"], candidate["id"])
+        deleted += 1
+    job = PurgeJob(
+        id=f"purge_job_{token_hex(6)}",
+        simulationId=simulation.id,
+        deletedRecords=deleted,
+        protectedRecords=len(protected),
+        domains=domains,
+        generatedAt=now_iso(),
+        workspaceId=current_workspace_id(),
+    )
+    save_scoped_record("data_purge_jobs", job.id, job.model_dump())
+    save_audit_event(
+        "data_governance.purge.run",
+        current_user_email(),
+        job.id,
+        "block" if deleted else "allow",
+        f"Confirmed purge deleted {deleted} record(s); {len(protected)} record(s) remained protected by legal hold.",
+    )
+    return job
+
+
+@app.get("/api/data-governance/evidence", response_model=DataGovernanceEvidence)
+def data_governance_evidence() -> DataGovernanceEvidence:
+    return build_data_governance_evidence()
 
 
 @app.get("/api/audit", response_model=list[AuditEvent])

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   createApiKey,
+  createDataGovernanceLegalHold,
   createProviderConnection,
   createWebhook,
   createWorkspaceMember,
@@ -10,15 +11,35 @@ import {
   fetchProviderCatalog,
   fetchProviderConnections,
   fetchSettings,
+  fetchDataGovernanceEvidence,
+  fetchDataGovernanceInventory,
+  fetchDataGovernanceLegalHolds,
+  fetchDataGovernancePolicy,
+  patchDataGovernanceLegalHold,
   patchWorkspaceMember,
   rotateProviderConnectionKey,
+  runDataGovernancePurge,
+  simulateDataGovernancePurge,
   testProviderConnection,
+  updateDataGovernancePolicy,
   updateProviderConnection,
   updateRetention,
 } from '../lib/api';
 
 export default function Settings({ addToast, onNavigate }) {
   const [retentionDays, setRetentionDays] = useState(30);
+  const [governancePolicy, setGovernancePolicy] = useState(null);
+  const [governanceInventory, setGovernanceInventory] = useState([]);
+  const [legalHolds, setLegalHolds] = useState([]);
+  const [governanceEvidence, setGovernanceEvidence] = useState(null);
+  const [governanceMode, setGovernanceMode] = useState('monitor');
+  const [newHoldName, setNewHoldName] = useState('');
+  const [newHoldMatchText, setNewHoldMatchText] = useState('');
+  const [newHoldReason, setNewHoldReason] = useState('');
+  const [purgeSimulation, setPurgeSimulation] = useState(null);
+  const [purgeConfirmation, setPurgeConfirmation] = useState('');
+  const [governanceBusy, setGovernanceBusy] = useState(false);
+  const [governanceError, setGovernanceError] = useState('');
   const [apiKeys, setApiKeys] = useState([]);
   const [newKeyName, setNewKeyName] = useState('');
   const [newKeyRole, setNewKeyRole] = useState('Developer');
@@ -72,6 +93,23 @@ export default function Settings({ addToast, onNavigate }) {
   };
 
   const formatRouteDecision = (value) => (value ? value.replaceAll('_', ' ') : 'not routed');
+  const governanceDomains = governancePolicy?.domains || ['traces', 'prompts', 'evidence_reports', 'audit', 'provider_connections'];
+
+  const loadGovernance = async () => {
+    setGovernanceError('');
+    const [policy, inventory, holds, evidence] = await Promise.all([
+      fetchDataGovernancePolicy(),
+      fetchDataGovernanceInventory(),
+      fetchDataGovernanceLegalHolds(),
+      fetchDataGovernanceEvidence(),
+    ]);
+    setGovernancePolicy(policy);
+    setRetentionDays(policy.retentionDays);
+    setGovernanceMode(policy.mode || 'monitor');
+    setGovernanceInventory(inventory);
+    setLegalHolds(holds);
+    setGovernanceEvidence(evidence);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -110,6 +148,23 @@ export default function Settings({ addToast, onNavigate }) {
 
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const timeout = window.setTimeout(() => {
+      loadGovernance()
+        .catch((err) => {
+          if (cancelled) return;
+          setGovernanceError(err instanceof Error ? err.message : 'Data governance API unavailable');
+        });
+    }, 0);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
     };
   }, []);
 
@@ -320,12 +375,105 @@ export default function Settings({ addToast, onNavigate }) {
   };
 
   const handleSaveRetention = async () => {
+    setGovernanceBusy(true);
+    setGovernanceError('');
     try {
       const payload = await updateRetention(retentionDays);
       applySettingsPayload(payload);
-      addToast(`Backend saved data retention at ${retentionDays} days.`, 'success');
-    } catch {
-      addToast('Backend unavailable. Retention setting was not saved.', 'error');
+      const policy = await updateDataGovernancePolicy({
+        retentionDays: Number(retentionDays),
+        domains: governanceDomains,
+        mode: governanceMode,
+      });
+      setGovernancePolicy(policy);
+      await loadGovernance();
+      addToast(`Backend saved governance policy at ${retentionDays} days.`, 'success');
+    } catch (err) {
+      setGovernanceError(err instanceof Error ? err.message : 'Retention setting was not saved.');
+      addToast('Backend unavailable. Governance policy was not saved.', 'error');
+    } finally {
+      setGovernanceBusy(false);
+    }
+  };
+
+  const handleCreateLegalHold = async (e) => {
+    e.preventDefault();
+    if (!newHoldName || !newHoldReason) {
+      addToast('Legal hold name and reason are required.', 'error');
+      return;
+    }
+    setGovernanceBusy(true);
+    setGovernanceError('');
+    try {
+      await createDataGovernanceLegalHold({
+        name: newHoldName,
+        domains: governanceDomains,
+        matchText: newHoldMatchText,
+        reason: newHoldReason,
+      });
+      setNewHoldName('');
+      setNewHoldMatchText('');
+      setNewHoldReason('');
+      await loadGovernance();
+      addToast('Legal hold created and audited.', 'success');
+    } catch (err) {
+      setGovernanceError(err instanceof Error ? err.message : 'Legal hold was not created.');
+      addToast('Backend rejected the legal hold.', 'error');
+    } finally {
+      setGovernanceBusy(false);
+    }
+  };
+
+  const handleReleaseLegalHold = async (holdId) => {
+    setGovernanceBusy(true);
+    setGovernanceError('');
+    try {
+      await patchDataGovernanceLegalHold(holdId, { status: 'released' });
+      await loadGovernance();
+      addToast('Legal hold released and audited.', 'success');
+    } catch (err) {
+      setGovernanceError(err instanceof Error ? err.message : 'Legal hold was not released.');
+      addToast('Backend rejected the legal hold update.', 'error');
+    } finally {
+      setGovernanceBusy(false);
+    }
+  };
+
+  const handleSimulatePurge = async () => {
+    setGovernanceBusy(true);
+    setGovernanceError('');
+    setPurgeConfirmation('');
+    try {
+      const simulation = await simulateDataGovernancePurge({ domains: governanceDomains });
+      setPurgeSimulation(simulation);
+      await loadGovernance();
+      addToast(`Purge simulation found ${simulation.eligibleRecords} eligible record(s).`, 'success');
+    } catch (err) {
+      setGovernanceError(err instanceof Error ? err.message : 'Purge simulation failed.');
+      addToast('Purge simulation failed.', 'error');
+    } finally {
+      setGovernanceBusy(false);
+    }
+  };
+
+  const handleRunPurge = async () => {
+    if (!purgeSimulation) return;
+    setGovernanceBusy(true);
+    setGovernanceError('');
+    try {
+      const job = await runDataGovernancePurge({
+        simulationId: purgeSimulation.id,
+        confirmation: purgeConfirmation,
+      });
+      setPurgeSimulation(null);
+      setPurgeConfirmation('');
+      await loadGovernance();
+      addToast(`Confirmed purge deleted ${job.deletedRecords} eligible record(s).`, job.deletedRecords ? 'error' : 'success');
+    } catch (err) {
+      setGovernanceError(err instanceof Error ? err.message : 'Confirmed purge failed.');
+      addToast('Confirmed purge was rejected.', 'error');
+    } finally {
+      setGovernanceBusy(false);
     }
   };
 
@@ -370,6 +518,16 @@ export default function Settings({ addToast, onNavigate }) {
       addToast('Backend rejected the workspace member removal.', 'error');
     }
   };
+
+  const governanceTotals = governanceInventory.reduce(
+    (totals, domain) => ({
+      totalRecords: totals.totalRecords + (domain.totalRecords || 0),
+      eligibleRecords: totals.eligibleRecords + (domain.eligibleRecords || 0),
+      protectedRecords: totals.protectedRecords + (domain.protectedRecords || 0),
+    }),
+    { totalRecords: 0, eligibleRecords: 0, protectedRecords: 0 }
+  );
+  const activeLegalHoldCount = legalHolds.filter((hold) => hold.status === 'active').length;
 
   return (
     <div className="main-panel">
@@ -815,32 +973,149 @@ export default function Settings({ addToast, onNavigate }) {
 
         {/* Right Side: Retention, SSO, Team RBAC */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-          {/* Data Retention Slider */}
-          <div className="card-container">
-            <span className="card-title">Telemetry Data Retention Limit</span>
-            <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-              Configure retention timelines for raw prompt strings and vector embedding payloads.
-            </p>
+          {/* Data Governance */}
+          <div className="card-container" style={{ gap: '16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+              <div>
+                <span className="card-title">Data Governance</span>
+                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '6px 0 0' }}>
+                  Inventory retained AI records, protect legal-hold data, simulate deletion, and audit confirmed purge jobs.
+                </p>
+              </div>
+              <span className={`badge ${governanceEvidence?.decision === 'allow' ? 'badge-success' : 'badge-error'}`}>
+                {governanceEvidence?.decision || 'review'}
+              </span>
+            </div>
 
-            <div className="canary-slider-container" style={{ marginTop: '6px' }}>
+            {governanceError && (
+              <div className="alert-banner error" style={{ margin: 0 }}>
+                {governanceError}
+              </div>
+            )}
+
+            <div className="metric-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))' }}>
+              <div>
+                <span>Total Records</span>
+                <strong>{governanceTotals.totalRecords}</strong>
+              </div>
+              <div>
+                <span>Eligible</span>
+                <strong>{governanceTotals.eligibleRecords}</strong>
+              </div>
+              <div>
+                <span>Protected</span>
+                <strong>{governanceTotals.protectedRecords}</strong>
+              </div>
+              <div>
+                <span>Legal Holds</span>
+                <strong>{activeLegalHoldCount}</strong>
+              </div>
+            </div>
+
+            <div className="canary-slider-container" style={{ marginTop: '0' }}>
               <div className="canary-slider-labels">
-                <span>Developer Sandbox</span>
-                <span style={{ fontWeight: 700 }}>{retentionDays} Days Retention</span>
+                <span>Retention Policy</span>
+                <span style={{ fontWeight: 700 }}>{retentionDays} Days</span>
               </div>
               <input
                 type="range"
                 min="7"
-                max="90"
+                max="365"
                 step="7"
                 className="canary-range-input"
                 value={retentionDays}
-                onChange={(e) => setRetentionDays(parseInt(e.target.value))}
+                onChange={(e) => setRetentionDays(parseInt(e.target.value, 10))}
               />
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+                <select className="filter-select" value={governanceMode} onChange={(e) => setGovernanceMode(e.target.value)}>
+                  <option value="monitor">Monitor</option>
+                  <option value="enforced">Enforced</option>
+                </select>
+                <button className="btn-primary" onClick={handleSaveRetention} disabled={governanceBusy}>
+                  Save Governance Policy
+                </button>
+              </div>
             </div>
 
-            <button className="btn-primary" onClick={handleSaveRetention}>
-              Save Retention Config
-            </button>
+            <div className="table-container" style={{ padding: '14px' }}>
+              <span style={{ fontSize: '13px', fontWeight: 700 }}>Inventory By Domain</span>
+              <table className="dense-table" style={{ fontSize: '11px', marginTop: '8px' }}>
+                <thead>
+                  <tr>
+                    <th>Domain</th>
+                    <th>Total</th>
+                    <th>Eligible</th>
+                    <th>Protected</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {governanceInventory.slice(0, 8).map((domain) => (
+                    <tr key={domain.domain}>
+                      <td className="code-font">{domain.domain}</td>
+                      <td>{domain.totalRecords}</td>
+                      <td>{domain.eligibleRecords}</td>
+                      <td>{domain.protectedRecords}</td>
+                    </tr>
+                  ))}
+                  {governanceInventory.length === 0 && (
+                    <tr>
+                      <td colSpan="4" style={{ color: 'var(--text-secondary)' }}>No governance inventory has loaded yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <form onSubmit={handleCreateLegalHold} style={{ display: 'flex', flexDirection: 'column', gap: '10px', border: '1px solid var(--border-color)', borderRadius: '12px', padding: '14px' }}>
+              <span style={{ fontSize: '13px', fontWeight: 700 }}>Legal Holds</span>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '10px' }}>
+                <input className="filter-search-input" placeholder="Hold name" value={newHoldName} onChange={(e) => setNewHoldName(e.target.value)} />
+                <input className="filter-search-input" placeholder="Match text, case ID, customer, trace marker" value={newHoldMatchText} onChange={(e) => setNewHoldMatchText(e.target.value)} />
+                <input className="filter-search-input" placeholder="Reason" value={newHoldReason} onChange={(e) => setNewHoldReason(e.target.value)} />
+              </div>
+              <button type="submit" className="btn-primary" disabled={governanceBusy}>
+                Create Legal Hold
+              </button>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {legalHolds.slice(0, 4).map((hold) => (
+                  <div key={hold.id} style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', borderTop: '1px solid var(--border-color)', paddingTop: '8px' }}>
+                    <div style={{ minWidth: 0 }}>
+                      <strong>{hold.name}</strong>
+                      <p style={{ margin: '2px 0 0', color: 'var(--text-secondary)', fontSize: '11px' }}>{hold.reason}</p>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <span className={`badge ${hold.status === 'active' ? 'badge-warning' : 'badge-success'}`}>{hold.status}</span>
+                      {hold.status === 'active' && (
+                        <button type="button" className="btn-secondary" onClick={() => handleReleaseLegalHold(hold.id)} disabled={governanceBusy}>
+                          Release
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </form>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', border: '1px solid var(--border-color)', borderRadius: '12px', padding: '14px' }}>
+              <span style={{ fontSize: '13px', fontWeight: 700 }}>Purge Simulation</span>
+              <p style={{ fontSize: '11.5px', color: 'var(--text-secondary)', margin: 0 }}>
+                Simulation is non-destructive. Running a purge requires exact confirmation text and legal holds always win.
+              </p>
+              <button type="button" className="btn-secondary" onClick={handleSimulatePurge} disabled={governanceBusy}>
+                Simulate Purge
+              </button>
+              {purgeSimulation && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <span className="code-font">
+                    {purgeSimulation.eligibleRecords} eligible / {purgeSimulation.protectedRecords} protected. Type {purgeSimulation.confirmation}
+                  </span>
+                  <input className="filter-search-input" placeholder={purgeSimulation.confirmation} value={purgeConfirmation} onChange={(e) => setPurgeConfirmation(e.target.value)} />
+                  <button type="button" className="btn-primary" onClick={handleRunPurge} disabled={governanceBusy || purgeConfirmation !== purgeSimulation.confirmation}>
+                    Run Confirmed Purge
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Team Members List */}

@@ -733,6 +733,57 @@ export function updateRetention(retentionDays) {
   });
 }
 
+export function fetchDataGovernanceInventory() {
+  return request('/api/data-governance/inventory');
+}
+
+export function fetchDataGovernancePolicy() {
+  return request('/api/data-governance/policy');
+}
+
+export function updateDataGovernancePolicy(payload) {
+  return request('/api/data-governance/policy', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchDataGovernanceLegalHolds() {
+  return request('/api/data-governance/legal-holds');
+}
+
+export function createDataGovernanceLegalHold(payload) {
+  return request('/api/data-governance/legal-holds', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function patchDataGovernanceLegalHold(holdId, patch) {
+  return request(`/api/data-governance/legal-holds/${holdId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function simulateDataGovernancePurge(payload = {}) {
+  return request('/api/data-governance/purge/simulate', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function runDataGovernancePurge(payload) {
+  return request('/api/data-governance/purge/run', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchDataGovernanceEvidence() {
+  return request('/api/data-governance/evidence');
+}
+
 export function patchIncident(incidentId, patch) {
   return request(`/api/incidents/${incidentId}`, {
     method: 'PATCH',
