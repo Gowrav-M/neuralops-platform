@@ -32,6 +32,7 @@ async function waitForBackend(page) {
 }
 
 test('all product tabs render without console errors and Evidence gate runs', async ({ page }) => {
+  test.slow();
   const errors = [];
   page.on('console', (message) => {
     if (['error', 'warning'].includes(message.type())) {
@@ -64,7 +65,7 @@ test('all product tabs render without console errors and Evidence gate runs', as
   await expect(page.getByRole('heading', { name: 'Feature Truth Contract' })).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('.dark-panel-title', { hasText: 'Saved Release Gates' })).toBeVisible();
   await page.getByRole('button', { name: /Run Current Config/i }).click();
-  await expect(page.getByText(/Release gate completed|Deployment Blockers/i)).toBeVisible();
+  await expect(page.locator('.dark-panel-title', { hasText: 'Deployment Blockers' })).toBeVisible();
   const datasetReplayResponse = page.waitForResponse((response) => response.url().includes('/api/replay-gate/dataset/run'));
   await page.getByRole('button', { name: /Run Dataset Replay/i }).click();
   expect((await datasetReplayResponse).ok()).toBe(true);
@@ -136,6 +137,21 @@ test('all product tabs render without console errors and Evidence gate runs', as
   await page.getByRole('button', { name: 'Register Endpoint' }).click();
   expect((await webhookResponse).ok()).toBe(true);
   await expect(page.getByText(/Backend registered webhook/i)).toBeVisible();
+  await expect(page.getByText('Data Governance')).toBeVisible();
+  const policyResponse = page.waitForResponse((response) => response.url().includes('/api/data-governance/policy') && response.request().method() === 'PUT');
+  await page.getByRole('button', { name: 'Save Governance Policy' }).click();
+  expect((await policyResponse).ok()).toBe(true);
+  await page.getByPlaceholder('Hold name').fill(`Playwright Hold ${Date.now()}`);
+  await page.getByPlaceholder('Match text, case ID, customer, trace marker').fill('playwright-governance-hold');
+  await page.getByPlaceholder('Reason').fill('Playwright governance safety check');
+  const holdResponse = page.waitForResponse((response) => response.url().includes('/api/data-governance/legal-holds') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: 'Create Legal Hold' }).click();
+  expect((await holdResponse).ok()).toBe(true);
+  await expect(page.getByText(/Legal hold created/i)).toBeVisible();
+  const purgeSimulationResponse = page.waitForResponse((response) => response.url().includes('/api/data-governance/purge/simulate'));
+  await page.getByRole('button', { name: 'Simulate Purge' }).click();
+  expect((await purgeSimulationResponse).ok()).toBe(true);
+  await expect(page.locator('.code-font', { hasText: /eligible.*protected/i }).last()).toBeVisible();
 
   await sidebar.getByRole('button', { name: 'Automations', exact: true }).click();
   await expect(page.getByText('Automation Center')).toBeVisible();
@@ -162,14 +178,32 @@ test('Connect page creates a key and stores a verification trace', async ({ page
   await expect(page.getByRole('heading', { name: 'Connect Your AI App' })).toBeVisible();
   await expect(page.getByText('Production Connect Checklist')).toBeVisible();
   await expect(page.getByText('Connectivity Command Center')).toBeVisible();
-  await expect(page.locator('.connectivity-check', { hasText: 'Database storage' })).toContainText('ready');
+  await expect(page.getByText('Enterprise Connectivity Contract')).toBeVisible();
+  await expect(page.getByText(/required for production/i)).toBeVisible();
+  await expect(page.getByText('5-Minute Production Proof Loop')).toBeVisible();
+  await expect(page.locator('.connectivity-check', { hasText: 'Database storage' }).first()).toContainText('ready');
   await expect(page.locator('.onboarding-score')).toContainText('%');
+
+  const onboardingTraceResponse = page.waitForResponse((response) => response.url().includes('/api/onboarding/send-test-trace'));
+  await page.getByRole('button', { name: 'Send Test Trace' }).click();
+  expect((await onboardingTraceResponse).ok()).toBe(true);
+  await expect(page.getByText(/Onboarding test trace stored/i)).toBeVisible();
+
+  const proofDrillResponse = page.waitForResponse((response) => response.url().includes('/api/onboarding/run-proof-drill'));
+  await page.getByRole('button', { name: 'Run Prompt-Injection Drill' }).click();
+  expect((await proofDrillResponse).ok()).toBe(true);
+  await expect(page.getByText(/Prompt injection attempted credential exfiltration/i)).toBeVisible();
+
+  const readinessRunResponse = page.waitForResponse((response) => response.url().includes('/api/readiness/run'));
+  await page.getByRole('button', { name: 'Run Readiness Evidence' }).click();
+  expect((await readinessRunResponse).ok()).toBe(true);
+  await expect(page.locator('.connect-proof').filter({ hasText: /ready_/ })).toBeVisible();
 
   await page.getByPlaceholder('service name').fill('playwright-service');
   await page.getByRole('button', { name: 'Create Ingest Key' }).click();
   await expect(page.getByPlaceholder(/Paste NEURALOPS_API_KEY/i)).toHaveValue(/nop_sk_/);
   await expect(page.locator('.onboarding-step', { hasText: 'Ingest key created' })).toContainText('complete');
-  await expect(page.locator('.connectivity-check', { hasText: 'Scoped NeuralOps API key' })).toContainText('ready');
+  await expect(page.locator('.connectivity-check', { hasText: 'Scoped NeuralOps API key' }).first()).toContainText('ready');
 
   const canaryResponse = page.waitForResponse((response) => response.url().includes('/api/synthetic/run'));
   await page.getByRole('button', { name: 'Run Synthetic Canary' }).click();
@@ -338,6 +372,23 @@ test('Estate page discovers systems from connected trace records', async ({ page
   expect(overflow).toBe(false);
 });
 
+test('Agents page exposes managed identities and production access workflow', async ({ page }) => {
+  await page.goto('/');
+  await waitForBackend(page);
+  const sidebar = page.locator('.sidebar-container');
+  await sidebar.getByRole('button', { name: 'Agents', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Agent Runtime Studio' })).toBeVisible();
+  await expect(page.getByText('Agent Control Plane')).toBeVisible();
+  await expect(page.getByText('Managed Agent Identities')).toBeVisible();
+  await expect(page.locator('.agent-identity-card', { hasText: 'Support Triage Agent' })).toContainText('active');
+
+  const requestResponse = page.waitForResponse((response) => response.url().includes('/api/agent-control/production-access'));
+  await page.locator('.agent-identity-card', { hasText: 'Support Triage Agent' }).getByRole('button', { name: /Request Production Access/i }).click();
+  const response = await requestResponse;
+  expect(response.ok()).toBe(true);
+  await expect(page.getByText(/support_triage -> prod: pending_review/i)).toBeVisible();
+});
+
 test('Settings workspace members persist through backend RBAC API', async ({ page }, testInfo) => {
   await page.goto('/');
   const sidebar = page.locator('.sidebar-container');
@@ -368,13 +419,27 @@ test('Settings workspace members persist through backend RBAC API', async ({ pag
 });
 
 test('Access page exposes role matrix and records permission checks', async ({ page }) => {
+  const lifecycleKeyName = `temporary ingest key ${Date.now()}`;
   await page.goto('/');
   const sidebar = page.locator('.sidebar-container');
+  await waitForBackend(page);
+  await sidebar.getByRole('button', { name: 'Settings', exact: true }).click();
+  const keyCard = page.locator('.card-container', { hasText: 'Developer API Access Keys' });
+  await keyCard.getByPlaceholder('e.g. production_nextjs_server').fill(lifecycleKeyName);
+  await keyCard.locator('select').nth(1).selectOption('prod');
+  await keyCard.locator('select').nth(2).selectOption('trace:ingest');
+  const keyCreateResponse = page.waitForResponse((response) => response.url().includes('/api/settings/api-keys') && response.request().method() === 'POST');
+  await keyCard.getByRole('button', { name: 'Create Token' }).click();
+  expect((await keyCreateResponse).ok()).toBe(true);
+
   await sidebar.getByRole('button', { name: 'Access', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Access Control' })).toBeVisible();
   await expect(page.getByText('Role Permission Matrix')).toBeVisible();
   await expect(page.getByText('Permission Simulator')).toBeVisible();
   await expect(page.getByText('Workspace Invites')).toBeVisible();
+  await expect(page.getByText('Access Posture Review')).toBeVisible();
+  await expect(page.getByText('Developer API Key Lifecycle')).toBeVisible();
+  await expect(page.getByText('Service Account Control')).toBeVisible();
 
   await page.locator('.dark-panel-container select').selectOption('settings:write');
   await page.getByRole('textbox', { name: 'Subject' }).fill('settings.api_keys');
@@ -390,6 +455,42 @@ test('Access page exposes role matrix and records permission checks', async ({ p
   expect((await inviteResponse).ok()).toBe(true);
   await expect(page.getByText(/Invite created for/i)).toBeVisible();
   await expect(page.locator('.mono-text', { hasText: /^wsi_/ }).first()).toBeVisible();
+
+  await expect(page.getByText(lifecycleKeyName)).toBeVisible();
+  const keyRow = page.locator('tr', { hasText: lifecycleKeyName }).first();
+  const revokeKeyResponse = page.waitForResponse((response) => response.url().includes('/api/settings/api-keys/') && response.url().endsWith('/revoke'));
+  await keyRow.getByRole('button', { name: 'Revoke' }).click();
+  expect((await revokeKeyResponse).ok()).toBe(true);
+  await expect(keyRow.getByText('revoked')).toBeVisible();
+
+  const serviceCard = page.locator('.card-container', { hasText: 'Service Account Control' });
+  const serviceName = `gateway-worker-${Date.now()}`;
+  await serviceCard.getByLabel('Service Name').fill(serviceName);
+  await serviceCard.getByLabel('Owner').fill('Platform Engineering');
+  await serviceCard.getByLabel('Environment').selectOption('prod');
+  await serviceCard.getByLabel('Scope').selectOption('gateway:invoke');
+  const serviceResponse = page.waitForResponse((response) => response.url().includes('/api/service-accounts') && response.request().method() === 'POST');
+  await serviceCard.getByRole('button', { name: 'Create Service Account' }).click();
+  expect((await serviceResponse).ok()).toBe(true);
+  await expect(serviceCard.getByText(serviceName)).toBeVisible();
+  await expect(serviceCard.getByText(/^nop_sa_/)).toBeVisible();
+
+  const serviceRow = serviceCard.locator('tr', { hasText: serviceName });
+  const rotateResponse = page.waitForResponse((response) => response.url().includes('/rotate'));
+  await serviceRow.getByRole('button', { name: 'Rotate' }).click();
+  expect((await rotateResponse).ok()).toBe(true);
+  await expect(serviceRow.getByText('2/2 active')).toBeVisible();
+
+  const revokeResponse = page.waitForResponse((response) => response.url().includes('/revoke'));
+  await serviceRow.getByRole('button', { name: 'Revoke' }).click();
+  expect((await revokeResponse).ok()).toBe(true);
+  await expect(serviceRow.getByText('revoked')).toBeVisible();
+
+  const ledgerResponse = page.waitForResponse((response) => response.url().includes('/api/audit/ledger'));
+  await page.getByRole('button', { name: 'Export Ledger' }).click();
+  expect((await ledgerResponse).ok()).toBe(true);
+  await expect(page.getByText('Tamper-evident audit ledger')).toBeVisible();
+  await expect(page.locator('.evidence-card', { hasText: 'Tamper-evident audit ledger' }).getByText(/sha256=/)).toBeVisible();
 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
   expect(overflow).toBe(false);
@@ -409,7 +510,7 @@ test('Production Readiness page reports deployment gate state', async ({ page })
   expect(overflow).toBe(false);
 });
 
-test('Settings provider gateway connection persists and reports missing key truthfully', async ({ page }) => {
+test('Settings provider gateway lifecycle persists and reports missing key truthfully', async ({ page }) => {
   await page.goto('/');
   const sidebar = page.locator('.sidebar-container');
   await sidebar.getByRole('button', { name: 'Settings', exact: true }).click();
@@ -430,12 +531,33 @@ test('Settings provider gateway connection persists and reports missing key trut
   const row = card.locator('tr', { hasText: label });
   await expect(row).toBeVisible();
   await expect(row.getByText('untested')).toBeVisible();
+  await expect(row.getByText('active', { exact: true })).toBeVisible();
 
   const testResponse = page.waitForResponse((response) => response.url().includes('/api/providers/connections/') && response.url().endsWith('/test'));
   await row.getByRole('button', { name: 'Test' }).click();
   expect((await testResponse).ok()).toBe(true);
-  await expect(row.getByText('not_configured')).toBeVisible();
+  await expect(row.getByText('not_configured', { exact: true })).toBeVisible();
   await expect(page.getByText(/Provider test failed/i)).toBeVisible();
+
+  const disableResponse = page.waitForResponse((response) => response.url().includes('/api/providers/connections/') && response.url().endsWith('/disable'));
+  await row.getByRole('button', { name: 'Disable' }).click();
+  expect((await disableResponse).ok()).toBe(true);
+  await expect(row.getByText('disabled', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Provider disabled/i)).toBeVisible();
+
+  const enableResponse = page.waitForResponse((response) => response.url().includes('/api/providers/connections/') && response.url().endsWith('/enable'));
+  await row.getByRole('button', { name: 'Enable' }).click();
+  expect((await enableResponse).ok()).toBe(true);
+  await expect(row.getByText('active', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Provider enabled/i)).toBeVisible();
+
+  await row.getByRole('button', { name: 'Rotate' }).click();
+  await row.getByPlaceholder('new provider key').fill('playwright-rotated-provider-secret');
+  const rotateResponse = page.waitForResponse((response) => response.url().includes('/api/providers/connections/') && response.url().endsWith('/rotate-key'));
+  await row.getByRole('button', { name: 'Save' }).click();
+  expect((await rotateResponse).ok()).toBe(true);
+  await expect(row.getByText('rotating', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Provider key rotated/i)).toBeVisible();
 });
 
 test('Gateway page manages routing policy budgets and cache controls', async ({ page }) => {

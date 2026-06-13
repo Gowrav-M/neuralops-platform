@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   createReleaseGate,
+  fetchDataGovernanceEvidence,
   fetchEvidenceExportPack,
   fetchEvidenceReport,
   fetchGatewayMetrics,
@@ -32,6 +33,7 @@ export default function EvidenceCenter({ addToast }) {
   const [releaseGates, setReleaseGates] = useState([]);
   const [gatewayMetrics, setGatewayMetrics] = useState(null);
   const [gatewayRequests, setGatewayRequests] = useState([]);
+  const [governanceEvidence, setGovernanceEvidence] = useState(null);
   const [exportPack, setExportPack] = useState(null);
   const [runMessage, setRunMessage] = useState('');
   const [exporting, setExporting] = useState(false);
@@ -54,18 +56,20 @@ export default function EvidenceCenter({ addToast }) {
   const load = async () => {
     setError('');
     try {
-      const [nextStatus, nextReport, nextGates, nextGatewayMetrics, nextGatewayRequests] = await Promise.all([
+      const [nextStatus, nextReport, nextGates, nextGatewayMetrics, nextGatewayRequests, nextGovernanceEvidence] = await Promise.all([
         fetchSystemStatus(),
         fetchEvidenceReport(),
         fetchReleaseGates(),
         fetchGatewayMetrics(),
         fetchGatewayRequests(),
+        fetchDataGovernanceEvidence(),
       ]);
       setStatus(nextStatus);
       setReport(nextReport);
       setReleaseGates(nextGates);
       setGatewayMetrics(nextGatewayMetrics);
       setGatewayRequests(nextGatewayRequests);
+      setGovernanceEvidence(nextGovernanceEvidence);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Evidence API unavailable');
     }
@@ -418,6 +422,22 @@ export default function EvidenceCenter({ addToast }) {
                 {latestGatewayRequest
                   ? `${latestGatewayRequest.status} via ${latestGatewayRequest.selectedProvider?.label || 'no provider'}`
                   : 'route first LLM call to create proof'}
+              </span>
+            </div>
+            <div className="evidence-gate-card">
+              <span className="metric-label">Data Governance</span>
+              <span className={`badge ${governanceEvidence?.decision === 'allow' ? 'badge-success' : 'badge-error'}`}>
+                {governanceEvidence?.decision || 'review'}
+              </span>
+              <strong>
+                {governanceEvidence
+                  ? `${governanceEvidence.policy.retentionDays} days`
+                  : 'policy missing'}
+              </strong>
+              <span className="page-subtitle">
+                {governanceEvidence
+                  ? `${governanceEvidence.legalHolds.length} holds | ${governanceEvidence.latestPurgeJob ? 'purge audited' : 'simulate purge'}`
+                  : 'load governance evidence'}
               </span>
             </div>
           </div>

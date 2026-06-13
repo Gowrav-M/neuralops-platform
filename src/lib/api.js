@@ -239,12 +239,39 @@ export function fetchOnboarding() {
   return request('/api/onboarding');
 }
 
+export function fetchOnboardingStatus() {
+  return request('/api/onboarding/status');
+}
+
+export function sendOnboardingTestTrace() {
+  return request('/api/onboarding/send-test-trace', { method: 'POST' });
+}
+
+export function runOnboardingProofDrill(type) {
+  return request('/api/onboarding/run-proof-drill', {
+    method: 'POST',
+    body: JSON.stringify({ type }),
+  });
+}
+
 export function fetchProductionReadiness() {
   return request('/api/production/readiness');
 }
 
+export function fetchReadinessScore() {
+  return request('/api/readiness/score');
+}
+
+export function runReadinessCheck() {
+  return request('/api/readiness/run', { method: 'POST' });
+}
+
 export function fetchConnectivity() {
   return request('/api/connectivity');
+}
+
+export function fetchConnectivityContract() {
+  return request('/api/connectivity/contract');
 }
 
 export function fetchSyntheticCanaryLatest() {
@@ -275,6 +302,33 @@ export function checkAccessPermission(payload) {
 
 export function fetchAccessAudit() {
   return request('/api/access/audit');
+}
+
+export function fetchAuditLedger() {
+  return request('/api/audit/ledger');
+}
+
+export function fetchAccessPosture() {
+  return request('/api/access/posture');
+}
+
+export function fetchServiceAccounts() {
+  return request('/api/service-accounts');
+}
+
+export function createServiceAccount(payload) {
+  return request('/api/service-accounts', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function rotateServiceAccount(accountId) {
+  return request(`/api/service-accounts/${accountId}/rotate`, { method: 'POST' });
+}
+
+export function revokeServiceAccount(accountId) {
+  return request(`/api/service-accounts/${accountId}/revoke`, { method: 'POST' });
 }
 
 export function verifyConnectIngest(payload, apiKey) {
@@ -437,6 +491,28 @@ export function fetchAgents() {
   return request('/api/agents');
 }
 
+export function fetchAgentIdentities() {
+  return request('/api/agent-control/identities');
+}
+
+export function patchAgentIdentity(agentId, patch) {
+  return request(`/api/agent-control/identities/${agentId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function requestAgentProductionAccess(payload) {
+  return request('/api/agent-control/production-access', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchAgentProductionAccessRequests() {
+  return request('/api/agent-control/production-access');
+}
+
 export function fetchAgentDefinitions() {
   return request('/api/agent-runtime/definitions');
 }
@@ -457,6 +533,33 @@ export function createProviderConnection(payload) {
   return request('/api/providers/connections', {
     method: 'POST',
     body: JSON.stringify(payload),
+  });
+}
+
+export function updateProviderConnection(connectionId, payload) {
+  return request(`/api/providers/connections/${connectionId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function disableProviderConnection(connectionId, reason) {
+  return request(`/api/providers/connections/${connectionId}/disable`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export function enableProviderConnection(connectionId) {
+  return request(`/api/providers/connections/${connectionId}/enable`, {
+    method: 'POST',
+  });
+}
+
+export function rotateProviderConnectionKey(connectionId, apiKey) {
+  return request(`/api/providers/connections/${connectionId}/rotate-key`, {
+    method: 'POST',
+    body: JSON.stringify({ apiKey }),
   });
 }
 
@@ -564,6 +667,10 @@ export function fetchSettings() {
   return request('/api/settings');
 }
 
+export function revokeApiKey(keyId) {
+  return request(`/api/settings/api-keys/${keyId}/revoke`, { method: 'POST' });
+}
+
 export function fetchWorkspace() {
   return request('/api/workspace');
 }
@@ -624,6 +731,57 @@ export function updateRetention(retentionDays) {
     method: 'PATCH',
     body: JSON.stringify({ retentionDays }),
   });
+}
+
+export function fetchDataGovernanceInventory() {
+  return request('/api/data-governance/inventory');
+}
+
+export function fetchDataGovernancePolicy() {
+  return request('/api/data-governance/policy');
+}
+
+export function updateDataGovernancePolicy(payload) {
+  return request('/api/data-governance/policy', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchDataGovernanceLegalHolds() {
+  return request('/api/data-governance/legal-holds');
+}
+
+export function createDataGovernanceLegalHold(payload) {
+  return request('/api/data-governance/legal-holds', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function patchDataGovernanceLegalHold(holdId, patch) {
+  return request(`/api/data-governance/legal-holds/${holdId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function simulateDataGovernancePurge(payload = {}) {
+  return request('/api/data-governance/purge/simulate', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function runDataGovernancePurge(payload) {
+  return request('/api/data-governance/purge/run', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchDataGovernanceEvidence() {
+  return request('/api/data-governance/evidence');
 }
 
 export function patchIncident(incidentId, patch) {

@@ -1,20 +1,45 @@
 import { useEffect, useState } from 'react';
 import {
   createApiKey,
+  createDataGovernanceLegalHold,
   createProviderConnection,
   createWebhook,
   createWorkspaceMember,
   deleteWorkspaceMember,
+  disableProviderConnection,
+  enableProviderConnection,
   fetchProviderCatalog,
   fetchProviderConnections,
   fetchSettings,
+  fetchDataGovernanceEvidence,
+  fetchDataGovernanceInventory,
+  fetchDataGovernanceLegalHolds,
+  fetchDataGovernancePolicy,
+  patchDataGovernanceLegalHold,
   patchWorkspaceMember,
+  rotateProviderConnectionKey,
+  runDataGovernancePurge,
+  simulateDataGovernancePurge,
   testProviderConnection,
+  updateDataGovernancePolicy,
+  updateProviderConnection,
   updateRetention,
 } from '../lib/api';
 
 export default function Settings({ addToast, onNavigate }) {
   const [retentionDays, setRetentionDays] = useState(30);
+  const [governancePolicy, setGovernancePolicy] = useState(null);
+  const [governanceInventory, setGovernanceInventory] = useState([]);
+  const [legalHolds, setLegalHolds] = useState([]);
+  const [governanceEvidence, setGovernanceEvidence] = useState(null);
+  const [governanceMode, setGovernanceMode] = useState('monitor');
+  const [newHoldName, setNewHoldName] = useState('');
+  const [newHoldMatchText, setNewHoldMatchText] = useState('');
+  const [newHoldReason, setNewHoldReason] = useState('');
+  const [purgeSimulation, setPurgeSimulation] = useState(null);
+  const [purgeConfirmation, setPurgeConfirmation] = useState('');
+  const [governanceBusy, setGovernanceBusy] = useState(false);
+  const [governanceError, setGovernanceError] = useState('');
   const [apiKeys, setApiKeys] = useState([]);
   const [newKeyName, setNewKeyName] = useState('');
   const [newKeyRole, setNewKeyRole] = useState('Developer');
@@ -31,6 +56,10 @@ export default function Settings({ addToast, onNavigate }) {
   const [providerEnvironment, setProviderEnvironment] = useState('staging');
   const [providerPriority, setProviderPriority] = useState(20);
   const [testingProviderId, setTestingProviderId] = useState('');
+  const [providerLifecycleBusyId, setProviderLifecycleBusyId] = useState('');
+  const [editingProviderId, setEditingProviderId] = useState('');
+  const [rotatingProviderId, setRotatingProviderId] = useState('');
+  const [rotatingProviderKey, setRotatingProviderKey] = useState('');
 
   const [webhooks, setWebhooks] = useState([]);
   const [newWebhookName, setNewWebhookName] = useState('');
@@ -61,6 +90,25 @@ export default function Settings({ addToast, onNavigate }) {
         role: member.role,
         access: member.access || (member.role === 'Viewer' ? 'Read Only' : 'All Workspace')
       }));
+  };
+
+  const formatRouteDecision = (value) => (value ? value.replaceAll('_', ' ') : 'not routed');
+  const governanceDomains = governancePolicy?.domains || ['traces', 'prompts', 'evidence_reports', 'audit', 'provider_connections'];
+
+  const loadGovernance = async () => {
+    setGovernanceError('');
+    const [policy, inventory, holds, evidence] = await Promise.all([
+      fetchDataGovernancePolicy(),
+      fetchDataGovernanceInventory(),
+      fetchDataGovernanceLegalHolds(),
+      fetchDataGovernanceEvidence(),
+    ]);
+    setGovernancePolicy(policy);
+    setRetentionDays(policy.retentionDays);
+    setGovernanceMode(policy.mode || 'monitor');
+    setGovernanceInventory(inventory);
+    setLegalHolds(holds);
+    setGovernanceEvidence(evidence);
   };
 
   useEffect(() => {
@@ -100,6 +148,23 @@ export default function Settings({ addToast, onNavigate }) {
 
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const timeout = window.setTimeout(() => {
+      loadGovernance()
+        .catch((err) => {
+          if (cancelled) return;
+          setGovernanceError(err instanceof Error ? err.message : 'Data governance API unavailable');
+        });
+    }, 0);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
     };
   }, []);
 
@@ -198,20 +263,23 @@ export default function Settings({ addToast, onNavigate }) {
     }
     try {
       const preset = providerCatalog.find((provider) => provider.id === selectedProviderId);
-      const connection = await createProviderConnection({
+      const payload = {
         providerId: selectedProviderId,
         label: providerLabel,
         baseUrl: providerBaseUrl,
         defaultModel: providerModel,
-        apiKey: providerApiKey || null,
         environment: providerEnvironment,
         priority: Number(providerPriority),
         supportsChat: preset?.supportsChat ?? true,
         supportsEmbeddings: preset?.supportsEmbeddings ?? false,
         supportsVision: preset?.supportsVision ?? false,
-      });
+      };
+      const connection = editingProviderId
+        ? await updateProviderConnection(editingProviderId, payload)
+        : await createProviderConnection({ ...payload, apiKey: providerApiKey || null });
       setProviderConnections((current) => [connection, ...current.filter((item) => item.id !== connection.id)]);
       setProviderApiKey('');
+      setEditingProviderId('');
       addToast(`Provider connection saved: ${connection.label}.`, 'success');
     } catch {
       addToast('Backend rejected the provider connection.', 'error');
@@ -228,6 +296,62 @@ export default function Settings({ addToast, onNavigate }) {
       addToast('Provider test could not be completed by the backend.', 'error');
     } finally {
       setTestingProviderId('');
+    }
+  };
+
+  const startEditProviderConnection = (connection) => {
+    setEditingProviderId(connection.id);
+    setSelectedProviderId(connection.providerId);
+    setProviderLabel(connection.label);
+    setProviderBaseUrl(connection.baseUrl);
+    setProviderModel(connection.defaultModel);
+    setProviderEnvironment(connection.environment);
+    setProviderPriority(connection.priority);
+    setProviderApiKey('');
+  };
+
+  const handleDisableProviderConnection = async (connection) => {
+    setProviderLifecycleBusyId(connection.id);
+    try {
+      const disabled = await disableProviderConnection(connection.id, `Disabled from Settings for ${connection.environment} gateway operations.`);
+      setProviderConnections((current) => current.map((item) => (item.id === disabled.id ? disabled : item)));
+      addToast(`Provider disabled: ${disabled.label}.`, 'warning');
+    } catch {
+      addToast('Provider disable failed.', 'error');
+    } finally {
+      setProviderLifecycleBusyId('');
+    }
+  };
+
+  const handleEnableProviderConnection = async (connection) => {
+    setProviderLifecycleBusyId(connection.id);
+    try {
+      const enabled = await enableProviderConnection(connection.id);
+      setProviderConnections((current) => current.map((item) => (item.id === enabled.id ? enabled : item)));
+      addToast(`Provider enabled: ${enabled.label}. Test it before production routing.`, 'success');
+    } catch {
+      addToast('Provider enable failed.', 'error');
+    } finally {
+      setProviderLifecycleBusyId('');
+    }
+  };
+
+  const handleRotateProviderConnection = async (connection) => {
+    if (!rotatingProviderKey) {
+      addToast('Enter the replacement provider key before rotating.', 'error');
+      return;
+    }
+    setProviderLifecycleBusyId(connection.id);
+    try {
+      const rotated = await rotateProviderConnectionKey(connection.id, rotatingProviderKey);
+      setProviderConnections((current) => current.map((item) => (item.id === rotated.id ? rotated : item)));
+      setRotatingProviderId('');
+      setRotatingProviderKey('');
+      addToast(`Provider key rotated for ${rotated.label}. Test must pass before routing resumes.`, 'warning');
+    } catch {
+      addToast('Provider key rotation failed.', 'error');
+    } finally {
+      setProviderLifecycleBusyId('');
     }
   };
 
@@ -251,12 +375,105 @@ export default function Settings({ addToast, onNavigate }) {
   };
 
   const handleSaveRetention = async () => {
+    setGovernanceBusy(true);
+    setGovernanceError('');
     try {
       const payload = await updateRetention(retentionDays);
       applySettingsPayload(payload);
-      addToast(`Backend saved data retention at ${retentionDays} days.`, 'success');
-    } catch {
-      addToast('Backend unavailable. Retention setting was not saved.', 'error');
+      const policy = await updateDataGovernancePolicy({
+        retentionDays: Number(retentionDays),
+        domains: governanceDomains,
+        mode: governanceMode,
+      });
+      setGovernancePolicy(policy);
+      await loadGovernance();
+      addToast(`Backend saved governance policy at ${retentionDays} days.`, 'success');
+    } catch (err) {
+      setGovernanceError(err instanceof Error ? err.message : 'Retention setting was not saved.');
+      addToast('Backend unavailable. Governance policy was not saved.', 'error');
+    } finally {
+      setGovernanceBusy(false);
+    }
+  };
+
+  const handleCreateLegalHold = async (e) => {
+    e.preventDefault();
+    if (!newHoldName || !newHoldReason) {
+      addToast('Legal hold name and reason are required.', 'error');
+      return;
+    }
+    setGovernanceBusy(true);
+    setGovernanceError('');
+    try {
+      await createDataGovernanceLegalHold({
+        name: newHoldName,
+        domains: governanceDomains,
+        matchText: newHoldMatchText,
+        reason: newHoldReason,
+      });
+      setNewHoldName('');
+      setNewHoldMatchText('');
+      setNewHoldReason('');
+      await loadGovernance();
+      addToast('Legal hold created and audited.', 'success');
+    } catch (err) {
+      setGovernanceError(err instanceof Error ? err.message : 'Legal hold was not created.');
+      addToast('Backend rejected the legal hold.', 'error');
+    } finally {
+      setGovernanceBusy(false);
+    }
+  };
+
+  const handleReleaseLegalHold = async (holdId) => {
+    setGovernanceBusy(true);
+    setGovernanceError('');
+    try {
+      await patchDataGovernanceLegalHold(holdId, { status: 'released' });
+      await loadGovernance();
+      addToast('Legal hold released and audited.', 'success');
+    } catch (err) {
+      setGovernanceError(err instanceof Error ? err.message : 'Legal hold was not released.');
+      addToast('Backend rejected the legal hold update.', 'error');
+    } finally {
+      setGovernanceBusy(false);
+    }
+  };
+
+  const handleSimulatePurge = async () => {
+    setGovernanceBusy(true);
+    setGovernanceError('');
+    setPurgeConfirmation('');
+    try {
+      const simulation = await simulateDataGovernancePurge({ domains: governanceDomains });
+      setPurgeSimulation(simulation);
+      await loadGovernance();
+      addToast(`Purge simulation found ${simulation.eligibleRecords} eligible record(s).`, 'success');
+    } catch (err) {
+      setGovernanceError(err instanceof Error ? err.message : 'Purge simulation failed.');
+      addToast('Purge simulation failed.', 'error');
+    } finally {
+      setGovernanceBusy(false);
+    }
+  };
+
+  const handleRunPurge = async () => {
+    if (!purgeSimulation) return;
+    setGovernanceBusy(true);
+    setGovernanceError('');
+    try {
+      const job = await runDataGovernancePurge({
+        simulationId: purgeSimulation.id,
+        confirmation: purgeConfirmation,
+      });
+      setPurgeSimulation(null);
+      setPurgeConfirmation('');
+      await loadGovernance();
+      addToast(`Confirmed purge deleted ${job.deletedRecords} eligible record(s).`, job.deletedRecords ? 'error' : 'success');
+    } catch (err) {
+      setGovernanceError(err instanceof Error ? err.message : 'Confirmed purge failed.');
+      addToast('Confirmed purge was rejected.', 'error');
+    } finally {
+      setGovernanceBusy(false);
     }
   };
 
@@ -301,6 +518,16 @@ export default function Settings({ addToast, onNavigate }) {
       addToast('Backend rejected the workspace member removal.', 'error');
     }
   };
+
+  const governanceTotals = governanceInventory.reduce(
+    (totals, domain) => ({
+      totalRecords: totals.totalRecords + (domain.totalRecords || 0),
+      eligibleRecords: totals.eligibleRecords + (domain.eligibleRecords || 0),
+      protectedRecords: totals.protectedRecords + (domain.protectedRecords || 0),
+    }),
+    { totalRecords: 0, eligibleRecords: 0, protectedRecords: 0 }
+  );
+  const activeLegalHoldCount = legalHolds.filter((hold) => hold.status === 'active').length;
 
   return (
     <div className="main-panel">
@@ -437,9 +664,11 @@ export default function Settings({ addToast, onNavigate }) {
                   <th>Connection</th>
                   <th>Env</th>
                   <th>Model</th>
-                  <th>Status</th>
+                  <th>Lifecycle</th>
+                  <th>Health</th>
                   <th>Key</th>
-                  <th>Action</th>
+                  <th>Last Route</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -454,12 +683,24 @@ export default function Settings({ addToast, onNavigate }) {
                     <td><span className="badge badge-info">{connection.environment}</span></td>
                     <td className="code-font">{connection.defaultModel}</td>
                     <td>
+                      <span className={`badge ${connection.status === 'active' ? 'badge-success' : connection.status === 'disabled' || connection.status === 'revoked' ? 'badge-danger' : 'badge-warning'}`}>
+                        {connection.status || 'active'}
+                      </span>
+                    </td>
+                    <td>
                       <span className={`badge ${connection.lastStatus === 'healthy' ? 'badge-success' : connection.lastStatus === 'failed' || connection.lastStatus === 'not_configured' ? 'badge-danger' : 'badge-warning'}`}>
                         {connection.lastStatus}
                       </span>
                     </td>
                     <td className="code-font">{connection.keyPreview || 'local/no-key'}</td>
                     <td>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                        <span>{formatRouteDecision(connection.lastRouteDecision)}</span>
+                        <span className="code-font" style={{ color: 'var(--text-secondary)' }}>{connection.lastUsedAt || connection.rotatedAt || connection.disabledAt || 'no lifecycle event'}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
                       <button
                         type="button"
                         className="btn-secondary"
@@ -468,12 +709,71 @@ export default function Settings({ addToast, onNavigate }) {
                       >
                         {testingProviderId === connection.id ? 'Testing...' : 'Test'}
                       </button>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          disabled={providerLifecycleBusyId === connection.id}
+                          onClick={() => startEditProviderConnection(connection)}
+                        >
+                          Edit
+                        </button>
+                        {connection.status === 'disabled' || connection.status === 'revoked' || connection.status === 'rotating' ? (
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            disabled={providerLifecycleBusyId === connection.id}
+                            onClick={() => handleEnableProviderConnection(connection)}
+                          >
+                            Enable
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            disabled={providerLifecycleBusyId === connection.id}
+                            onClick={() => handleDisableProviderConnection(connection)}
+                          >
+                            Disable
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          disabled={providerLifecycleBusyId === connection.id}
+                          onClick={() => {
+                            setRotatingProviderId((current) => (current === connection.id ? '' : connection.id));
+                            setRotatingProviderKey('');
+                          }}
+                        >
+                          Rotate
+                        </button>
+                      </div>
+                      {rotatingProviderId === connection.id && (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(140px, 1fr) auto', gap: '6px', marginTop: '8px' }}>
+                          <input
+                            type="password"
+                            className="filter-search-input"
+                            value={rotatingProviderKey}
+                            onChange={(event) => setRotatingProviderKey(event.target.value)}
+                            placeholder="new provider key"
+                            autoComplete="off"
+                          />
+                          <button
+                            type="button"
+                            className="btn-primary"
+                            disabled={providerLifecycleBusyId === connection.id}
+                            onClick={() => handleRotateProviderConnection(connection)}
+                          >
+                            Save
+                          </button>
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ))}
                 {providerConnections.length === 0 && (
                   <tr>
-                    <td colSpan="6" style={{ color: 'var(--text-secondary)' }}>
+                    <td colSpan="8" style={{ color: 'var(--text-secondary)' }}>
                       No live provider connections are saved yet. Local deterministic agent mode remains available.
                     </td>
                   </tr>
@@ -567,9 +867,23 @@ export default function Settings({ addToast, onNavigate }) {
                 />
               </div>
 
-              <button type="submit" className="btn-primary" style={{ alignSelf: 'end' }}>
-                Save Provider
-              </button>
+              <div style={{ display: 'flex', gap: '8px', alignSelf: 'end', flexWrap: 'wrap' }}>
+                <button type="submit" className="btn-primary">
+                  {editingProviderId ? 'Update Provider' : 'Save Provider'}
+                </button>
+                {editingProviderId && (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => {
+                      setEditingProviderId('');
+                      setProviderApiKey('');
+                    }}
+                  >
+                    Cancel Edit
+                  </button>
+                )}
+              </div>
             </form>
 
             <div className="settings-handoff-panel">
@@ -659,32 +973,149 @@ export default function Settings({ addToast, onNavigate }) {
 
         {/* Right Side: Retention, SSO, Team RBAC */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-          {/* Data Retention Slider */}
-          <div className="card-container">
-            <span className="card-title">Telemetry Data Retention Limit</span>
-            <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-              Configure retention timelines for raw prompt strings and vector embedding payloads.
-            </p>
+          {/* Data Governance */}
+          <div className="card-container" style={{ gap: '16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+              <div>
+                <span className="card-title">Data Governance</span>
+                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '6px 0 0' }}>
+                  Inventory retained AI records, protect legal-hold data, simulate deletion, and audit confirmed purge jobs.
+                </p>
+              </div>
+              <span className={`badge ${governanceEvidence?.decision === 'allow' ? 'badge-success' : 'badge-error'}`}>
+                {governanceEvidence?.decision || 'review'}
+              </span>
+            </div>
 
-            <div className="canary-slider-container" style={{ marginTop: '6px' }}>
+            {governanceError && (
+              <div className="alert-banner error" style={{ margin: 0 }}>
+                {governanceError}
+              </div>
+            )}
+
+            <div className="metric-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))' }}>
+              <div>
+                <span>Total Records</span>
+                <strong>{governanceTotals.totalRecords}</strong>
+              </div>
+              <div>
+                <span>Eligible</span>
+                <strong>{governanceTotals.eligibleRecords}</strong>
+              </div>
+              <div>
+                <span>Protected</span>
+                <strong>{governanceTotals.protectedRecords}</strong>
+              </div>
+              <div>
+                <span>Legal Holds</span>
+                <strong>{activeLegalHoldCount}</strong>
+              </div>
+            </div>
+
+            <div className="canary-slider-container" style={{ marginTop: '0' }}>
               <div className="canary-slider-labels">
-                <span>Developer Sandbox</span>
-                <span style={{ fontWeight: 700 }}>{retentionDays} Days Retention</span>
+                <span>Retention Policy</span>
+                <span style={{ fontWeight: 700 }}>{retentionDays} Days</span>
               </div>
               <input
                 type="range"
                 min="7"
-                max="90"
+                max="365"
                 step="7"
                 className="canary-range-input"
                 value={retentionDays}
-                onChange={(e) => setRetentionDays(parseInt(e.target.value))}
+                onChange={(e) => setRetentionDays(parseInt(e.target.value, 10))}
               />
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+                <select className="filter-select" value={governanceMode} onChange={(e) => setGovernanceMode(e.target.value)}>
+                  <option value="monitor">Monitor</option>
+                  <option value="enforced">Enforced</option>
+                </select>
+                <button className="btn-primary" onClick={handleSaveRetention} disabled={governanceBusy}>
+                  Save Governance Policy
+                </button>
+              </div>
             </div>
 
-            <button className="btn-primary" onClick={handleSaveRetention}>
-              Save Retention Config
-            </button>
+            <div className="table-container" style={{ padding: '14px' }}>
+              <span style={{ fontSize: '13px', fontWeight: 700 }}>Inventory By Domain</span>
+              <table className="dense-table" style={{ fontSize: '11px', marginTop: '8px' }}>
+                <thead>
+                  <tr>
+                    <th>Domain</th>
+                    <th>Total</th>
+                    <th>Eligible</th>
+                    <th>Protected</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {governanceInventory.slice(0, 8).map((domain) => (
+                    <tr key={domain.domain}>
+                      <td className="code-font">{domain.domain}</td>
+                      <td>{domain.totalRecords}</td>
+                      <td>{domain.eligibleRecords}</td>
+                      <td>{domain.protectedRecords}</td>
+                    </tr>
+                  ))}
+                  {governanceInventory.length === 0 && (
+                    <tr>
+                      <td colSpan="4" style={{ color: 'var(--text-secondary)' }}>No governance inventory has loaded yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <form onSubmit={handleCreateLegalHold} style={{ display: 'flex', flexDirection: 'column', gap: '10px', border: '1px solid var(--border-color)', borderRadius: '12px', padding: '14px' }}>
+              <span style={{ fontSize: '13px', fontWeight: 700 }}>Legal Holds</span>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '10px' }}>
+                <input className="filter-search-input" placeholder="Hold name" value={newHoldName} onChange={(e) => setNewHoldName(e.target.value)} />
+                <input className="filter-search-input" placeholder="Match text, case ID, customer, trace marker" value={newHoldMatchText} onChange={(e) => setNewHoldMatchText(e.target.value)} />
+                <input className="filter-search-input" placeholder="Reason" value={newHoldReason} onChange={(e) => setNewHoldReason(e.target.value)} />
+              </div>
+              <button type="submit" className="btn-primary" disabled={governanceBusy}>
+                Create Legal Hold
+              </button>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {legalHolds.slice(0, 4).map((hold) => (
+                  <div key={hold.id} style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', borderTop: '1px solid var(--border-color)', paddingTop: '8px' }}>
+                    <div style={{ minWidth: 0 }}>
+                      <strong>{hold.name}</strong>
+                      <p style={{ margin: '2px 0 0', color: 'var(--text-secondary)', fontSize: '11px' }}>{hold.reason}</p>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <span className={`badge ${hold.status === 'active' ? 'badge-warning' : 'badge-success'}`}>{hold.status}</span>
+                      {hold.status === 'active' && (
+                        <button type="button" className="btn-secondary" onClick={() => handleReleaseLegalHold(hold.id)} disabled={governanceBusy}>
+                          Release
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </form>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', border: '1px solid var(--border-color)', borderRadius: '12px', padding: '14px' }}>
+              <span style={{ fontSize: '13px', fontWeight: 700 }}>Purge Simulation</span>
+              <p style={{ fontSize: '11.5px', color: 'var(--text-secondary)', margin: 0 }}>
+                Simulation is non-destructive. Running a purge requires exact confirmation text and legal holds always win.
+              </p>
+              <button type="button" className="btn-secondary" onClick={handleSimulatePurge} disabled={governanceBusy}>
+                Simulate Purge
+              </button>
+              {purgeSimulation && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <span className="code-font">
+                    {purgeSimulation.eligibleRecords} eligible / {purgeSimulation.protectedRecords} protected. Type {purgeSimulation.confirmation}
+                  </span>
+                  <input className="filter-search-input" placeholder={purgeSimulation.confirmation} value={purgeConfirmation} onChange={(e) => setPurgeConfirmation(e.target.value)} />
+                  <button type="button" className="btn-primary" onClick={handleRunPurge} disabled={governanceBusy || purgeConfirmation !== purgeSimulation.confirmation}>
+                    Run Confirmed Purge
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Team Members List */}

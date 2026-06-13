@@ -394,7 +394,7 @@ class ProviderStatus(BaseModel):
     supportsChat: bool = True
     supportsEmbeddings: bool = False
     supportsVision: bool = False
-    status: Literal["configured", "not_configured", "healthy", "failed"] | None = None
+    status: Literal["active", "configured", "disabled", "revoked", "rotating", "not_configured", "healthy", "failed"] | None = None
 
 
 class ProviderPreset(BaseModel):
@@ -423,6 +423,25 @@ class ProviderConnectionCreate(BaseModel):
     supportsVision: bool = False
 
 
+class ProviderConnectionPatch(BaseModel):
+    label: str | None = Field(default=None, min_length=1)
+    baseUrl: str | None = Field(default=None, min_length=1)
+    defaultModel: str | None = Field(default=None, min_length=1)
+    environment: Literal["prod", "staging", "dev", "all"] | None = None
+    priority: int | None = Field(default=None, ge=1, le=999)
+    supportsChat: bool | None = None
+    supportsEmbeddings: bool | None = None
+    supportsVision: bool | None = None
+
+
+class ProviderConnectionDisableRequest(BaseModel):
+    reason: str = Field(default="Operator disabled provider connection.", min_length=1, max_length=240)
+
+
+class ProviderConnectionRotateKeyRequest(BaseModel):
+    apiKey: str = Field(min_length=1)
+
+
 class ProviderConnection(BaseModel):
     id: str
     providerId: str
@@ -436,6 +455,13 @@ class ProviderConnection(BaseModel):
     supportsChat: bool = True
     supportsEmbeddings: bool = False
     supportsVision: bool = False
+    status: Literal["active", "disabled", "rotating", "revoked"] = "active"
+    disabledAt: str | None = None
+    disabledReason: str | None = None
+    rotatedAt: str | None = None
+    rotatedBy: str | None = None
+    lastUsedAt: str | None = None
+    lastRouteDecision: str | None = None
     lastTestedAt: str | None = None
     lastStatus: Literal["untested", "healthy", "failed", "not_configured"] = "untested"
     lastError: str | None = None
@@ -950,12 +976,40 @@ class ConnectivityAction(BaseModel):
     priority: Literal["high", "medium", "low"]
 
 
+ConnectivityRequirementSeverity = Literal["required", "recommended"]
+ConnectivityContractDecision = Literal["allow", "review", "block"]
+
+
+class ConnectivityRequirement(BaseModel):
+    id: str
+    label: str
+    category: ConnectivityCategory
+    status: ConnectivityStatus
+    severity: ConnectivityRequirementSeverity
+    evidence: str
+    endpoint: str | None = None
+    lastSeenAt: str | None = None
+    action: str
+
+
 class ConnectivityMap(BaseModel):
     workspaceId: str
     storage: Literal["sqlite", "postgres"]
     overallStatus: ConnectivityStatus
     score: int = Field(ge=0, le=100)
     checks: list[ConnectivityCheck]
+    nextActions: list[ConnectivityAction]
+    generatedAt: str
+
+
+class ConnectivityContract(BaseModel):
+    schemaVersion: Literal["neuralops.connectivity.contract.v1"] = "neuralops.connectivity.contract.v1"
+    workspaceId: str
+    decision: ConnectivityContractDecision
+    score: int = Field(ge=0, le=100)
+    required: list[ConnectivityRequirement]
+    recommended: list[ConnectivityRequirement]
+    blockers: list[str]
     nextActions: list[ConnectivityAction]
     generatedAt: str
 
@@ -990,6 +1044,55 @@ class AgentRunRequest(BaseModel):
     providerMode: Literal["local", "auto", "live"] = "auto"
     model: str | None = None
     environment: Literal["prod", "staging", "dev"] = "staging"
+
+
+AgentIdentityStatus = Literal["active", "pending_approval", "disabled"]
+AgentProductionAccessStatus = Literal["pending_review", "approved", "blocked"]
+
+
+class AgentIdentity(BaseModel):
+    id: str
+    agentId: str
+    displayName: str
+    owner: str
+    environment: Literal["prod", "staging", "dev", "all"] = "staging"
+    status: AgentIdentityStatus = "active"
+    riskLevel: Severity
+    permissions: list[str]
+    providerAccess: list[str]
+    requiresApproval: bool = True
+    killSwitchReason: str | None = None
+    createdAt: str
+    updatedAt: str
+    lastApprovedAt: str | None = None
+
+
+class AgentIdentityPatch(BaseModel):
+    owner: str | None = None
+    environment: Literal["prod", "staging", "dev", "all"] | None = None
+    status: AgentIdentityStatus | None = None
+    permissions: list[str] | None = None
+    providerAccess: list[str] | None = None
+    requiresApproval: bool | None = None
+    killSwitchReason: str | None = None
+
+
+class AgentProductionAccessRequest(BaseModel):
+    agentId: str
+    targetEnvironment: Literal["prod", "staging"] = "prod"
+    justification: str = Field(min_length=12)
+
+
+class AgentProductionAccessDecision(BaseModel):
+    id: str
+    agentId: str
+    targetEnvironment: Literal["prod", "staging"]
+    status: AgentProductionAccessStatus
+    decision: Literal["allow", "review", "block"]
+    justification: str
+    evidenceId: str
+    createdAt: str
+    reviewedAt: str | None = None
 
 
 JobStatus = Literal["queued", "running", "succeeded", "blocked", "failed", "cancelled"]
@@ -1108,6 +1211,105 @@ class SettingsPayload(BaseModel):
     nextInvoice: str | None = None
 
 
+DataGovernanceMode = Literal["monitor", "enforced"]
+LegalHoldStatus = Literal["active", "released"]
+
+
+class DataRetentionPolicy(BaseModel):
+    schemaVersion: Literal["neuralops.data-retention-policy.v1"] = "neuralops.data-retention-policy.v1"
+    retentionDays: int = Field(default=30, ge=1, le=3650)
+    domains: list[str] = Field(default_factory=list, min_length=1, max_length=64)
+    mode: DataGovernanceMode = "monitor"
+    updatedAt: str
+    updatedBy: str = "system"
+    workspaceId: str | None = None
+
+
+class DataRetentionPolicyUpdate(BaseModel):
+    retentionDays: int = Field(ge=1, le=3650)
+    domains: list[str] = Field(default_factory=list, min_length=1, max_length=64)
+    mode: DataGovernanceMode = "monitor"
+
+
+class DataInventoryDomain(BaseModel):
+    domain: str
+    totalRecords: int = Field(ge=0)
+    eligibleRecords: int = Field(ge=0)
+    protectedRecords: int = Field(ge=0)
+    oldestRecordAt: str | None = None
+    newestRecordAt: str | None = None
+    storageBackend: Literal["sqlite", "postgres"]
+    workspaceId: str
+
+
+class LegalHoldCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    domains: list[str] = Field(default_factory=list, min_length=1, max_length=64)
+    matchText: str = Field(default="", max_length=500)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class LegalHoldPatchRequest(BaseModel):
+    status: LegalHoldStatus | None = None
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class LegalHold(BaseModel):
+    id: str
+    name: str
+    domains: list[str]
+    matchText: str = ""
+    reason: str
+    status: LegalHoldStatus = "active"
+    createdAt: str
+    updatedAt: str
+    releasedAt: str | None = None
+    workspaceId: str | None = None
+
+
+class PurgeSimulationRequest(BaseModel):
+    domains: list[str] = Field(default_factory=list, max_length=64)
+
+
+class PurgeSimulation(BaseModel):
+    id: str
+    policy: DataRetentionPolicy
+    domains: list[DataInventoryDomain]
+    eligibleRecords: int = Field(ge=0)
+    protectedRecords: int = Field(ge=0)
+    confirmation: str
+    generatedAt: str
+    workspaceId: str
+
+
+class PurgeRunRequest(BaseModel):
+    simulationId: str = Field(min_length=1)
+    confirmation: str = Field(min_length=1)
+
+
+class PurgeJob(BaseModel):
+    id: str
+    simulationId: str
+    deletedRecords: int = Field(ge=0)
+    protectedRecords: int = Field(ge=0)
+    domains: list[str]
+    generatedAt: str
+    workspaceId: str
+
+
+class DataGovernanceEvidence(BaseModel):
+    schemaVersion: Literal["neuralops.data-governance.evidence.v1"] = "neuralops.data-governance.evidence.v1"
+    workspaceId: str
+    decision: Literal["allow", "review", "block"]
+    policy: DataRetentionPolicy
+    inventory: list[DataInventoryDomain]
+    legalHolds: list[LegalHold]
+    latestSimulation: PurgeSimulation | None = None
+    latestPurgeJob: PurgeJob | None = None
+    recommendations: list[str] = Field(default_factory=list)
+    generatedAt: str
+
+
 class WorkspaceMember(BaseModel):
     id: str
     workspaceId: str
@@ -1193,6 +1395,37 @@ class ApiKeyCreateRequest(BaseModel):
 
 class ApiKeyCreateResponse(BaseModel):
     settings: SettingsPayload
+    token: str
+
+
+ServiceAccountStatus = Literal["active", "revoked"]
+
+
+class ServiceAccountCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    owner: str = Field(min_length=1, max_length=120)
+    environment: Literal["prod", "staging", "dev", "all"] = "staging"
+    scopes: list[ApiKeyScope] = Field(default_factory=lambda: ["trace:ingest"], min_length=1)
+    expiresInDays: int = Field(default=90, ge=1, le=365)
+
+
+class ServiceAccount(BaseModel):
+    id: str
+    workspaceId: str
+    name: str
+    owner: str
+    environment: Literal["prod", "staging", "dev", "all"]
+    scopes: list[ApiKeyScope]
+    status: ServiceAccountStatus
+    keyCount: int = Field(ge=0)
+    activeKeyCount: int = Field(ge=0)
+    lastUsedAt: str | None = None
+    createdAt: str
+    updatedAt: str
+
+
+class ServiceAccountCreateResponse(BaseModel):
+    serviceAccount: ServiceAccount
     token: str
 
 
@@ -1365,7 +1598,7 @@ class GatewayRouteProvider(BaseModel):
 
 class GatewayRouteAttempt(BaseModel):
     provider: GatewayRouteProvider
-    status: Literal["failed", "succeeded"]
+    status: Literal["failed", "succeeded", "skipped"]
     latencyMs: int = Field(ge=0)
     error: str | None = None
 
@@ -1496,6 +1729,29 @@ class AuditEvent(BaseModel):
     createdAt: str
 
 
+class AuditLedgerEvent(BaseModel):
+    id: str
+    type: str
+    actor: str
+    subject: str
+    decision: Literal["allow", "review", "block"]
+    createdAt: str
+    eventHash: str
+    previousHash: str
+    chainHash: str
+
+
+class AuditLedgerExport(BaseModel):
+    schemaVersion: str = "neuralops.audit.ledger.v1"
+    workspaceId: str
+    eventCount: int = Field(ge=0)
+    chainValid: bool
+    digest: str
+    events: list[AuditLedgerEvent]
+    markdown: str
+    generatedAt: str
+
+
 class AccessRolePolicy(BaseModel):
     role: WorkspaceRole
     permissions: list[AccessPermission]
@@ -1528,6 +1784,24 @@ class AccessCheckResult(BaseModel):
     permission: AccessPermission
     subject: str
     reason: str
+
+
+class AccessPostureFinding(BaseModel):
+    id: str
+    severity: Literal["critical", "high", "medium", "low"]
+    subject: str
+    summary: str
+    recommendation: str
+
+
+class AccessPostureReport(BaseModel):
+    schemaVersion: str = "neuralops.access.posture.v1"
+    workspaceId: str
+    decision: Literal["allow", "review", "block"]
+    score: int = Field(ge=0, le=100)
+    summary: dict[str, int]
+    findings: list[AccessPostureFinding]
+    generatedAt: str
 
 
 class ProductionReadinessCheck(BaseModel):

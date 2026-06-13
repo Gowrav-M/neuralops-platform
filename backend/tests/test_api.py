@@ -78,6 +78,240 @@ def test_system_status_exposes_truth_contract(client: TestClient) -> None:
     assert payload["readinessScore"] < 100
 
 
+def test_data_governance_policy_hold_simulation_and_confirmed_purge(client: TestClient) -> None:
+    database.save_record(
+        "traces",
+        "tr_old_delete",
+        {
+            "id": "tr_old_delete",
+            "workspaceId": "local-workspace",
+            "timestamp": "2024-01-01T00:00:00",
+            "session": "delete_me",
+            "environment": "prod",
+            "model": "pytest-model",
+            "tokens": 100,
+            "latency": "1.00s",
+            "cost": "$0.001",
+            "status": "success",
+            "score": 0.95,
+            "prompt": "ordinary historical trace",
+            "output": "eligible for retention purge",
+        },
+    )
+    database.save_record(
+        "traces",
+        "tr_old_hold",
+        {
+            "id": "tr_old_hold",
+            "workspaceId": "local-workspace",
+            "timestamp": "2024-01-01T00:00:00",
+            "session": "legal_hold",
+            "environment": "prod",
+            "model": "pytest-model",
+            "tokens": 100,
+            "latency": "1.00s",
+            "cost": "$0.001",
+            "status": "success",
+            "score": 0.95,
+            "prompt": "VIP legal case customer trace",
+            "output": "must stay protected",
+        },
+    )
+
+    policy = client.put(
+        "/api/data-governance/policy",
+        json={"retentionDays": 30, "domains": ["traces"], "mode": "enforced"},
+    )
+    assert policy.status_code == 200
+    assert policy.json()["retentionDays"] == 30
+
+    hold = client.post(
+        "/api/data-governance/legal-holds",
+        json={
+            "name": "VIP litigation hold",
+            "domains": ["traces"],
+            "matchText": "VIP legal case",
+            "reason": "Customer dispute investigation",
+        },
+    )
+    assert hold.status_code == 200
+    assert hold.json()["status"] == "active"
+
+    inventory = client.get("/api/data-governance/inventory")
+    assert inventory.status_code == 200
+    traces_domain = next(domain for domain in inventory.json() if domain["domain"] == "traces")
+    assert traces_domain["totalRecords"] == 2
+    assert traces_domain["eligibleRecords"] == 1
+    assert traces_domain["protectedRecords"] == 1
+
+    simulation = client.post("/api/data-governance/purge/simulate", json={"domains": ["traces"]})
+    assert simulation.status_code == 200
+    simulation_payload = simulation.json()
+    assert simulation_payload["eligibleRecords"] == 1
+    assert simulation_payload["protectedRecords"] == 1
+    assert simulation_payload["confirmation"] == f"PURGE {simulation_payload['id']}"
+
+    rejected = client.post(
+        "/api/data-governance/purge/run",
+        json={"simulationId": simulation_payload["id"], "confirmation": "PURGE everything"},
+    )
+    assert rejected.status_code == 400
+
+    purge = client.post(
+        "/api/data-governance/purge/run",
+        json={"simulationId": simulation_payload["id"], "confirmation": simulation_payload["confirmation"]},
+    )
+    assert purge.status_code == 200
+    purge_payload = purge.json()
+    assert purge_payload["deletedRecords"] == 1
+    assert purge_payload["protectedRecords"] == 1
+
+    traces = client.get("/api/traces").json()
+    trace_ids = {trace["id"] for trace in traces}
+    assert "tr_old_delete" not in trace_ids
+    assert "tr_old_hold" in trace_ids
+
+    evidence = client.get("/api/data-governance/evidence")
+    assert evidence.status_code == 200
+    assert evidence.json()["latestPurgeJob"]["id"] == purge_payload["id"]
+    assert evidence.json()["legalHolds"][0]["id"] == hold.json()["id"]
+
+    audit = client.get("/api/audit").json()
+    event_types = {event["type"] for event in audit}
+    assert {
+        "data_governance.policy.update",
+        "data_governance.legal_hold.create",
+        "data_governance.purge.simulate",
+        "data_governance.purge.run",
+    }.issubset(event_types)
+
+
+def test_onboarding_status_alias_exposes_proof_loop_truth(client: TestClient) -> None:
+    response = client.get("/api/onboarding/status")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schemaVersion"] == "neuralops.onboarding.status.v1"
+    assert payload["workspaceId"] == "local-workspace"
+    assert payload["states"]["database"]["state"] == "persisted"
+    assert payload["states"]["firstTrace"]["state"] == "not_configured"
+    assert payload["states"]["gateway"]["state"] == "not_configured"
+    assert payload["nextAction"]
+    assert {step["id"] for step in payload["steps"]} >= {
+        "workspace",
+        "database",
+        "ingest_key",
+        "first_trace",
+        "provider",
+        "gateway",
+        "policy_proof",
+        "release_gate",
+        "evidence",
+    }
+
+
+def test_connectivity_contract_blocks_public_production_until_required_integrations_are_ready(client: TestClient) -> None:
+    response = client.get("/api/connectivity/contract")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schemaVersion"] == "neuralops.connectivity.contract.v1"
+    assert payload["workspaceId"] == "local-workspace"
+    assert payload["decision"] == "block"
+    assert payload["score"] < 100
+
+    required = {item["id"]: item for item in payload["required"]}
+    assert required["database"]["status"] == "ready"
+    assert required["auth"]["status"] == "missing"
+    assert required["provider_gateway"]["status"] == "missing"
+    assert required["gateway_policy"]["status"] == "missing"
+    assert required["trace_ingest"]["status"] == "missing"
+    assert any("Workspace authentication" in blocker for blocker in payload["blockers"])
+    assert any(action["priority"] == "high" for action in payload["nextActions"])
+
+
+def test_connectivity_contract_updates_from_real_key_and_trace_evidence(client: TestClient) -> None:
+    token = client.post(
+        "/api/settings/api-keys",
+        json={"name": "contract key", "role": "Developer", "environment": "all", "scopes": ["trace:ingest", "gateway:invoke"]},
+    ).json()["token"]
+    client.post(
+        "/api/traces/ingest",
+        headers={"x-neuralops-key": token},
+        json={
+            "session": "contract-proof",
+            "environment": "dev",
+            "model": "contract-model",
+            "tokens": 90,
+            "latencyMs": 120,
+            "status": "success",
+            "score": 0.97,
+            "prompt": "Connectivity contract trace",
+            "output": "Trace evidence persisted.",
+        },
+    )
+
+    payload = client.get("/api/connectivity/contract").json()
+    required = {item["id"]: item for item in payload["required"]}
+    assert required["ingest_key"]["status"] == "ready"
+    assert required["trace_ingest"]["status"] == "ready"
+    assert required["gateway_policy"]["status"] == "degraded"
+    assert payload["decision"] == "block"
+    assert all("Scoped NeuralOps API key" not in blocker for blocker in payload["blockers"])
+
+
+def test_onboarding_send_test_trace_creates_persisted_trace_and_audit(client: TestClient) -> None:
+    created = client.post("/api/onboarding/send-test-trace")
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload["accepted"] is True
+    assert payload["trace"]["source"] == "local"
+    assert payload["trace"]["environment"] == "dev"
+    assert "onboarding_test" in payload["trace"]["riskFlags"]
+    assert payload["auditId"].startswith("aud_")
+
+    status = client.get("/api/onboarding/status").json()
+    assert status["states"]["firstTrace"]["state"] == "persisted"
+    assert status["states"]["firstTrace"]["traceId"] == payload["trace"]["id"]
+
+    traces = client.get("/api/traces").json()
+    assert any(trace["id"] == payload["trace"]["id"] for trace in traces)
+
+
+def test_onboarding_prompt_injection_proof_drill_blocks_and_records_evidence(client: TestClient) -> None:
+    response = client.post("/api/onboarding/run-proof-drill", json={"type": "prompt_injection"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "prompt_injection"
+    assert payload["decision"] == "block"
+    assert payload["trace"]["status"] == "blocked"
+    assert "prompt_injection" in payload["trace"]["riskFlags"]
+    assert payload["evidenceId"].startswith("proof_")
+
+    status = client.get("/api/onboarding/status").json()
+    assert status["states"]["policyProof"]["state"] == "persisted"
+    assert status["states"]["policyProof"]["evidenceId"] == payload["evidenceId"]
+
+
+def test_readiness_score_and_run_are_derived_from_real_records(client: TestClient) -> None:
+    score_before = client.get("/api/readiness/score")
+    assert score_before.status_code == 200
+    before_payload = score_before.json()
+    assert before_payload["schemaVersion"] == "neuralops.readiness.score.v1"
+    assert before_payload["decision"] in {"review", "block"}
+    assert "No first trace has been persisted." in before_payload["blockers"]
+
+    client.post("/api/onboarding/send-test-trace")
+    run = client.post("/api/readiness/run")
+    assert run.status_code == 200
+    run_payload = run.json()
+    assert run_payload["schemaVersion"] == "neuralops.readiness.run.v1"
+    assert run_payload["report"]["workspaceId"] == "local-workspace"
+    assert run_payload["evidenceId"].startswith("ready_")
+
+    latest = client.get("/api/readiness/latest")
+    assert latest.status_code == 200
+    assert latest.json()["id"] == run_payload["evidenceId"]
+
+
 def test_action_center_returns_prioritized_operator_queue(client: TestClient) -> None:
     response = client.get("/api/action-center")
     assert response.status_code == 200
@@ -206,6 +440,83 @@ def auth_header(email: str, workspace_id: str = "acme-workspace") -> dict[str, s
         algorithm="HS256",
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+def test_data_governance_purge_is_workspace_scoped(tmp_path: Path) -> None:
+    database.DB_PATH = tmp_path / "neuralops-governance-scope-test.sqlite3"
+    database.POSTGRES_URL = None
+    os.environ["NEURALOPS_DB_PATH"] = str(database.DB_PATH)
+    os.environ["NEURALOPS_AUTH_REQUIRED"] = "true"
+    os.environ["SUPABASE_JWT_SECRET"] = "test-jwt-secret"
+    try:
+        with TestClient(app) as test_client:
+            owner_headers = auth_header("owner@example.com", "owner-workspace")
+            other_headers = auth_header("other@example.com", "other-workspace")
+            assert test_client.get("/api/workspace", headers=owner_headers).status_code == 200
+            assert test_client.get("/api/workspace", headers=other_headers).status_code == 200
+            database.save_record(
+                "traces",
+                "owner-workspace:tr_owner_old",
+                {
+                    "id": "tr_owner_old",
+                    "workspaceId": "owner-workspace",
+                    "timestamp": "2024-01-01T00:00:00",
+                    "session": "owner_session",
+                    "environment": "prod",
+                    "model": "pytest-model",
+                    "tokens": 1,
+                    "latency": "0.10s",
+                    "cost": "$0.001",
+                    "status": "success",
+                    "score": 0.9,
+                    "prompt": "owner old trace",
+                    "output": "delete only this workspace record",
+                },
+            )
+            database.save_record(
+                "traces",
+                "other-workspace:tr_other_old",
+                {
+                    "id": "tr_other_old",
+                    "workspaceId": "other-workspace",
+                    "timestamp": "2024-01-01T00:00:00",
+                    "session": "other_session",
+                    "environment": "prod",
+                    "model": "pytest-model",
+                    "tokens": 1,
+                    "latency": "0.10s",
+                    "cost": "$0.001",
+                    "status": "success",
+                    "score": 0.9,
+                    "prompt": "other old trace",
+                    "output": "must not be touched",
+                },
+            )
+
+            policy = test_client.put(
+                "/api/data-governance/policy",
+                headers=owner_headers,
+                json={"retentionDays": 30, "domains": ["traces"], "mode": "enforced"},
+            )
+            assert policy.status_code == 200
+            simulation = test_client.post(
+                "/api/data-governance/purge/simulate",
+                headers=owner_headers,
+                json={"domains": ["traces"]},
+            ).json()
+            assert simulation["eligibleRecords"] == 1
+            purge = test_client.post(
+                "/api/data-governance/purge/run",
+                headers=owner_headers,
+                json={"simulationId": simulation["id"], "confirmation": simulation["confirmation"]},
+            )
+            assert purge.status_code == 200
+            assert purge.json()["deletedRecords"] == 1
+            assert database.get_record("traces", "owner-workspace:tr_owner_old") is None
+            assert database.get_record("traces", "other-workspace:tr_other_old") is not None
+    finally:
+        os.environ.pop("NEURALOPS_AUTH_REQUIRED", None)
+        os.environ.pop("SUPABASE_JWT_SECRET", None)
 
 
 def test_workspace_rbac_denies_viewer_writes_and_records_access_audit(tmp_path: Path) -> None:
@@ -353,7 +664,8 @@ def test_production_readiness_reports_tenant_controls(tmp_path: Path) -> None:
             assert checks["workspace_isolation"]["state"] == "pass"
             assert checks["rbac_enforced"]["state"] == "pass"
             assert checks["database"]["state"] == "review"
-            assert payload["decision"] == "review"
+            assert checks["data_governance"]["state"] == "block"
+            assert payload["decision"] == "block"
             assert payload["workspaceId"] == "owner-workspace"
     finally:
         os.environ.pop("NEURALOPS_AUTH_REQUIRED", None)
@@ -1343,6 +1655,121 @@ def test_gateway_lowest_cost_routing_cache_and_metrics(client: TestClient, monke
     assert metrics.json()["cacheHits"] == 1
     assert metrics.json()["routedRequests"] == 1
     assert metrics.json()["providerBreakdown"][0]["label"] == "Cheap Gateway"
+
+
+def test_provider_lifecycle_disable_skips_routing_and_rotate_audits(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    token = client.post(
+        "/api/settings/api-keys",
+        json={"name": "provider lifecycle", "role": "Developer", "environment": "all", "scopes": ["gateway:invoke"]},
+    ).json()["token"]
+    primary = client.post(
+        "/api/providers/connections",
+        json={
+            "providerId": "custom",
+            "label": "Primary Lifecycle",
+            "baseUrl": "https://primary-lifecycle.example.test/v1",
+            "defaultModel": "gpt-4o",
+            "apiKey": "primary-lifecycle-secret",
+            "environment": "staging",
+            "priority": 1,
+        },
+    ).json()
+    fallback = client.post(
+        "/api/providers/connections",
+        json={
+            "providerId": "custom",
+            "label": "Fallback Lifecycle",
+            "baseUrl": "https://fallback-lifecycle.example.test/v1",
+            "defaultModel": "gpt-4o-mini",
+            "apiKey": "fallback-lifecycle-secret",
+            "environment": "staging",
+            "priority": 2,
+        },
+    ).json()
+
+    disabled = client.post(
+        f"/api/providers/connections/{primary['id']}/disable",
+        json={"reason": "Leaked key investigation"},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["status"] == "disabled"
+    assert disabled.json()["disabledReason"] == "Leaked key investigation"
+
+    rotated = client.post(
+        f"/api/providers/connections/{primary['id']}/rotate-key",
+        json={"apiKey": "rotated-primary-lifecycle-secret"},
+    )
+    assert rotated.status_code == 200
+    assert rotated.json()["id"] == primary["id"]
+    assert rotated.json()["status"] == "rotating"
+    assert rotated.json()["keyPreview"] != primary["keyPreview"]
+    assert "rotated-primary-lifecycle-secret" not in str(rotated.json())
+
+    calls: list[str] = []
+
+    def fake_provider_chat_completion(provider: Any, request: Any) -> dict[str, Any]:
+        calls.append(provider.label)
+        return {
+            "id": f"chatcmpl_{provider.id}",
+            "choices": [{"message": {"content": f"{provider.label} answered."}}],
+            "usage": {"total_tokens": 24},
+        }
+
+    monkeypatch.setattr("app.main.provider_chat_completion", fake_provider_chat_completion)
+
+    response = client.post(
+        "/api/gateway/openai/v1/chat/completions",
+        headers={"x-neuralops-key": token},
+        json={"messages": [{"role": "user", "content": "Check lifecycle routing."}], "metadata": {"environment": "staging"}},
+    )
+
+    assert response.status_code == 200
+    assert calls == ["Fallback Lifecycle"]
+    assert response.json()["neuralops"]["provider"]["label"] == fallback["label"]
+    route = client.get("/api/gateway/routes").json()[0]
+    assert route["selectedProvider"]["label"] == "Fallback Lifecycle"
+    assert any(attempt["provider"]["label"] == "Primary Lifecycle" and attempt["status"] == "skipped" for attempt in route["attempts"])
+    assert "primary-lifecycle-secret" not in str(route)
+    assert "rotated-primary-lifecycle-secret" not in str(route)
+
+    audit = client.get("/api/audit").json()
+    assert any(event["type"] == "provider.connection.disable" for event in audit)
+    assert any(event["type"] == "provider.connection.rotate" for event in audit)
+
+
+def test_gateway_returns_not_configured_when_only_provider_is_disabled(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    token = client.post(
+        "/api/settings/api-keys",
+        json={"name": "disabled provider", "role": "Developer", "environment": "all", "scopes": ["gateway:invoke"]},
+    ).json()["token"]
+    provider = client.post(
+        "/api/providers/connections",
+        json={
+            "providerId": "custom",
+            "label": "Disabled Only",
+            "baseUrl": "https://disabled-only.example.test/v1",
+            "defaultModel": "gpt-4o-mini",
+            "apiKey": "disabled-only-secret",
+            "environment": "staging",
+            "priority": 1,
+        },
+    ).json()
+    client.post(f"/api/providers/connections/{provider['id']}/disable", json={"reason": "maintenance"})
+    calls: list[str] = []
+    monkeypatch.setattr("app.main.provider_chat_completion", lambda provider, request: calls.append(provider.label) or {})
+
+    response = client.post(
+        "/api/gateway/openai/v1/chat/completions",
+        headers={"x-neuralops-key": token},
+        json={"messages": [{"role": "user", "content": "This should not route."}], "metadata": {"environment": "staging"}},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "not_configured"
+    assert calls == []
+    route = client.get("/api/gateway/routes").json()[0]
+    assert route["status"] == "not_configured"
+    assert any(attempt["provider"]["label"] == "Disabled Only" and attempt["status"] == "skipped" for attempt in route["attempts"])
 
 
 def test_gateway_budget_and_rate_limit_blocks_before_provider_call(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2427,6 +2854,144 @@ def test_provider_connection_test_requires_key_for_bearer_provider(client: TestC
     assert "API key" in payload["message"]
 
 
+def test_service_account_create_rotate_revoke_and_audit(client: TestClient) -> None:
+    created = client.post(
+        "/api/service-accounts",
+        json={
+            "name": "Production Gateway Worker",
+            "owner": "Platform Engineering",
+            "environment": "prod",
+            "scopes": ["gateway:invoke", "trace:ingest"],
+            "expiresInDays": 30,
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    account = payload["serviceAccount"]
+    first_token = payload["token"]
+    assert account["name"] == "Production Gateway Worker"
+    assert account["status"] == "active"
+    assert account["keyCount"] == 1
+    assert account["activeKeyCount"] == 1
+    assert first_token.startswith("nop_sa_")
+    assert "tokenHash" not in account
+
+    listed = client.get("/api/service-accounts")
+    assert listed.status_code == 200
+    assert any(item["id"] == account["id"] for item in listed.json())
+
+    connect = client.post(
+        "/api/connect/verify",
+        headers={"x-neuralops-key": first_token},
+        json={"serviceName": "service-account-worker", "environment": "prod", "sdk": "curl"},
+    )
+    assert connect.status_code == 200
+
+    rotated = client.post(f"/api/service-accounts/{account['id']}/rotate")
+    assert rotated.status_code == 200
+    rotated_payload = rotated.json()
+    second_token = rotated_payload["token"]
+    assert second_token.startswith("nop_sa_")
+    assert rotated_payload["serviceAccount"]["keyCount"] == 2
+    assert rotated_payload["serviceAccount"]["activeKeyCount"] == 2
+
+    revoked = client.post(f"/api/service-accounts/{account['id']}/revoke")
+    assert revoked.status_code == 200
+    assert revoked.json()["status"] == "revoked"
+    assert revoked.json()["activeKeyCount"] == 0
+
+    rejected = client.post(
+        "/api/connect/verify",
+        headers={"x-neuralops-key": second_token},
+        json={"serviceName": "revoked-service-account", "environment": "prod", "sdk": "curl"},
+    )
+    assert rejected.status_code == 401
+
+    audit = client.get("/api/audit").json()
+    event_types = {event["type"] for event in audit}
+    assert {"service_account.create", "service_account.rotate", "service_account.revoke"}.issubset(event_types)
+
+
+def test_api_key_revoke_blocks_existing_token_and_records_posture(client: TestClient) -> None:
+    created = client.post(
+        "/api/settings/api-keys",
+        json={"name": "temporary ingest key", "role": "Developer", "environment": "prod", "scopes": ["trace:ingest"]},
+    )
+    assert created.status_code == 200
+    token = created.json()["token"]
+    key_id = created.json()["settings"]["apiKeys"][0]["id"]
+
+    accepted = client.post(
+        "/api/connect/verify",
+        headers={"x-neuralops-key": token},
+        json={"serviceName": "revocation-proof", "environment": "prod", "sdk": "curl"},
+    )
+    assert accepted.status_code == 200
+
+    revoked = client.post(f"/api/settings/api-keys/{key_id}/revoke")
+    assert revoked.status_code == 200
+    revoked_key = next(item for item in revoked.json()["apiKeys"] if item["id"] == key_id)
+    assert revoked_key["status"] == "revoked"
+    assert "tokenHash" not in revoked_key
+
+    rejected = client.post(
+        "/api/connect/verify",
+        headers={"x-neuralops-key": token},
+        json={"serviceName": "revoked-key-proof", "environment": "prod", "sdk": "curl"},
+    )
+    assert rejected.status_code == 401
+
+    posture = client.get("/api/access/posture")
+    assert posture.status_code == 200
+    payload = posture.json()
+    assert payload["summary"]["revokedApiKeys"] >= 1
+    assert any(finding["id"] == f"revoked-api-key:{key_id}" for finding in payload["findings"])
+
+
+def test_access_posture_flags_admin_key_and_missing_service_accounts(client: TestClient) -> None:
+    created = client.post(
+        "/api/settings/api-keys",
+        json={"name": "admin automation key", "role": "Admin", "environment": "all", "scopes": ["admin"]},
+    )
+    assert created.status_code == 200
+
+    posture = client.get("/api/access/posture")
+    assert posture.status_code == 200
+    payload = posture.json()
+    assert payload["schemaVersion"] == "neuralops.access.posture.v1"
+    assert payload["decision"] in {"review", "block"}
+    assert payload["summary"]["adminApiKeys"] >= 1
+    finding_ids = {finding["id"] for finding in payload["findings"]}
+    assert any(finding_id.startswith("admin-api-key:") for finding_id in finding_ids)
+    assert "missing-service-account" in finding_ids
+
+
+def test_audit_ledger_exports_tamper_evident_chain(client: TestClient) -> None:
+    client.post(
+        "/api/access/check",
+        json={"permission": "settings:write", "subject": "ledger-proof"},
+    )
+    client.post(
+        "/api/settings/api-keys",
+        json={"name": "ledger key", "role": "Developer", "environment": "dev", "scopes": ["trace:ingest"]},
+    )
+
+    ledger = client.get("/api/audit/ledger")
+    assert ledger.status_code == 200
+    payload = ledger.json()
+    assert payload["schemaVersion"] == "neuralops.audit.ledger.v1"
+    assert payload["workspaceId"] == "local-workspace"
+    assert payload["eventCount"] >= 2
+    assert payload["chainValid"] is True
+    assert payload["digest"].startswith("sha256=")
+    assert payload["events"][0]["eventHash"].startswith("sha256=")
+    assert payload["events"][-1]["chainHash"] == payload["digest"]
+    assert "# NeuralOps Audit Ledger" in payload["markdown"]
+
+    audit = client.get("/api/audit").json()
+    assert any(event["type"] == "audit.ledger.export" for event in audit)
+
+
 def test_live_agent_runtime_uses_configured_provider_connection(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     import app.agent_runtime as agent_runtime
 
@@ -2480,6 +3045,60 @@ def test_local_env_loader_does_not_override_existing_env(tmp_path, monkeypatch) 
 def test_agent_runtime_rejects_unknown_agent(client: TestClient) -> None:
     response = client.post("/api/agent-runtime/run", json={"agentId": "unknown", "input": "hello"})
     assert response.status_code == 404
+
+
+def test_agent_control_plane_lists_managed_identities_with_permissions(client: TestClient) -> None:
+    response = client.get("/api/agent-control/identities")
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) >= 4
+    support = next(identity for identity in payload if identity["agentId"] == "support_triage")
+    assert support["status"] == "active"
+    assert support["owner"] == "AI Platform"
+    assert "gateway:invoke" in support["permissions"]
+    assert support["requiresApproval"] is True
+    assert support["riskLevel"] in {"Major", "Critical"}
+
+
+def test_agent_control_plane_records_production_access_request(client: TestClient) -> None:
+    response = client.post(
+        "/api/agent-control/production-access",
+        json={
+            "agentId": "support_triage",
+            "targetEnvironment": "prod",
+            "justification": "Route customer support triage through the governed gateway after release evidence passes.",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["agentId"] == "support_triage"
+    assert payload["decision"] == "review"
+    assert payload["status"] == "pending_review"
+    assert payload["evidenceId"].startswith("agent_access_")
+
+    requests = client.get("/api/agent-control/production-access").json()
+    assert any(item["id"] == payload["id"] for item in requests)
+
+
+def test_agent_kill_switch_blocks_runtime_execution_and_records_audit(client: TestClient) -> None:
+    patched = client.patch(
+        "/api/agent-control/identities/support_triage",
+        json={"status": "disabled", "killSwitchReason": "Suspected tool misuse during production review."},
+    )
+    assert patched.status_code == 200
+    identity = patched.json()
+    assert identity["status"] == "disabled"
+    assert identity["killSwitchReason"] == "Suspected tool misuse during production review."
+
+    response = client.post(
+        "/api/agent-runtime/run",
+        json={"agentId": "support_triage", "input": "Classify this support issue.", "providerMode": "local"},
+    )
+    assert response.status_code == 423
+    assert "disabled by kill switch" in response.text
+
+    audit = client.get("/api/audit").json()
+    assert any(event["type"] == "agent.identity.update" and event["subject"] == "support_triage" for event in audit)
 
 
 def test_labs_start_empty(client: TestClient) -> None:

@@ -33,6 +33,8 @@ NeuralOps now includes a Risk Register. Teams can create time-boxed risk excepti
 
 NeuralOps now includes a Control Center. It maps persisted evidence into enterprise controls for observability, release gating, gateway policy, SLOs, estate ownership, accepted risk, access audit, incidents, and provider cost/health, then exports an audit-ready JSON/Markdown packet.
 
+NeuralOps now includes Data Governance in Settings. Operators can inventory retained AI records, save retention policy, create legal holds, simulate purge impact, run confirmed purge jobs, and show governance readiness on the Evidence page.
+
 NeuralOps also includes a developer Integration Kit and Trace Replay Gate:
 
 ```powershell
@@ -126,6 +128,26 @@ Invoke-RestMethod -Method Post http://localhost:8000/api/control-center/export
 ```
 
 See [docs/control-center.md](docs/control-center.md).
+
+## Data Governance
+
+Data Governance is the retention and legal-hold workflow for AI evidence. It counts retained records by domain, protects matching records under legal hold, simulates purge impact without deleting anything, and requires exact confirmation before confirmed purge jobs run.
+
+Use the UI in `Admin -> Settings` or call the APIs:
+
+```text
+GET   /api/data-governance/inventory
+GET   /api/data-governance/policy
+PUT   /api/data-governance/policy
+GET   /api/data-governance/legal-holds
+POST  /api/data-governance/legal-holds
+PATCH /api/data-governance/legal-holds/{hold_id}
+POST  /api/data-governance/purge/simulate
+POST  /api/data-governance/purge/run
+GET   /api/data-governance/evidence
+```
+
+See [docs/data-governance.md](docs/data-governance.md).
 
 ## AI Estate Graph
 
