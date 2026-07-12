@@ -36,3 +36,8 @@ playwright-report
 *.sw?
 
 .vercel
+
+# Local Codex and deployment verification state
+.codex/
+.prod-login.tmp
+.vercel-env-check
