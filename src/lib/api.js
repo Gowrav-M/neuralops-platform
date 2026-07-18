@@ -1,7 +1,19 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const configuredIdempotentRetryTimeout = Number(import.meta.env.VITE_IDEMPOTENT_RETRY_TIMEOUT_MS || 90_000);
+const IDEMPOTENT_RETRY_TIMEOUT_MS = Number.isFinite(configuredIdempotentRetryTimeout)
+  ? Math.min(90_000, Math.max(1_000, configuredIdempotentRetryTimeout))
+  : 90_000;
 let authToken = null;
 let qaAuthToken = null;
 let selectedWorkspaceId = typeof window !== 'undefined' ? window.localStorage.getItem('neuralops-workspace-id') : null;
+
+export class ApiError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
 
 export function setApiAuthToken(token) {
   authToken = token;
@@ -22,27 +34,99 @@ export function setApiWorkspaceId(workspaceId) {
 }
 
 async function request(path, options = {}) {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-      ...(qaAuthToken ? { 'x-neuralops-qa-token': qaAuthToken } : {}),
-      ...(selectedWorkspaceId ? { 'x-neuralops-workspace-id': selectedWorkspaceId } : {}),
-      ...(options.headers || {}),
-    },
-  });
+  const {
+    retryWithIdempotency = false,
+    retryForMs = IDEMPOTENT_RETRY_TIMEOUT_MS,
+    ...fetchOptions
+  } = options;
+  const idempotencyKey = headerValue(fetchOptions.headers, 'Idempotency-Key');
+  const canRetry = retryWithIdempotency && Boolean(idempotencyKey);
+  const startedAt = Date.now();
+  const backoff = [1200, 2400, 4800, 8000, 12000];
+  let attempt = 0;
+
+  while (true) {
+    try {
+      const remaining = Math.max(1, retryForMs - (Date.now() - startedAt));
+      return await requestOnce(path, fetchOptions, canRetry ? Math.min(20_000, remaining) : null);
+    } catch (error) {
+      const elapsed = Date.now() - startedAt;
+      if (!canRetry || !isRetryableApiError(error) || elapsed >= retryForMs) throw error;
+      await retryDelay(Math.min(backoff[Math.min(attempt, backoff.length - 1)], retryForMs - elapsed));
+      attempt += 1;
+    }
+  }
+}
+
+async function requestOnce(path, options, timeoutMs) {
+  const controller = timeoutMs && !options.signal ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  let response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      ...(controller ? { signal: controller.signal } : {}),
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        ...(qaAuthToken ? { 'x-neuralops-qa-token': qaAuthToken } : {}),
+        ...(selectedWorkspaceId ? { 'x-neuralops-workspace-id': selectedWorkspaceId } : {}),
+        ...(options.headers || {}),
+      },
+    });
+  } catch (error) {
+    if (controller?.signal.aborted) throw new TypeError('Network request timed out', { cause: error });
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 
   if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(detail || `Request failed with ${response.status}`);
+    const detail = await response.json()
+      .then((payload) => typeof payload?.detail === 'string' ? payload.detail : '')
+      .catch(() => '');
+    const safeDetail = response.status < 500 ? boundedApiMessage(detail) : '';
+    throw new ApiError(response.status, safeDetail || `Request failed with status ${response.status}`);
   }
 
   return response.json();
 }
 
+export function isRetryableApiError(error) {
+  if (error instanceof ApiError) return error.status === 429 || error.status >= 500;
+  return error instanceof TypeError;
+}
+
+function headerValue(headers, name) {
+  if (!headers) return '';
+  if (headers instanceof Headers) return headers.get(name) || '';
+  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  return entry?.[1] || '';
+}
+
+function retryDelay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function boundedApiMessage(value) {
+  return String(value || '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180);
+}
+
 export function fetchDashboard() {
   return request('/api/dashboard');
+}
+
+export function submitPilotApplication(payload, idempotencyKey) {
+  return request('/api/public/pilot-applications', {
+    method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
+    body: JSON.stringify(payload),
+    retryWithIdempotency: true,
+  });
 }
 
 export function fetchSystemStatus() {
@@ -495,11 +579,65 @@ export function fetchAgentIdentities() {
   return request('/api/agent-control/identities');
 }
 
+export function registerAgentIdentity(payload) {
+  return request('/api/agent-control/identities', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export function patchAgentIdentity(agentId, patch) {
   return request(`/api/agent-control/identities/${agentId}`, {
     method: 'PATCH',
     body: JSON.stringify(patch),
   });
+}
+
+export function rotateAgentIdentity(identityId) {
+  return request(`/api/agent-control/identities/${identityId}/rotate`, { method: 'POST' });
+}
+
+export function revokeAgentIdentity(identityId, reason) {
+  return request(`/api/agent-control/identities/${identityId}/revoke`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export function activateAgentKillSwitch(identityId, reason) {
+  return request(`/api/agent-control/identities/${identityId}/kill-switch`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export function fetchAgentApprovals() {
+  return request('/api/agent-control/approvals');
+}
+
+export function fetchAgentLeases() {
+  return request('/api/agent-control/leases');
+}
+
+function decideAgentApproval(approvalId, decision, payload) {
+  return request(`/api/agent-control/approvals/${approvalId}/${decision}`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': `approval:${approvalId}:${decision}` },
+    body: JSON.stringify(payload),
+    retryWithIdempotency: true,
+  });
+}
+
+export function approveAgentApproval(approvalId, payload) {
+  return decideAgentApproval(approvalId, 'approve', payload);
+}
+
+export function blockAgentApproval(approvalId, payload) {
+  return decideAgentApproval(approvalId, 'block', payload);
+}
+
+export function revokeAgentApproval(approvalId, payload) {
+  return decideAgentApproval(approvalId, 'revoke', payload);
 }
 
 export function requestAgentProductionAccess(payload) {
@@ -511,6 +649,27 @@ export function requestAgentProductionAccess(payload) {
 
 export function fetchAgentProductionAccessRequests() {
   return request('/api/agent-control/production-access');
+}
+
+function decideAgentProductionAccess(requestId, decision, payload) {
+  return request(`/api/agent-control/production-access/${requestId}/${decision}`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': `production-access:${requestId}:${decision}` },
+    body: JSON.stringify(payload),
+    retryWithIdempotency: true,
+  });
+}
+
+export function approveAgentProductionAccess(requestId, payload) {
+  return decideAgentProductionAccess(requestId, 'approve', payload);
+}
+
+export function blockAgentProductionAccess(requestId, payload) {
+  return decideAgentProductionAccess(requestId, 'block', payload);
+}
+
+export function revokeAgentProductionAccess(requestId, payload) {
+  return decideAgentProductionAccess(requestId, 'revoke', payload);
 }
 
 export function fetchAgentDefinitions() {

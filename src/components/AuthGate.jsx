@@ -14,7 +14,7 @@ function authRedirectUrl() {
   return window.location.origin;
 }
 
-export default function AuthGate({ onSession }) {
+export default function AuthGate({ onSession, allowSignup = true }) {
   const [mode, setMode] = useState('sign-in');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -103,14 +103,14 @@ export default function AuthGate({ onSession }) {
           <h1 className="page-title" style={{ marginTop: '12px' }}>NeuralOps</h1>
           <p className="page-subtitle">{message}</p>
         </div>
-        <div className="auth-mode-switch" aria-label="Authentication mode">
+        {allowSignup && <div className="auth-mode-switch" aria-label="Authentication mode">
           <button className={mode === 'sign-in' ? 'active' : ''} type="button" onClick={() => switchMode('sign-in')}>
             Existing account
           </button>
           <button className={mode === 'sign-up' ? 'active' : ''} type="button" onClick={() => switchMode('sign-up')}>
             Create account
           </button>
-        </div>
+        </div>}
         <input
           className="filter-search-input"
           type="email"

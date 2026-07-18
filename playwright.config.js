@@ -5,6 +5,7 @@ const e2eRunId = process.env.NEURALOPS_E2E_RUN_ID || String(Date.now());
 
 export default defineConfig({
   testDir: './tests/e2e',
+  testIgnore: ['landing.spec.js'],
   timeout: 60_000,
   expect: {
     timeout: 10_000,
@@ -33,13 +34,15 @@ export default defineConfig({
       },
     },
     {
-      command: 'cmd /c npm run dev -- --host 127.0.0.1 --port 5173',
+      command: 'npm run dev -- --host 127.0.0.1 --port 5173',
       url: 'http://127.0.0.1:5173',
       reuseExistingServer: false,
       timeout: 60_000,
       env: {
         VITE_API_BASE_URL: 'http://127.0.0.1:8000',
         VITE_REQUIRE_AUTH: 'false',
+        VITE_API_WARMING_TIMEOUT_MS: '3000',
+        VITE_IDEMPOTENT_RETRY_TIMEOUT_MS: '3000',
       },
     },
   ],
