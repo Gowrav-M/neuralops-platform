@@ -2,6 +2,28 @@ import { createHash, randomUUID } from 'node:crypto';
 
 const DEFAULT_RETRY_MS = 1_000;
 
+export async function fetchWithTimeout(
+  url,
+  options = {},
+  { fetchImpl = fetch, timeoutMs = 90_000 } = {},
+) {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(new Error(`request timed out after ${timeoutMs}ms`)),
+    timeoutMs,
+  );
+  try {
+    return await fetchImpl(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`request timed out after ${timeoutMs}ms`, { cause: error });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function safeRetryDelay(response, remainingMs) {
   const retryAfter = Number(response?.headers?.get?.('retry-after'));
   const requested = Number.isFinite(retryAfter) && retryAfter > 0
@@ -63,22 +85,20 @@ export function buildDeploymentCanaryIdentity(canaryId) {
   };
 }
 
-export async function ensureGovernanceSimulation({ requestJson }) {
-  const evidence = await requestJson('/api/data-governance/evidence');
-  if (!evidence.response.ok) {
-    throw new Error(`governance evidence check failed with ${evidence.response.status}`);
-  }
-  if (evidence.payload.latestSimulation?.id) {
+export async function ensureGovernanceSimulation({ requestJson, readiness }) {
+  const governanceCheck = readiness.checks?.find((check) => check.id === 'data_governance');
+  if (governanceCheck?.state !== 'block') {
     return {
       name: 'governance-simulation',
       status: 'pass',
-      detail: `existing=${evidence.payload.latestSimulation.id}`,
+      detail: 'readiness evidence already satisfied',
+      remediated: false,
     };
   }
 
   const simulation = await requestJson('/api/data-governance/purge/simulate', {
     method: 'POST',
-    body: '{}',
+    body: JSON.stringify({ domains: ['agent_identities'] }),
   });
   if (!simulation.response.ok || !simulation.payload.id) {
     throw new Error(`governance simulation failed with ${simulation.response.status}`);
@@ -87,6 +107,7 @@ export async function ensureGovernanceSimulation({ requestJson }) {
     name: 'governance-simulation',
     status: 'pass',
     detail: `created=${simulation.payload.id}; destructive=false`,
+    remediated: true,
   };
 }
 
