@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   buildDeploymentCanaryIdentity,
+  ensureGovernanceSimulation,
   waitForDeploymentReadiness,
   verifyHighRiskFailsClosed,
 } from '../../scripts/deployment-verifier.mjs';
@@ -26,6 +27,45 @@ test('deployment canary registration matches the production identity contract', 
     permissions: ['metadata:read', 'shell:execute'],
     captureMode: 'metadata_only',
   });
+});
+
+test('deployment verifier creates missing non-destructive governance evidence', async () => {
+  const requests = [];
+  const check = await ensureGovernanceSimulation({
+    requestJson: async (path, options = {}) => {
+      requests.push({ path, options });
+      if (path === '/api/data-governance/evidence') {
+        return { response: jsonResponse(200, { latestSimulation: null }), payload: { latestSimulation: null } };
+      }
+      return {
+        response: jsonResponse(200, { id: 'purge_sim_release' }),
+        payload: { id: 'purge_sim_release' },
+      };
+    },
+  });
+
+  assert.equal(check.status, 'pass');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].path, '/api/data-governance/purge/simulate');
+  assert.equal(requests[1].options.method, 'POST');
+  assert.equal(requests[1].options.body, '{}');
+});
+
+test('deployment verifier reuses existing governance evidence', async () => {
+  let calls = 0;
+  const check = await ensureGovernanceSimulation({
+    requestJson: async () => {
+      calls += 1;
+      return {
+        response: jsonResponse(200, { latestSimulation: { id: 'purge_sim_existing' } }),
+        payload: { latestSimulation: { id: 'purge_sim_existing' } },
+      };
+    },
+  });
+
+  assert.equal(check.status, 'pass');
+  assert.equal(calls, 1);
+  assert.match(check.detail, /purge_sim_existing/);
 });
 
 test('waitForDeploymentReadiness preserves warming state and becomes ready within the deadline', async () => {

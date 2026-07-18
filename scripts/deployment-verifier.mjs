@@ -63,6 +63,33 @@ export function buildDeploymentCanaryIdentity(canaryId) {
   };
 }
 
+export async function ensureGovernanceSimulation({ requestJson }) {
+  const evidence = await requestJson('/api/data-governance/evidence');
+  if (!evidence.response.ok) {
+    throw new Error(`governance evidence check failed with ${evidence.response.status}`);
+  }
+  if (evidence.payload.latestSimulation?.id) {
+    return {
+      name: 'governance-simulation',
+      status: 'pass',
+      detail: `existing=${evidence.payload.latestSimulation.id}`,
+    };
+  }
+
+  const simulation = await requestJson('/api/data-governance/purge/simulate', {
+    method: 'POST',
+    body: '{}',
+  });
+  if (!simulation.response.ok || !simulation.payload.id) {
+    throw new Error(`governance simulation failed with ${simulation.response.status}`);
+  }
+  return {
+    name: 'governance-simulation',
+    status: 'pass',
+    detail: `created=${simulation.payload.id}; destructive=false`,
+  };
+}
+
 export async function verifyHighRiskFailsClosed({ requestJson, identityId, agentCredential }) {
   const requestId = randomUUID();
   const { response, payload } = await requestJson('/api/agent-control/authorize', {

@@ -132,7 +132,7 @@ jobs:
           NEURALOPS_QA_AUTH_TOKEN: ${{ secrets.NEURALOPS_QA_AUTH_TOKEN }}
           NEURALOPS_WORKSPACE_ID: ${{ secrets.NEURALOPS_QA_WORKSPACE_ID }}
           NEURALOPS_DEPLOYMENT_EVIDENCE_PATH: artifacts/deployment-verification.json
-          NEURALOPS_DEPLOYED_FAIL_ON: review
+          NEURALOPS_DEPLOYED_FAIL_ON: block
         shell: bash
         run: |
           test -n "$NEURALOPS_QA_AUTH_TOKEN"
