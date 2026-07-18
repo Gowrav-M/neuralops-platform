@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha1, sha256
 from threading import Lock
@@ -16,22 +17,43 @@ from .database import (
 from .schemas import AgentJob, AgentJobProcessResponse, AgentJobSubmitRequest
 
 
+@dataclass
+class _IdentityLockEntry:
+    lock: Any
+    references: int = 0
+
+
 _identity_locks_guard = Lock()
-_identity_locks: dict[tuple[str, str], Lock] = {}
+_identity_locks: dict[tuple[str, str], _IdentityLockEntry] = {}
 
 
 @contextmanager
 def identity_execution_guard(workspace_id: str, identity_ids: set[str]):
     keys = sorted((workspace_id, value) for value in identity_ids if value)
+    entries: list[tuple[tuple[str, str], _IdentityLockEntry]] = []
     with _identity_locks_guard:
-        locks = [_identity_locks.setdefault(key, Lock()) for key in keys]
-    for lock in locks:
-        lock.acquire()
+        for key in keys:
+            entry = _identity_locks.get(key)
+            if entry is None:
+                entry = _IdentityLockEntry(lock=Lock())
+                _identity_locks[key] = entry
+            entry.references += 1
+            entries.append((key, entry))
+
+    acquired: list[_IdentityLockEntry] = []
     try:
+        for _, entry in entries:
+            entry.lock.acquire()
+            acquired.append(entry)
         yield
     finally:
-        for lock in reversed(locks):
-            lock.release()
+        for entry in reversed(acquired):
+            entry.lock.release()
+        with _identity_locks_guard:
+            for key, entry in entries:
+                entry.references -= 1
+                if entry.references == 0 and _identity_locks.get(key) is entry:
+                    del _identity_locks[key]
 
 
 def cancel_jobs_for_identity(

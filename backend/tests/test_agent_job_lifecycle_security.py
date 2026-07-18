@@ -329,3 +329,17 @@ def test_concurrent_workers_claim_once_and_execute_once(
 
     assert all(response.status_code == 200 for response in responses)
     assert call_count == 1
+
+
+def test_identity_execution_guard_releases_unused_lock_entries() -> None:
+    baseline = len(job_queue._identity_locks)
+
+    for index in range(100):
+        workspace_id = f"lock-cleanup-workspace-{index}"
+        identity_id = f"lock-cleanup-identity-{index}"
+        key = (workspace_id, identity_id)
+
+        with job_queue.identity_execution_guard(workspace_id, {identity_id}):
+            assert key in job_queue._identity_locks
+
+    assert len(job_queue._identity_locks) == baseline
