@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 DecisionStatus = Literal["success", "warning", "failed", "blocked"]
@@ -41,6 +41,95 @@ EstateSystemKind = Literal["app", "agent", "prompt", "model", "provider", "datas
 EstateSystemSource = Literal["trace", "otel", "gateway", "agent", "provider", "prompt", "rag", "policy", "evidence"]
 EstateHealthStatus = Literal["healthy", "review", "blocked"]
 EstateEdgeType = Literal["calls", "routes_to", "uses", "evaluated_by", "guarded_by", "released_by", "observed_as", "owns"]
+
+
+DISPOSABLE_EMAIL_DOMAINS = {
+    "10minutemail.com",
+    "guerrillamail.com",
+    "maildrop.cc",
+    "mailinator.com",
+    "temp-mail.org",
+    "tempmail.com",
+    "throwawaymail.com",
+    "yopmail.com",
+}
+
+
+class PilotApplicationCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=2, max_length=120)
+    workEmail: str = Field(min_length=6, max_length=254)
+    company: str = Field(min_length=2, max_length=160)
+    role: str | None = Field(default=None, min_length=2, max_length=120)
+    teamSize: str = Field(min_length=1, max_length=40)
+    expectedAgents: int = Field(ge=1, le=10_000)
+    primaryUseCase: str = Field(min_length=12, max_length=2_000)
+    consent: Literal[True]
+    website: str = Field(default="", max_length=200)
+
+    @field_validator("name", "company", "role", "teamSize", "primaryUseCase", "website", mode="before")
+    @classmethod
+    def strip_text_fields(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("workEmail", mode="before")
+    @classmethod
+    def validate_work_email(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        email = value.strip().lower()
+        if len(email) > 254 or email.count("@") != 1:
+            raise ValueError("Enter a valid work email")
+        local, domain = email.rsplit("@", 1)
+        domain_labels = domain.split(".")
+        if (
+            not local
+            or len(local) > 64
+            or local.startswith(".")
+            or local.endswith(".")
+            or ".." in local
+            or not all(
+                character.isalnum() or character in ".!#$%&'*+-/=?^_`{|}~"
+                for character in local
+            )
+            or len(domain) > 253
+            or len(domain_labels) < 2
+            or any(
+                not label
+                or len(label) > 63
+                or label.startswith("-")
+                or label.endswith("-")
+                or not all(character.isalnum() or character == "-" for character in label)
+                for label in domain_labels
+            )
+            or domain in DISPOSABLE_EMAIL_DOMAINS
+        ):
+            raise ValueError("Enter a valid non-disposable work email")
+        return email
+
+
+class PilotApplicationReceipt(BaseModel):
+    applicationId: str
+    status: Literal["received"] = "received"
+    submittedAt: str
+
+
+class PilotApplicationInternal(BaseModel):
+    id: str
+    name: str
+    workEmail: str
+    company: str
+    role: str | None = None
+    teamSize: str
+    expectedAgents: int
+    primaryUseCase: str
+    consent: Literal[True]
+    consentVersion: Literal["invited-pilot-v1"]
+    captureMode: Literal["lead_metadata_only"]
+    source: Literal["landing_page"]
+    status: Literal["new"]
+    createdAt: str
 
 
 class Stats(BaseModel):
@@ -1042,12 +1131,18 @@ class AgentRunRequest(BaseModel):
     agentId: str
     input: str = Field(min_length=1)
     providerMode: Literal["local", "auto", "live"] = "auto"
+    provider: str | None = Field(default=None, min_length=1, max_length=80)
     model: str | None = None
     environment: Literal["prod", "staging", "dev"] = "staging"
+    authorizationLeaseId: str | None = Field(default=None, min_length=1, max_length=160)
+    authorizationContextHash: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
 
 
-AgentIdentityStatus = Literal["active", "pending_approval", "disabled"]
-AgentProductionAccessStatus = Literal["pending_review", "approved", "blocked"]
+AgentIdentityStatus = Literal["active", "pending_approval", "disabled", "revoked"]
+AgentProductionAccessStatus = Literal["not_requested", "pending_review", "approved", "blocked", "revoked"]
 
 
 class AgentIdentity(BaseModel):
@@ -1065,21 +1160,130 @@ class AgentIdentity(BaseModel):
     createdAt: str
     updatedAt: str
     lastApprovedAt: str | None = None
+    captureMode: Literal["metadata_only"] = "metadata_only"
+    credentialStatus: Literal["active", "revoked"] = "active"
+    credentialPreview: str | None = None
+    productionAccessStatus: AgentProductionAccessStatus = "not_requested"
+
+
+class AgentIdentityCreate(BaseModel):
+    displayName: str = Field(min_length=1, max_length=120)
+    owner: str = Field(min_length=1, max_length=120)
+    environment: Literal["prod", "staging", "dev", "all"] = "staging"
+    riskLevel: Severity = "Major"
+    permissions: list[str] = Field(default_factory=list, max_length=30)
+    providerAccess: list[str] = Field(default_factory=list, max_length=20)
+    captureMode: Literal["metadata_only"] = "metadata_only"
+
+
+class AgentIdentityCredentialResponse(BaseModel):
+    identity: AgentIdentity
+    credential: str
+
+
+class AgentControlReasonRequest(BaseModel):
+    reason: str = Field(default="Operator action", min_length=3, max_length=500)
+
+
+class AgentApprovalDecisionRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+    evidenceHash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class AgentAuthorizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    identityId: str = Field(min_length=1, max_length=160)
+    action: str = Field(min_length=1, max_length=80)
+    toolCategory: str = Field(min_length=1, max_length=80)
+    operation: str = Field(min_length=1, max_length=120)
+    contextHash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    contentHash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    idempotencyKey: str = Field(min_length=1, max_length=160)
+    provider: str = Field(min_length=1, max_length=80)
+    environment: Literal["prod", "staging", "dev"] | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=160)
+    timingMs: int | None = Field(default=None, ge=0, le=86_400_000)
+    tokens: int | None = Field(default=None, ge=0, le=1_000_000_000)
+    costUsd: float | None = Field(default=None, ge=0, le=1_000_000)
+    status: Literal["pending", "success", "error", "blocked"] | None = None
+    policyFindings: list[Annotated[str, Field(min_length=1, max_length=240)]] = Field(default_factory=list, max_length=50)
+
+
+class AgentLeaseBindingRequest(AgentAuthorizeRequest):
+    leaseId: str = Field(min_length=1, max_length=160)
+
+
+class AgentApproval(BaseModel):
+    id: str
+    identityId: str
+    action: str
+    toolCategory: str
+    operation: str
+    contextHash: str
+    provider: str | None = None
+    model: str | None = None
+    environment: Literal["prod", "staging", "dev"]
+    risk: Literal["high"] = "high"
+    status: Literal["pending", "approved", "blocked", "revoked", "expired", "consumed"]
+    idempotencyKey: str
+    requestedBy: str
+    createdAt: str
+    expiresAt: str
+    contentHash: str
+    actor: str | None = None
+    actorRole: WorkspaceRole | None = None
+    reason: str | None = None
+    evidenceHash: str | None = None
+    reviewedAt: str | None = None
+    consumedAt: str | None = None
+
+
+class AgentAuthorizationLease(BaseModel):
+    id: str
+    identityId: str
+    action: str
+    toolCategory: str
+    operation: str
+    contextHash: str
+    contentHash: str
+    provider: str
+    environment: Literal["prod", "staging", "dev"]
+    risk: Literal["low", "high"]
+    status: Literal["active", "revoked", "consumed", "expired"]
+    idempotencyKey: str
+    approvalId: str | None = None
+    createdAt: str
+    expiresAt: str
+    consumedAt: str | None = None
+    model: str | None = None
+    timingMs: int | None = None
+    tokens: int | None = None
+    costUsd: float | None = None
+    telemetryStatus: Literal["pending", "success", "error", "blocked"] | None = None
+    policyFindings: list[str] = Field(default_factory=list)
+
+
+class AgentAuthorizeResponse(BaseModel):
+    decision: Literal["allow", "review"]
+    reason: str
+    approval: AgentApproval | None = None
+    lease: AgentAuthorizationLease | None = None
 
 
 class AgentIdentityPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     owner: str | None = None
     environment: Literal["prod", "staging", "dev", "all"] | None = None
-    status: AgentIdentityStatus | None = None
     permissions: list[str] | None = None
     providerAccess: list[str] | None = None
-    requiresApproval: bool | None = None
-    killSwitchReason: str | None = None
+    captureMode: Literal["metadata_only"] | None = None
 
 
 class AgentProductionAccessRequest(BaseModel):
     agentId: str
-    targetEnvironment: Literal["prod", "staging"] = "prod"
+    targetEnvironment: Literal["prod"] = "prod"
     justification: str = Field(min_length=12)
 
 
@@ -1087,12 +1291,16 @@ class AgentProductionAccessDecision(BaseModel):
     id: str
     agentId: str
     targetEnvironment: Literal["prod", "staging"]
-    status: AgentProductionAccessStatus
+    status: Literal["pending_review", "approved", "blocked", "revoked"]
     decision: Literal["allow", "review", "block"]
     justification: str
     evidenceId: str
+    requestedBy: str
     createdAt: str
     reviewedAt: str | None = None
+    reviewedBy: str | None = None
+    reason: str | None = None
+    evidenceHash: str | None = None
 
 
 JobStatus = Literal["queued", "running", "succeeded", "blocked", "failed", "cancelled"]
@@ -1100,6 +1308,7 @@ JobStatus = Literal["queued", "running", "succeeded", "blocked", "failed", "canc
 
 class AgentJob(BaseModel):
     id: str
+    workspaceId: str = Field(min_length=1, max_length=160)
     status: JobStatus
     request: AgentRunRequest
     attempts: int = Field(ge=0)
@@ -1159,12 +1368,19 @@ class AgentRunResponse(BaseModel):
 
 
 class LabRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(default="Untitled experiment", min_length=1)
     input: str = Field(min_length=1)
     agentIds: list[str] = Field(default_factory=lambda: ["support_triage"], min_length=1)
     providerMode: Literal["local", "auto", "live"] = "auto"
     environment: Literal["prod", "staging", "dev"] = "staging"
+    provider: str | None = Field(default=None, min_length=1, max_length=80)
     model: str | None = None
+    authorizationLeaseIds: dict[str, str] = Field(default_factory=dict)
+    authorizationContextHashes: dict[str, Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]] = Field(
+        default_factory=dict
+    )
 
 
 class LabVariantResult(BaseModel):

@@ -20,7 +20,14 @@ def auth_required() -> bool:
 
 
 def public_auth_paths() -> set[str]:
-    return {"/health", "/docs", "/openapi.json", "/redoc"}
+    return {
+        "/health",
+        "/ready",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+        "/api/public/pilot-applications",
+    }
 
 
 def set_current_claims(claims: dict[str, Any] | None):

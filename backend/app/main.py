@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from copy import deepcopy
@@ -19,14 +20,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .database import (
+    compare_and_set_record_status,
     count_records_for_workspace,
+    create_agent_production_access_request_atomic,
+    decide_agent_approval_atomic,
+    decide_agent_production_access_atomic,
     delete_record,
     get_record,
+    get_active_agent_identity_by_credential_hash,
     init_db,
+    insert_record_if_absent,
+    issue_agent_authorization_lease,
+    list_domain_records_with_ids,
     list_records,
     list_records_for_workspace,
     save_record,
     storage_backend,
+    mutate_agent_identity_and_revoke_leases,
+    probe_database,
     update_record,
 )
 from .agent_runtime import AGENT_DEFINITIONS, detect_policy_findings, estimate_tokens, list_providers, run_agent
@@ -43,7 +54,18 @@ from .auth import (
     workspace_id_from_claims,
 )
 from . import seed
-from .job_queue import cancel_job, get_job, list_jobs, process_job, process_next_job, queue_summary, retry_job, submit_job
+from .job_queue import (
+    cancel_job,
+    cancel_jobs_for_identity,
+    get_job,
+    identity_execution_guard,
+    list_jobs,
+    process_job,
+    process_next_job,
+    queue_summary,
+    retry_job,
+    submit_job,
+)
 from .metrics import build_stats
 from .otel import normalize_otel_payload, replay_trace
 from .provider_catalog import (
@@ -77,7 +99,16 @@ from .schemas import (
     AgentJobSubmitResponse,
     AgentRuntime,
     AgentIdentity,
+    AgentIdentityCreate,
+    AgentIdentityCredentialResponse,
     AgentIdentityPatch,
+    AgentLeaseBindingRequest,
+    AgentControlReasonRequest,
+    AgentApproval,
+    AgentApprovalDecisionRequest,
+    AgentAuthorizationLease,
+    AgentAuthorizeRequest,
+    AgentAuthorizeResponse,
     AgentProductionAccessDecision,
     AgentProductionAccessRequest,
     AiSloCheck,
@@ -136,6 +167,9 @@ from .schemas import (
     PolicyTestRequest,
     PolicyTestResult,
     PolicyViolation,
+    PilotApplicationCreate,
+    PilotApplicationInternal,
+    PilotApplicationReceipt,
     ProductionReadinessCheck,
     ProductionReadinessReport,
     CostBudgetUpdateRequest,
@@ -240,10 +274,46 @@ from .schemas import (
 )
 
 
+STARTUP_STATE: dict[str, str | None] = {"status": "checking", "error": None}
+STARTUP_STATE_LOCK = Lock()
+
+
+def initialize_database() -> None:
+    try:
+        init_db()
+    except Exception as exc:
+        with STARTUP_STATE_LOCK:
+            STARTUP_STATE.update(status="unavailable", error=type(exc).__name__)
+        raise
+    with STARTUP_STATE_LOCK:
+        STARTUP_STATE.update(status="ready", error=None)
+
+
+def consume_startup_task(task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        # initialize_database records the safe failure state used by /ready.
+        return
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    init_db()
-    yield
+    startup_task = None
+    with STARTUP_STATE_LOCK:
+        STARTUP_STATE.update(status="checking", error=None)
+    if storage_backend() == "postgres":
+        startup_task = asyncio.create_task(asyncio.to_thread(initialize_database))
+        startup_task.add_done_callback(consume_startup_task)
+    else:
+        initialize_database()
+    try:
+        yield
+    finally:
+        if startup_task is not None and not startup_task.done():
+            startup_task.cancel()
 
 
 app = FastAPI(title="NeuralOps Platform API", version="0.1.0", lifespan=lifespan)
@@ -258,6 +328,10 @@ DATA_GOVERNANCE_DOMAINS = [
     "costs",
     "agent_runs",
     "agent_jobs",
+    "agent_identities",
+    "agent_approvals",
+    "agent_authorization_leases",
+    "agent_access_requests",
     "lab_experiments",
     "gateway_route_events",
     "gateway_request_logs",
@@ -282,8 +356,12 @@ DATA_GOVERNANCE_DOMAINS = [
     "automation_rules",
     "automation_events",
     "connector_deliveries",
+    "pilot_applications",
     "audit",
 ]
+
+PILOT_RATE_LIMIT_LOCK = Lock()
+PILOT_RATE_LIMIT_BUCKETS: dict[str, list[float]] = {}
 
 allowed_origins = [
     origin.strip()
@@ -300,6 +378,31 @@ app.add_middleware(
 )
 
 
+AGENT_CREDENTIAL_RUNTIME_PATHS: set[tuple[str, str]] = {
+    ("POST", "/api/agent-control/authorize"),
+    ("POST", "/api/agent-control/approvals"),
+    ("POST", "/api/agent-control/leases/validate"),
+    ("POST", "/api/agent-control/leases/consume"),
+}
+
+
+def workspace_for_agent_credential(credential: str | None) -> str:
+    if not credential:
+        raise HTTPException(status_code=401, detail="Invalid agent credential")
+    supplied_hash = sha256(credential.encode("utf-8")).hexdigest()
+    identity = get_active_agent_identity_by_credential_hash(supplied_hash)
+    stored_hash = str(identity.get("credentialHash", "")) if identity else ""
+    workspace_id = identity.get("workspaceId") if identity else None
+    if (
+        not stored_hash
+        or not compare_digest(supplied_hash, stored_hash)
+        or not isinstance(workspace_id, str)
+        or not workspace_id
+    ):
+        raise HTTPException(status_code=401, detail="Invalid agent credential")
+    return workspace_id
+
+
 @app.middleware("http")
 async def auth_gate(request: Request, call_next):
     if not auth_required() or request.method == "OPTIONS" or request.url.path in public_auth_paths():
@@ -307,6 +410,10 @@ async def auth_gate(request: Request, call_next):
     token = None
     workspace_token = None
     try:
+        if (request.method, request.url.path) in AGENT_CREDENTIAL_RUNTIME_PATHS:
+            workspace_id = workspace_for_agent_credential(request.headers.get("x-neuralops-agent-key"))
+            workspace_token = set_requested_workspace_id(workspace_id)
+            return await call_next(request)
         claims = verify_request_claims(
             request.headers.get("authorization"),
             request.headers.get("x-neuralops-qa-token"),
@@ -327,6 +434,65 @@ async def auth_gate(request: Request, call_next):
 
 def hash_token(token: str) -> str:
     return sha256(token.encode("utf-8")).hexdigest()
+
+
+def pilot_request_hash(application: PilotApplicationCreate) -> str:
+    payload = application.model_dump(exclude={"website"})
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return f"sha256:{sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+def pilot_client_fingerprint(request: Request) -> str:
+    address = request.client.host if request.client is not None else "unknown"
+    salt = os.getenv("NEURALOPS_PILOT_RATE_LIMIT_SALT", "neuralops-pilot-rate-limit")
+    return sha256(f"{salt}:{address}".encode("utf-8")).hexdigest()
+
+
+def enforce_pilot_rate_limit(request: Request) -> None:
+    try:
+        maximum = max(1, min(int(os.getenv("NEURALOPS_PILOT_RATE_LIMIT_MAX", "5")), 100))
+        window_seconds = max(10, min(int(os.getenv("NEURALOPS_PILOT_RATE_LIMIT_WINDOW_SECONDS", "60")), 3_600))
+        maximum_buckets = max(1, min(int(os.getenv("NEURALOPS_PILOT_RATE_LIMIT_BUCKET_MAX", "10000")), 100_000))
+    except ValueError:
+        maximum = 5
+        window_seconds = 60
+        maximum_buckets = 10_000
+    fingerprint = pilot_client_fingerprint(request)
+    now = perf_counter()
+    with PILOT_RATE_LIMIT_LOCK:
+        expired = [
+            key
+            for key, timestamps in PILOT_RATE_LIMIT_BUCKETS.items()
+            if not any(now - timestamp < window_seconds for timestamp in timestamps)
+        ]
+        for key in expired:
+            PILOT_RATE_LIMIT_BUCKETS.pop(key, None)
+        if fingerprint not in PILOT_RATE_LIMIT_BUCKETS and len(PILOT_RATE_LIMIT_BUCKETS) >= maximum_buckets:
+            overflow = len(PILOT_RATE_LIMIT_BUCKETS) - maximum_buckets + 1
+            oldest = sorted(
+                PILOT_RATE_LIMIT_BUCKETS,
+                key=lambda key: max(PILOT_RATE_LIMIT_BUCKETS[key], default=0.0),
+            )[:overflow]
+            for key in oldest:
+                PILOT_RATE_LIMIT_BUCKETS.pop(key, None)
+        recent = [timestamp for timestamp in PILOT_RATE_LIMIT_BUCKETS.get(fingerprint, []) if now - timestamp < window_seconds]
+        if len(recent) >= maximum:
+            PILOT_RATE_LIMIT_BUCKETS[fingerprint] = recent
+            raise HTTPException(status_code=429, detail="Too many pilot applications. Please retry later.")
+        recent.append(now)
+        PILOT_RATE_LIMIT_BUCKETS[fingerprint] = recent
+
+
+def pilot_operations_workspace_id() -> str:
+    return os.getenv("NEURALOPS_PILOT_OPERATIONS_WORKSPACE_ID", "local-workspace").strip() or "local-workspace"
+
+
+def pilot_application_receipt(record: dict[str, Any]) -> PilotApplicationReceipt:
+    return PilotApplicationReceipt(
+        applicationId=str(record["id"]),
+        status="received",
+        submittedAt=str(record["createdAt"]),
+    )
 
 
 def settings_payload_or_404() -> dict[str, Any]:
@@ -1838,6 +2004,42 @@ def build_system_status() -> SystemStatus:
 ACTION_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
+def build_agent_control_posture() -> dict[str, int]:
+    now = datetime.now()
+    identities = [identity.model_dump() for identity in agent_control_identities()]
+    approvals = scoped_records("agent_approvals")
+    jobs = scoped_records("agent_jobs")
+    runs = scoped_records("agent_runs")
+
+    stale_approvals = 0
+    for approval in approvals:
+        if approval.get("status") != "pending":
+            continue
+        try:
+            if datetime.fromisoformat(str(approval.get("expiresAt", ""))) <= now:
+                stale_approvals += 1
+        except ValueError:
+            stale_approvals += 1
+
+    blocked_jobs = sum(1 for job in jobs if job.get("status") in {"blocked", "failed", "cancelled"})
+    blocked_runs = sum(1 for run in runs if run.get("decision") == "block")
+    anomalous_runs = sum(
+        1
+        for run in runs
+        if run.get("decision") == "review" or bool(run.get("policyFindings"))
+    )
+    return {
+        "registeredIdentities": len(identities),
+        "disabledIdentities": sum(1 for item in identities if item.get("status") in {"disabled", "revoked"}),
+        "pendingApprovals": sum(1 for item in approvals if item.get("status") == "pending"),
+        "staleApprovals": stale_approvals,
+        "blockedApprovals": sum(1 for item in approvals if item.get("status") in {"blocked", "revoked", "expired"}),
+        "activeLeases": sum(1 for item in scoped_records("agent_authorization_leases") if item.get("status") == "active"),
+        "blockedExecutions": blocked_jobs + blocked_runs,
+        "anomalousRuns": anomalous_runs,
+    }
+
+
 def action_center_item(
     title: str,
     severity: str,
@@ -2010,6 +2212,56 @@ def build_action_center() -> ActionCenterResponse:
                 "Open Detection, review blast radius, and trigger containment or incident creation.",
                 "Detection",
                 "detections",
+            )
+        )
+
+    agent_posture = build_agent_control_posture()
+    if agent_posture["disabledIdentities"]:
+        actions.append(
+            action_center_item(
+                "Disabled or revoked agents need boundary review",
+                "critical",
+                "secure",
+                "Security / Agent Owner",
+                "Stopped identities may indicate an incident, expired ownership, or an emergency shutdown.",
+                f"{agent_posture['disabledIdentities']} disabled or revoked identity(s); credentials and leases remain fail-closed.",
+                "Open Agents, verify the shutdown reason, rotate credentials if appropriate, and explicitly restore only reviewed identities.",
+                "Agents",
+                "agent_control:identity",
+            )
+        )
+    if agent_posture["pendingApprovals"] or agent_posture["blockedApprovals"]:
+        actions.append(
+            action_center_item(
+                "Agent approvals require operator attention",
+                "critical" if agent_posture["staleApprovals"] else "high",
+                "govern",
+                "Owner / Admin / Security",
+                "High-risk agent actions cannot proceed safely without a current, attributable decision.",
+                (
+                    f"{agent_posture['pendingApprovals']} pending, {agent_posture['staleApprovals']} stale, "
+                    f"and {agent_posture['blockedApprovals']} blocked or revoked approval(s)."
+                ),
+                "Open Agents, review current evidence, approve or block pending actions, and revoke stale authorization.",
+                "Agents",
+                "agent_control:approval",
+            )
+        )
+    if agent_posture["blockedExecutions"] or agent_posture["anomalousRuns"]:
+        actions.append(
+            action_center_item(
+                "Agent execution findings need investigation",
+                "critical" if agent_posture["blockedExecutions"] else "high",
+                "operate",
+                "Agent Owner / Security",
+                "Repeated blocked or anomalous executions can signal unsafe tooling, stale policy, or credential misuse.",
+                (
+                    f"{agent_posture['blockedExecutions']} blocked, failed, or cancelled execution(s); "
+                    f"{agent_posture['anomalousRuns']} run(s) have review decisions or policy findings."
+                ),
+                "Open Agents, inspect metadata and policy findings, then revoke access or remediate the integration before retrying.",
+                "Agents",
+                "agent_control:execution",
             )
         )
 
@@ -4112,6 +4364,7 @@ def build_evidence_report() -> EvidenceReport:
     replay_gate = latest_replay_gate()
     dataset_replay_gate = latest_dataset_replay_gate()
     governance_evidence = build_data_governance_evidence()
+    agent_control_posture = build_agent_control_posture()
     saved_gates = list_release_gate_definitions()
     summary = {
         "decision": (
@@ -4130,6 +4383,7 @@ def build_evidence_report() -> EvidenceReport:
         "dataGovernanceDecision": governance_evidence.decision,
         "dataGovernanceProtectedRecords": sum(domain.protectedRecords for domain in governance_evidence.inventory),
         "dataGovernanceEligibleRecords": sum(domain.eligibleRecords for domain in governance_evidence.inventory),
+        "agentControl": agent_control_posture,
     }
     markdown_lines = [
         "# NeuralOps Evidence Report",
@@ -4155,6 +4409,16 @@ def build_evidence_report() -> EvidenceReport:
         f"- Legal holds: `{len(governance_evidence.legalHolds)}`",
         f"- Latest simulation: `{governance_evidence.latestSimulation.id if governance_evidence.latestSimulation else 'not_run'}`",
         f"- Latest purge job: `{governance_evidence.latestPurgeJob.id if governance_evidence.latestPurgeJob else 'not_run'}`",
+        "",
+        "## Agent Command Center",
+        f"- Registered identities: `{agent_control_posture['registeredIdentities']}`",
+        f"- Disabled or revoked identities: `{agent_control_posture['disabledIdentities']}`",
+        f"- Active authorization leases: `{agent_control_posture['activeLeases']}`",
+        f"- Pending approvals: `{agent_control_posture['pendingApprovals']}`",
+        f"- Stale approvals: `{agent_control_posture['staleApprovals']}`",
+        f"- Blocked or revoked approvals: `{agent_control_posture['blockedApprovals']}`",
+        f"- Blocked, failed, or cancelled executions: `{agent_control_posture['blockedExecutions']}`",
+        f"- Anomalous runs: `{agent_control_posture['anomalousRuns']}`",
     ]
     if gate:
         markdown_lines.extend(
@@ -4495,6 +4759,23 @@ def record_matches_hold(domain: str, record: dict[str, Any], holds: list[LegalHo
 def governance_record_id(record: dict[str, Any]) -> str | None:
     record_id = record.get("id")
     return str(record_id) if record_id else None
+
+
+def delete_governance_record(domain: str, public_record_id: str) -> bool:
+    """Delete the unique scoped storage row without exposing its physical key."""
+    workspace_id = current_workspace_id()
+    matches = []
+    for stored in list_domain_records_with_ids(domain):
+        payload = stored["payload"]
+        if str(payload.get("id", "")) != public_record_id:
+            continue
+        if auth_required() and domain != "policies" and payload.get("workspaceId") != workspace_id:
+            continue
+        matches.append(str(stored["id"]))
+    if len(matches) != 1:
+        return False
+    delete_record(domain, matches[0])
+    return True
 
 
 def governance_cutoff(policy: DataRetentionPolicy) -> datetime:
@@ -6206,8 +6487,89 @@ def health() -> dict[str, Any]:
         "service": "neuralops-api",
         "version": app.version,
         "storage": storage_backend(),
+        "startup": STARTUP_STATE["status"],
         "routesRevision": "synthetic-canary-v1",
     }
+
+
+@app.get("/ready", response_model=None)
+def readiness() -> Any:
+    startup = STARTUP_STATE["status"]
+    payload = {
+        "ok": startup == "ready",
+        "service": "neuralops-api",
+        "storage": storage_backend(),
+        "startup": startup,
+    }
+    if startup != "ready":
+        return JSONResponse(status_code=503, content=payload, headers={"Retry-After": "5"})
+    try:
+        payload["ok"] = probe_database()
+    except Exception:
+        payload.update(ok=False, startup="unavailable")
+    if not payload["ok"]:
+        return JSONResponse(status_code=503, content=payload, headers={"Retry-After": "5"})
+    return payload
+
+
+@app.post(
+    "/api/public/pilot-applications",
+    response_model=PilotApplicationReceipt,
+    status_code=202,
+)
+def create_pilot_application(
+    application: PilotApplicationCreate,
+    http_request: Request,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=160),
+) -> PilotApplicationReceipt:
+    normalized_key = idempotency_key.strip()
+    if not normalized_key:
+        raise HTTPException(status_code=422, detail="Idempotency-Key must not be blank")
+    key_hash = sha256(normalized_key.encode("utf-8")).hexdigest()
+    record_id = f"pilot_idem_{key_hash}"
+    request_hash = pilot_request_hash(application)
+    existing = get_record("pilot_applications", record_id)
+    if existing is not None:
+        if existing.get("requestHash") != request_hash:
+            raise HTTPException(status_code=409, detail="Idempotency-Key is already bound to another application")
+        return pilot_application_receipt(existing)
+
+    if application.website:
+        enforce_pilot_rate_limit(http_request)
+        return PilotApplicationReceipt(
+            applicationId=f"pilot_filtered_{key_hash[:16]}",
+            status="received",
+            submittedAt=now_iso(),
+        )
+
+    enforce_pilot_rate_limit(http_request)
+    created_at = now_iso()
+    payload = {
+        "id": f"pilot_{token_hex(12)}",
+        **application.model_dump(exclude={"website"}),
+        "workspaceId": pilot_operations_workspace_id(),
+        "consentVersion": "invited-pilot-v1",
+        "captureMode": "lead_metadata_only",
+        "source": "landing_page",
+        "status": "new",
+        "createdAt": created_at,
+        "requestHash": request_hash,
+        "idempotencyKeyHash": f"sha256:{key_hash}",
+    }
+    saved, _created = insert_record_if_absent("pilot_applications", record_id, payload)
+    if saved.get("requestHash") != request_hash:
+        raise HTTPException(status_code=409, detail="Idempotency-Key is already bound to another application")
+    return pilot_application_receipt(saved)
+
+
+@app.get("/api/pilot-applications", response_model=list[PilotApplicationInternal])
+def list_pilot_applications() -> list[PilotApplicationInternal]:
+    require_permission("workspace:write", "pilot-applications:list")
+    applications = [
+        PilotApplicationInternal.model_validate(item)
+        for item in list_records_for_workspace("pilot_applications", current_workspace_id())
+    ]
+    return sorted(applications, key=lambda item: item.createdAt, reverse=True)
 
 
 @app.get("/api/system/status", response_model=SystemStatus)
@@ -7729,7 +8091,9 @@ def default_agent_identity(definition: AgentDefinition) -> AgentIdentity:
 
 
 def get_agent_identity(agent_id: str) -> AgentIdentity | None:
-    payload = get_scoped_record("agent_identities", f"agent_identity_{agent_id}")
+    payload = get_scoped_record("agent_identities", agent_id)
+    if payload is None:
+        payload = get_scoped_record("agent_identities", f"agent_identity_{agent_id}")
     if payload is not None:
         return AgentIdentity.model_validate(payload)
     definition = next((agent for agent in AGENT_DEFINITIONS if agent.id == agent_id), None)
@@ -7741,42 +8105,138 @@ def get_agent_identity(agent_id: str) -> AgentIdentity | None:
 
 
 def agent_control_identities() -> list[AgentIdentity]:
-    identities: list[AgentIdentity] = []
+    identities_by_id: dict[str, AgentIdentity] = {
+        item["id"]: AgentIdentity.model_validate(item) for item in scoped_records("agent_identities")
+    }
     for definition in AGENT_DEFINITIONS:
         identity = get_agent_identity(definition.id)
         if identity is not None:
-            identities.append(identity)
-    return sorted(identities, key=lambda item: item.displayName)
+            identities_by_id[identity.id] = identity
+    return sorted(identities_by_id.values(), key=lambda item: item.displayName)
 
 
-def ensure_agent_runtime_allowed(agent_id: str) -> AgentIdentity:
+def mutate_current_agent_identity(
+    agent_id: str,
+    *,
+    identity_patch: dict[str, Any],
+    reason: str,
+    lease_environment: str | None = None,
+    lifecycle_action: str = "boundary_update",
+    credential_hash: str | None = None,
+    credential_preview: str | None = None,
+) -> tuple[dict[str, Any] | None, int]:
+    """Apply an intended delta without pre-reading an identity snapshot."""
+    definition = next((item for item in AGENT_DEFINITIONS if item.id == agent_id), None)
+    initial_identity: dict[str, Any] | None = None
+    record_id = agent_id
+    if definition is not None:
+        initial = default_agent_identity(definition)
+        record_id = initial.id
+        initial_identity = stamp_workspace(initial.model_dump())
+    return mutate_agent_identity_and_revoke_leases(
+        workspace_id=current_workspace_id(),
+        identity_record_id=scoped_record_id(record_id),
+        identity_id=record_id,
+        identity_patch=identity_patch,
+        reason=reason,
+        lease_environment=lease_environment,
+        lifecycle_action=lifecycle_action,
+        credential_hash=credential_hash,
+        credential_preview=credential_preview,
+        initial_identity=initial_identity,
+    )
+
+
+def ensure_agent_runtime_allowed(agent_id: str, environment: str = "staging") -> AgentIdentity:
     identity = get_agent_identity(agent_id)
     if identity is None:
         raise HTTPException(status_code=404, detail=f"Unknown agentId: {agent_id}")
-    if identity.status == "disabled":
+    if identity.status in {"disabled", "revoked"}:
         raise HTTPException(
             status_code=423,
             detail=f"Agent {agent_id} is disabled by kill switch: {identity.killSwitchReason or 'no reason recorded'}",
         )
     if "agent:run" not in identity.permissions:
         raise HTTPException(status_code=403, detail=f"Agent {agent_id} does not have agent:run permission")
+    if identity.environment != "all" and identity.environment != environment:
+        raise HTTPException(status_code=403, detail=f"Agent {agent_id} is not allowed in {environment}")
+    if environment == "prod" and identity.productionAccessStatus != "approved":
+        raise HTTPException(status_code=403, detail=f"Agent {agent_id} does not have approved production access")
     return identity
 
 
+def consume_governed_runtime_lease(
+    identity: AgentIdentity,
+    request: AgentRunRequest,
+    *,
+    consume: bool = True,
+) -> None:
+    if not request.authorizationLeaseId or not request.authorizationContextHash:
+        raise HTTPException(status_code=403, detail="Governed agent runtime requires a bound authorization lease")
+    if request.providerMode == "auto" or not request.provider or not request.model:
+        raise HTTPException(
+            status_code=422,
+            detail="Governed runtime requires an exact provider, model, and non-auto provider mode",
+        )
+    if request.provider not in identity.providerAccess:
+        raise HTTPException(status_code=403, detail=f"Agent identity cannot use provider {request.provider}")
+    if (request.provider == "local") != (request.providerMode == "local"):
+        raise HTTPException(status_code=422, detail="Production provider and providerMode are inconsistent")
+    lease = get_scoped_record("agent_authorization_leases", request.authorizationLeaseId)
+    expected_content_hash = f"sha256:{sha256(request.input.encode('utf-8')).hexdigest()}"
+    expected_identity_ids = {identity.id, identity.agentId, request.agentId}
+    if lease is None or lease.get("identityId") not in expected_identity_ids:
+        raise HTTPException(status_code=409, detail="Authorization lease binding is invalid")
+    expected = {
+        "action": "agent_run",
+        "toolCategory": "agent_runtime",
+        "operation": "execute",
+        "contextHash": request.authorizationContextHash,
+        "contentHash": expected_content_hash,
+        "provider": request.provider,
+        "model": request.model,
+        "environment": request.environment,
+        "risk": "high",
+    }
+    if any(lease.get(key) != value for key, value in expected.items()):
+        raise HTTPException(status_code=409, detail="Authorization lease binding is invalid")
+    if lease.get("status") != "active":
+        raise HTTPException(status_code=409, detail=f"Authorization lease is {lease.get('status', 'invalid')}")
+    now = datetime.now()
+    if datetime.fromisoformat(str(lease["expiresAt"])) <= now:
+        lease["status"] = "expired"
+        save_scoped_record("agent_authorization_leases", request.authorizationLeaseId, lease)
+        raise HTTPException(status_code=409, detail="Authorization lease is expired")
+    if not consume:
+        return
+    consumed = compare_and_set_record_status(
+        "agent_authorization_leases",
+        scoped_record_id(request.authorizationLeaseId),
+        "active",
+        "consumed",
+        {"consumedAt": now.isoformat()},
+        workspace_id=current_workspace_id() if auth_required() else None,
+    )
+    if consumed is None:
+        raise HTTPException(status_code=409, detail="Authorization lease is no longer active")
+    save_audit_event(
+        "agent.authorization.consume",
+        identity.id,
+        request.authorizationLeaseId,
+        "allow",
+        "Consumed governed built-in runtime authorization; metadata only.",
+    )
+
+
 def patch_agent_identity_record(agent_id: str, request: AgentIdentityPatch) -> AgentIdentity:
-    identity = get_agent_identity(agent_id)
-    if identity is None:
-        raise HTTPException(status_code=404, detail="Agent identity not found")
-    payload = identity.model_dump()
     patch = request.model_dump(exclude_unset=True)
-    for key, value in patch.items():
-        payload[key] = value
-    if payload.get("status") == "disabled" and not payload.get("killSwitchReason"):
-        payload["killSwitchReason"] = "Disabled by operator kill switch."
-    if payload.get("status") != "disabled":
-        payload["killSwitchReason"] = None
-    payload["updatedAt"] = datetime.now().isoformat()
-    saved = save_scoped_record("agent_identities", payload["id"], payload)
+    saved, _ = mutate_current_agent_identity(
+        agent_id,
+        identity_patch=patch,
+        reason="Identity boundaries changed",
+    )
+    if saved is None:
+        raise HTTPException(status_code=404, detail="Agent identity not found")
     result = AgentIdentity.model_validate(saved)
     save_audit_event(
         "agent.identity.update",
@@ -7788,34 +8248,212 @@ def patch_agent_identity_record(agent_id: str, request: AgentIdentityPatch) -> A
     return result
 
 
+LOW_RISK_AGENT_ACTIONS: dict[tuple[str, str], str] = {
+    ("metadata_read", "metadata"): "metadata:read",
+}
+HIGH_RISK_AGENT_ACTION_PERMISSIONS: dict[str, tuple[str, str]] = {
+    "write": ("write", "write"),
+    "shell": ("shell:execute", "shell"),
+    "browser": ("browser:interact", "browser"),
+    "external_post": ("external:post", "external_post"),
+    "secret": ("secret:read", "secret"),
+    "destructive": ("destructive:execute", "destructive"),
+    "agent_run": ("agent:run", "agent_runtime"),
+}
+
+
+def require_agent_control_role(allowed_roles: set[str], action: str) -> None:
+    user = current_access_user()
+    if user.role not in allowed_roles:
+        raise HTTPException(status_code=403, detail=f"{user.role} cannot {action}")
+
+
+def requested_agent_environment(identity: dict[str, Any], request: AgentAuthorizeRequest) -> str:
+    environment = request.environment or (identity.get("environment") if identity.get("environment") != "all" else "staging")
+    if environment not in {"prod", "staging", "dev"}:
+        raise HTTPException(status_code=422, detail="A concrete environment is required")
+    configured = identity.get("environment", "staging")
+    if configured != "all" and configured != environment:
+        raise HTTPException(status_code=403, detail=f"Agent identity is not allowed in {environment}")
+    if environment == "prod" and identity.get("productionAccessStatus") != "approved":
+        raise HTTPException(status_code=403, detail="Production access requires current Owner or Admin approval")
+    return str(environment)
+
+
+def agent_action_risk_and_permission(request: AgentAuthorizeRequest) -> tuple[str, str]:
+    low_permission = LOW_RISK_AGENT_ACTIONS.get((request.action, request.toolCategory))
+    if low_permission is not None:
+        return "low", low_permission
+    high_risk = HIGH_RISK_AGENT_ACTION_PERMISSIONS.get(request.action)
+    if high_risk is None or request.toolCategory != high_risk[1]:
+        raise HTTPException(status_code=403, detail="Unknown or mismatched agent action is denied")
+    return "high", high_risk[0]
+
+
+def validate_agent_action(identity: dict[str, Any], request: AgentAuthorizeRequest) -> tuple[str, str]:
+    risk, permission = agent_action_risk_and_permission(request)
+    if permission not in identity.get("permissions", []):
+        raise HTTPException(status_code=403, detail=f"Agent identity lacks {permission} permission")
+    if request.provider not in identity.get("providerAccess", []):
+        raise HTTPException(status_code=403, detail=f"Agent identity cannot use provider {request.provider}")
+    environment = requested_agent_environment(identity, request)
+    return risk, environment
+
+
+def agent_action_content_hash(request: AgentAuthorizeRequest, environment: str) -> str:
+    canonical = json.dumps(
+        {
+            "identityId": request.identityId,
+            "action": request.action,
+            "toolCategory": request.toolCategory,
+            "operation": request.operation,
+            "contextHash": request.contextHash,
+            "contentHash": request.contentHash,
+            "provider": request.provider,
+            "model": request.model,
+            "environment": environment,
+            "idempotencyKey": request.idempotencyKey,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def issue_agent_credential(identity_payload: dict[str, Any]) -> str:
+    credential = f"nop_agent_{token_hex(24)}"
+    identity_payload["credentialHash"] = sha256(credential.encode("utf-8")).hexdigest()
+    identity_payload["credentialPreview"] = f"{credential[:14]}...{credential[-4:]}"
+    identity_payload["credentialStatus"] = "active"
+    identity_payload["credentialRotatedAt"] = datetime.now().isoformat()
+    return credential
+
+
+def agent_credential_identity(credential: str | None, requested_id: str) -> dict[str, Any]:
+    if not credential:
+        raise HTTPException(status_code=401, detail="Agent credential required")
+    payload = get_scoped_record("agent_identities", requested_id)
+    if payload is None or payload.get("credentialStatus") != "active":
+        raise HTTPException(status_code=401, detail="Invalid agent credential")
+    supplied_hash = sha256(credential.encode("utf-8")).hexdigest()
+    if not compare_digest(supplied_hash, str(payload.get("credentialHash", ""))):
+        raise HTTPException(status_code=401, detail="Invalid agent credential")
+    if payload.get("status") in {"disabled", "revoked"}:
+        raise HTTPException(status_code=423, detail="Agent identity is disabled")
+    return payload
+
+
+def approval_for_action(request: AgentAuthorizeRequest, environment: str) -> dict[str, Any] | None:
+    now = datetime.now()
+    expected_hash = agent_action_content_hash(request, environment)
+    for approval in scoped_records("agent_approvals"):
+        if approval.get("identityId") != request.identityId or approval.get("idempotencyKey") != request.idempotencyKey:
+            continue
+        if approval.get("bindingHash", approval.get("contentHash")) != expected_hash:
+            raise HTTPException(status_code=409, detail="Idempotency key is already bound to different action context")
+        expires_at = datetime.fromisoformat(approval["expiresAt"])
+        if expires_at <= now and approval.get("status") in {"pending", "approved"}:
+            approval["status"] = "expired"
+            save_scoped_record("agent_approvals", approval["id"], approval)
+            return approval
+        return approval
+    return None
+
+
+def create_agent_approval(
+    identity: dict[str, Any],
+    request: AgentAuthorizeRequest,
+    environment: str,
+    *,
+    requested_by: str | None = None,
+) -> dict[str, Any]:
+    existing = approval_for_action(request, environment)
+    if existing is not None:
+        if existing.get("status") == "consumed":
+            raise HTTPException(status_code=409, detail="Approval and authorization lease are single-use")
+        return existing
+    now = datetime.now()
+    workspace_id = current_workspace_id()
+    approval_id = f"agent_approval_{sha256(f'{workspace_id}:{request.identityId}:{request.idempotencyKey}'.encode('utf-8')).hexdigest()[:16]}"
+    approval = {
+        "id": approval_id,
+        "identityId": request.identityId,
+        "action": request.action,
+        "toolCategory": request.toolCategory,
+        "operation": request.operation,
+        "contextHash": request.contextHash,
+        "contentHash": request.contentHash,
+        "provider": request.provider,
+        "model": request.model,
+        "environment": environment,
+        "risk": "high",
+        "status": "pending",
+        "idempotencyKey": request.idempotencyKey,
+        "requestedBy": requested_by or request.identityId,
+        "createdAt": now.isoformat(),
+        "expiresAt": (now + timedelta(minutes=15)).isoformat(),
+        "bindingHash": agent_action_content_hash(request, environment),
+    }
+    approval = stamp_workspace(approval)
+    saved, created = insert_record_if_absent(
+        "agent_approvals", scoped_record_id(approval_id), approval
+    )
+    if saved.get("bindingHash", saved.get("contentHash")) != approval["bindingHash"]:
+        raise HTTPException(status_code=409, detail="Idempotency key is already bound to different action context")
+    if created:
+        save_audit_event("agent.approval.request", approval["requestedBy"], approval_id, "review", f"Approval requested for {request.action}.")
+    return saved
+
+
+def revoke_approval_leases(approval_id: str, reason: str) -> int:
+    count = 0
+    for lease in scoped_records("agent_authorization_leases"):
+        if lease.get("approvalId") == approval_id and lease.get("status") == "active":
+            lease.update(status="revoked", revokedAt=datetime.now().isoformat(), revokeReason=reason)
+            save_scoped_record("agent_authorization_leases", lease["id"], lease)
+            count += 1
+    return count
+
+
 def create_agent_production_access_request(request: AgentProductionAccessRequest) -> AgentProductionAccessDecision:
+    now = datetime.now().isoformat()
     identity = get_agent_identity(request.agentId)
     if identity is None:
         raise HTTPException(status_code=404, detail="Agent identity not found")
-    now = datetime.now().isoformat()
-    decision = "block" if identity.status == "disabled" else "review" if identity.requiresApproval else "allow"
-    status = "blocked" if decision == "block" else "pending_review" if decision == "review" else "approved"
-    evidence_id = f"agent_access_{sha256(f'{current_workspace_id()}:{request.agentId}:{request.targetEnvironment}:{now}'.encode('utf-8')).hexdigest()[:12]}"
+    workspace_id = current_workspace_id()
+    request_id = f"agent_access_req_{token_hex(6)}"
+    evidence_id = f"agent_access_{sha256(f'{workspace_id}:{request_id}'.encode('utf-8')).hexdigest()[:12]}"
     access = AgentProductionAccessDecision(
-        id=f"agent_access_req_{token_hex(6)}",
+        id=request_id,
         agentId=request.agentId,
         targetEnvironment=request.targetEnvironment,
-        status=status,
-        decision=decision,
+        status="pending_review",
+        decision="review",
         justification=request.justification,
         evidenceId=evidence_id,
+        requestedBy=current_user_email(),
         createdAt=now,
-        reviewedAt=now if decision != "review" else None,
     )
-    save_scoped_record("agent_access_requests", access.id, access.model_dump())
+    access_payload = stamp_workspace(access.model_dump())
+    saved_access, _, _ = create_agent_production_access_request_atomic(
+        workspace_id=workspace_id,
+        identity_record_id=scoped_record_id(identity.id),
+        identity_id=identity.id,
+        access_record_id=scoped_record_id(access.id),
+        access_payload=access_payload,
+        now_iso=now,
+        revoke_reason="Production access requires review",
+    )
+    if saved_access is None:
+        raise HTTPException(status_code=404, detail="Agent identity not found")
     save_audit_event(
         "agent.production_access.request",
         current_user_email(),
         request.agentId,
-        decision,
+        str(saved_access["decision"]),
         f"Production access requested for {request.agentId} in {request.targetEnvironment}.",
     )
-    return access
+    return AgentProductionAccessDecision.model_validate(saved_access)
 
 
 @app.get("/api/agents", response_model=list[AgentRuntime])
@@ -7825,17 +8463,450 @@ def agents() -> list[AgentRuntime]:
 
 @app.get("/api/agent-control/identities", response_model=list[AgentIdentity])
 def list_agent_identities() -> list[AgentIdentity]:
+    require_permission("workspace:read", "agent_identities.list")
     return agent_control_identities()
+
+
+@app.post("/api/agent-control/identities", response_model=AgentIdentityCredentialResponse)
+def register_agent_identity(request: AgentIdentityCreate) -> AgentIdentityCredentialResponse:
+    require_agent_control_role({"Owner", "Admin"}, "register agent identities")
+    now = datetime.now().isoformat()
+    identity_id = f"agent_identity_{token_hex(8)}"
+    payload: dict[str, Any] = {
+        "id": identity_id,
+        "agentId": identity_id,
+        "displayName": request.displayName,
+        "owner": request.owner,
+        "environment": request.environment,
+        "status": "active",
+        "riskLevel": request.riskLevel,
+        "permissions": request.permissions,
+        "providerAccess": request.providerAccess,
+        "requiresApproval": True,
+        "captureMode": request.captureMode,
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    credential = issue_agent_credential(payload)
+    saved = save_scoped_record("agent_identities", identity_id, payload)
+    save_audit_event("agent.identity.create", current_user_email(), identity_id, "allow", "Registered external agent identity.")
+    return AgentIdentityCredentialResponse(identity=AgentIdentity.model_validate(saved), credential=credential)
+
+
+@app.get("/api/agent-control/identities/{identity_id}", response_model=AgentIdentity)
+def get_agent_identity_endpoint(identity_id: str) -> AgentIdentity:
+    require_permission("workspace:read", identity_id)
+    identity = get_agent_identity(identity_id)
+    if identity is None:
+        raise HTTPException(status_code=404, detail="Agent identity not found")
+    return identity
 
 
 @app.patch("/api/agent-control/identities/{agent_id}", response_model=AgentIdentity)
 def patch_agent_identity(agent_id: str, request: AgentIdentityPatch) -> AgentIdentity:
-    require_permission("gateway:operate", agent_id)
+    require_agent_control_role({"Owner", "Admin"}, "update agent identity boundaries")
     return patch_agent_identity_record(agent_id, request)
+
+
+@app.post("/api/agent-control/identities/{identity_id}/rotate", response_model=AgentIdentityCredentialResponse)
+def rotate_agent_identity_credential(identity_id: str) -> AgentIdentityCredentialResponse:
+    require_agent_control_role({"Owner", "Admin"}, "rotate agent credentials")
+    credential = f"nop_agent_{token_hex(24)}"
+    saved, _ = mutate_current_agent_identity(
+        identity_id,
+        identity_patch={},
+        reason="Credential rotated",
+        lifecycle_action="rotate",
+        credential_hash=sha256(credential.encode("utf-8")).hexdigest(),
+        credential_preview=f"{credential[:14]}...{credential[-4:]}",
+    )
+    if saved is None:
+        raise HTTPException(status_code=404, detail="Agent identity not found")
+    save_audit_event("agent.credential.rotate", current_user_email(), identity_id, "allow", "Rotated one-time agent credential.")
+    return AgentIdentityCredentialResponse(identity=AgentIdentity.model_validate(saved), credential=credential)
+
+
+@app.post("/api/agent-control/identities/{identity_id}/revoke", response_model=AgentIdentity)
+def revoke_agent_identity(identity_id: str, request: AgentControlReasonRequest) -> AgentIdentity:
+    require_agent_control_role({"Owner", "Admin", "Security"}, "revoke agent identities")
+    existing = get_agent_identity(identity_id)
+    aliases = {identity_id, existing.agentId if existing else ""}
+    workspace_id = current_workspace_id()
+    with identity_execution_guard(workspace_id, aliases):
+        saved, _ = mutate_current_agent_identity(
+            identity_id,
+            identity_patch={},
+            reason=request.reason,
+            lifecycle_action="revoke",
+        )
+        if saved is not None:
+            aliases.add(str(saved.get("agentId", "")))
+            cancel_jobs_for_identity(workspace_id, aliases)
+    if saved is None:
+        raise HTTPException(status_code=404, detail="Agent identity not found")
+    save_audit_event("agent.identity.revoke", current_user_email(), identity_id, "block", request.reason)
+    return AgentIdentity.model_validate(saved)
+
+
+@app.get("/api/agent-control/approvals", response_model=list[AgentApproval])
+def list_agent_approvals() -> list[AgentApproval]:
+    require_permission("workspace:read", "agent_approvals.list")
+    return [AgentApproval.model_validate(item) for item in sorted(scoped_records("agent_approvals"), key=lambda item: item["createdAt"], reverse=True)]
+
+
+@app.get("/api/agent-control/leases", response_model=list[AgentAuthorizationLease])
+def list_agent_authorization_leases() -> list[AgentAuthorizationLease]:
+    require_permission("workspace:read", "agent_authorization_leases.list")
+    records = sorted(
+        scoped_records("agent_authorization_leases"),
+        key=lambda item: str(item.get("createdAt", "")),
+        reverse=True,
+    )
+    return [AgentAuthorizationLease.model_validate(item) for item in records]
+
+
+@app.post("/api/agent-control/approvals", response_model=AgentApproval)
+def request_agent_approval(
+    request: AgentAuthorizeRequest,
+    x_neuralops_agent_key: str | None = Header(default=None),
+) -> AgentApproval:
+    identity = agent_credential_identity(x_neuralops_agent_key, request.identityId)
+    risk, environment = validate_agent_action(identity, request)
+    if risk != "high":
+        raise HTTPException(status_code=422, detail="Standalone approval requests are only valid for high-risk actions")
+    return AgentApproval.model_validate(create_agent_approval(identity, request, environment))
+
+
+def decision_idempotency_binding(
+    *,
+    target_type: str,
+    target_id: str,
+    decision: str,
+    request: AgentApprovalDecisionRequest,
+    idempotency_key: str,
+) -> tuple[str, str]:
+    normalized_key = idempotency_key.strip()
+    if not normalized_key:
+        raise HTTPException(status_code=422, detail="Idempotency-Key must not be blank")
+    key_hash = f"sha256:{sha256(normalized_key.encode('utf-8')).hexdigest()}"
+    canonical = json.dumps(
+        {
+            "targetType": target_type,
+            "targetId": target_id,
+            "decision": decision,
+            "reason": request.reason,
+            "evidenceHash": request.evidenceHash,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return key_hash, f"sha256:{sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+def replay_agent_decision(
+    record: dict[str, Any],
+    key_hash: str,
+    request_hash: str,
+) -> dict[str, Any] | None:
+    history = record.get("decisionHistory")
+    entry = history.get(key_hash) if isinstance(history, dict) else None
+    if entry is None:
+        return None
+    if not isinstance(entry, dict) or entry.get("requestHash") != request_hash:
+        raise HTTPException(status_code=409, detail="Idempotency-Key is already bound to a different decision")
+    result = entry.get("result")
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=409, detail="Idempotency decision evidence is unavailable")
+    return result
+
+
+def decision_history_with_result(
+    record: dict[str, Any],
+    key_hash: str,
+    request_hash: str,
+    decision: str,
+    result: dict[str, Any],
+    recorded_at: str,
+) -> dict[str, Any]:
+    existing = record.get("decisionHistory")
+    history = dict(existing) if isinstance(existing, dict) else {}
+    if key_hash not in history and len(history) >= 10:
+        raise HTTPException(status_code=409, detail="Decision idempotency history limit reached")
+    history[key_hash] = {
+        "requestHash": request_hash,
+        "decision": decision,
+        "result": result,
+        "recordedAt": recorded_at,
+    }
+    return history
+
+
+def decide_agent_approval(
+    approval_id: str,
+    decision: str,
+    request: AgentApprovalDecisionRequest,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    approval = get_scoped_record("agent_approvals", approval_id)
+    if approval is None:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    user = current_access_user()
+    allowed_roles = {"Owner", "Admin"} if decision == "approved" else {"Owner", "Admin", "Security"}
+    if user.role not in allowed_roles:
+        raise HTTPException(status_code=403, detail=f"{user.role} cannot {decision} agent approvals")
+    if decision == "approved" and approval.get("requestedBy") == user.email:
+        raise HTTPException(status_code=403, detail="Requesters cannot approve their own request")
+    key_hash, request_hash = decision_idempotency_binding(
+        target_type="agent_approval",
+        target_id=approval_id,
+        decision=decision,
+        request=request,
+        idempotency_key=idempotency_key,
+    )
+    replay = replay_agent_decision(approval, key_hash, request_hash)
+    if replay is not None:
+        return replay
+    if decision != "revoked" and datetime.fromisoformat(approval["expiresAt"]) <= datetime.now():
+        approval["status"] = "expired"
+        save_scoped_record("agent_approvals", approval_id, approval)
+        raise HTTPException(status_code=409, detail="Approval expired")
+    actionable_statuses = {
+        "approved": {"pending"},
+        "blocked": {"pending"},
+        "revoked": {"pending", "approved", "consumed"},
+    }[decision]
+    if approval.get("status") not in actionable_statuses:
+        raise HTTPException(status_code=409, detail="Approval is no longer actionable")
+    expected_status = str(approval["status"])
+    decision_patch = dict(
+        actor=user.email,
+        actorRole=user.role,
+        reason=request.reason,
+        evidenceHash=request.evidenceHash,
+        reviewedAt=datetime.now().isoformat(),
+    )
+    decision_result = AgentApproval.model_validate(
+        {**approval, **decision_patch, "status": decision}
+    ).model_dump()
+    decision_patch["decisionHistory"] = decision_history_with_result(
+        approval,
+        key_hash,
+        request_hash,
+        decision,
+        decision_result,
+        decision_patch["reviewedAt"],
+    )
+    saved, _ = decide_agent_approval_atomic(
+        workspace_id=current_workspace_id(),
+        approval_record_id=scoped_record_id(approval_id),
+        expected_status=expected_status,
+        new_status=decision,
+        decision_patch=decision_patch,
+        revoke_reason=request.reason,
+    )
+    if saved is None:
+        current = get_record("agent_approvals", scoped_record_id(approval_id))
+        if current is not None and current.get("workspaceId") != current_workspace_id():
+            current = None
+        replay = replay_agent_decision(current or {}, key_hash, request_hash)
+        if replay is not None:
+            return replay
+        raise HTTPException(status_code=409, detail="Approval is no longer actionable")
+    save_audit_event(f"agent.approval.{decision}", user.email, approval_id, "allow" if decision == "approved" else "block", request.reason)
+    return saved
+
+
+@app.post("/api/agent-control/approvals/{approval_id}/approve", response_model=AgentApproval)
+def approve_agent_action(
+    approval_id: str,
+    request: AgentApprovalDecisionRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=160),
+) -> AgentApproval:
+    return AgentApproval.model_validate(decide_agent_approval(approval_id, "approved", request, idempotency_key))
+
+
+@app.post("/api/agent-control/approvals/{approval_id}/block", response_model=AgentApproval)
+def block_agent_action(
+    approval_id: str,
+    request: AgentApprovalDecisionRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=160),
+) -> AgentApproval:
+    return AgentApproval.model_validate(decide_agent_approval(approval_id, "blocked", request, idempotency_key))
+
+
+@app.post("/api/agent-control/approvals/{approval_id}/revoke", response_model=AgentApproval)
+def revoke_agent_action(
+    approval_id: str,
+    request: AgentApprovalDecisionRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=160),
+) -> AgentApproval:
+    return AgentApproval.model_validate(decide_agent_approval(approval_id, "revoked", request, idempotency_key))
+
+
+@app.post("/api/agent-control/authorize", response_model=AgentAuthorizeResponse)
+def authorize_agent_action(request: AgentAuthorizeRequest, x_neuralops_agent_key: str | None = Header(default=None)) -> AgentAuthorizeResponse:
+    identity = agent_credential_identity(x_neuralops_agent_key, request.identityId)
+    now = datetime.now()
+    risk, environment = validate_agent_action(identity, request)
+    if request.action == "agent_run" and environment == "prod" and not request.model:
+        raise HTTPException(status_code=422, detail="Production agent authorization requires an exact model")
+    approval = approval_for_action(request, environment) if risk == "high" else None
+    if risk == "high" and (approval is None or approval.get("status") != "approved"):
+        if approval is not None and approval.get("status") in {"expired", "blocked", "revoked"}:
+            raise HTTPException(status_code=409, detail=f"Approval is {approval['status']}")
+        if approval is None or approval.get("status") != "consumed":
+            approval = approval or create_agent_approval(identity, request, environment)
+            return AgentAuthorizeResponse(decision="review", reason="Explicit approval required", approval=AgentApproval.model_validate(approval), lease=None)
+    lease_id = f"agent_lease_{token_hex(8)}"
+    lease = {
+        "id": lease_id,
+        "identityId": request.identityId,
+        "action": request.action,
+        "toolCategory": request.toolCategory,
+        "operation": request.operation,
+        "contextHash": request.contextHash,
+        "contentHash": request.contentHash,
+        "provider": request.provider,
+        "model": request.model,
+        "environment": environment,
+        "risk": risk,
+        "status": "active",
+        "idempotencyKey": request.idempotencyKey,
+        "approvalId": approval.get("id") if approval else None,
+        "createdAt": now.isoformat(),
+        "expiresAt": (now + timedelta(minutes=5 if risk == "high" else 10)).isoformat(),
+        "timingMs": request.timingMs,
+        "tokens": request.tokens,
+        "costUsd": request.costUsd,
+        "telemetryStatus": request.status,
+        "policyFindings": request.policyFindings,
+    }
+    workspace_id = current_workspace_id()
+    lease = stamp_workspace(lease)
+    permission = agent_action_risk_and_permission(request)[1]
+    issuance = issue_agent_authorization_lease(
+        workspace_id=workspace_id,
+        identity_record_id=scoped_record_id(request.identityId),
+        credential_hash=sha256((x_neuralops_agent_key or "").encode("utf-8")).hexdigest(),
+        required_permission=permission,
+        provider=request.provider,
+        environment=environment,
+        idempotency_key=request.idempotencyKey,
+        lease_record_id=scoped_record_id(lease_id),
+        lease_payload=lease,
+        approval_record_id=scoped_record_id(approval["id"]) if approval else None,
+        approval_binding_hash=agent_action_content_hash(request, environment) if approval else None,
+        now_iso=now.isoformat(),
+    )
+    issuance_status = issuance["status"]
+    if issuance_status not in {"issued", "replayed"}:
+        status_code = 401 if issuance_status in {"credential_invalid", "identity_missing"} else 423 if issuance_status == "identity_disabled" else 403 if issuance_status in {"permission_denied", "provider_denied", "environment_denied", "production_denied"} else 409
+        raise HTTPException(status_code=status_code, detail=f"Authorization issuance rejected: {issuance_status}")
+    if issuance_status == "replayed":
+        lease = issuance["lease"]
+        if approval is not None:
+            approval = get_scoped_record("agent_approvals", str(approval["id"])) or approval
+    elif approval is not None:
+        approval = issuance["approval"]
+    if issuance_status == "issued":
+        save_audit_event("agent.authorization.allow", request.identityId, lease_id, "allow", f"Authorized {request.action}; metadata only.")
+    return AgentAuthorizeResponse(
+        decision="allow",
+        reason="Authorized",
+        approval=AgentApproval.model_validate(approval) if approval else None,
+        lease=AgentAuthorizationLease.model_validate(lease),
+    )
+
+
+def bound_agent_lease(identity: dict[str, Any], request: AgentLeaseBindingRequest) -> dict[str, Any]:
+    risk, environment = validate_agent_action(identity, request)
+    lease = get_scoped_record("agent_authorization_leases", request.leaseId)
+    if lease is None or lease.get("identityId") != request.identityId:
+        raise HTTPException(status_code=409, detail="Authorization lease binding is invalid")
+    expected = {
+        "action": request.action,
+        "toolCategory": request.toolCategory,
+        "operation": request.operation,
+        "contextHash": request.contextHash,
+        "contentHash": request.contentHash,
+        "provider": request.provider,
+        "model": request.model,
+        "environment": environment,
+        "risk": risk,
+        "idempotencyKey": request.idempotencyKey,
+    }
+    if any(lease.get(key) != value for key, value in expected.items()):
+        raise HTTPException(status_code=409, detail="Authorization lease binding is invalid")
+    if lease.get("status") != "active":
+        raise HTTPException(status_code=409, detail=f"Authorization lease is {lease.get('status', 'invalid')}")
+    if datetime.fromisoformat(str(lease["expiresAt"])) <= datetime.now():
+        lease["status"] = "expired"
+        save_scoped_record("agent_authorization_leases", request.leaseId, lease)
+        raise HTTPException(status_code=409, detail="Authorization lease is expired")
+    return lease
+
+
+@app.post("/api/agent-control/leases/validate", response_model=AgentAuthorizationLease)
+def validate_agent_lease(
+    request: AgentLeaseBindingRequest,
+    x_neuralops_agent_key: str | None = Header(default=None),
+) -> AgentAuthorizationLease:
+    identity = agent_credential_identity(x_neuralops_agent_key, request.identityId)
+    return AgentAuthorizationLease.model_validate(bound_agent_lease(identity, request))
+
+
+@app.post("/api/agent-control/leases/consume", response_model=AgentAuthorizationLease)
+def consume_agent_lease(
+    request: AgentLeaseBindingRequest,
+    x_neuralops_agent_key: str | None = Header(default=None),
+) -> AgentAuthorizationLease:
+    identity = agent_credential_identity(x_neuralops_agent_key, request.identityId)
+    lease = bound_agent_lease(identity, request)
+    saved = compare_and_set_record_status(
+        "agent_authorization_leases",
+        scoped_record_id(request.leaseId),
+        "active",
+        "consumed",
+        {"consumedAt": datetime.now().isoformat()},
+        workspace_id=current_workspace_id() if auth_required() else None,
+    )
+    if saved is None:
+        raise HTTPException(status_code=409, detail="Authorization lease is no longer active")
+    save_audit_event(
+        "agent.authorization.consume",
+        request.identityId,
+        request.leaseId,
+        "allow",
+        f"Consumed authorization for {request.action}; metadata only.",
+    )
+    return AgentAuthorizationLease.model_validate(saved)
+
+
+@app.post("/api/agent-control/identities/{identity_id}/kill-switch")
+def agent_identity_kill_switch(identity_id: str, request: AgentControlReasonRequest) -> dict[str, Any]:
+    require_agent_control_role({"Owner", "Admin", "Security"}, "activate agent kill switch")
+    existing = get_agent_identity(identity_id)
+    aliases = {identity_id, existing.agentId if existing else ""}
+    workspace_id = current_workspace_id()
+    with identity_execution_guard(workspace_id, aliases):
+        identity, revoked = mutate_current_agent_identity(
+            identity_id,
+            identity_patch={},
+            reason=request.reason,
+            lifecycle_action="kill_switch",
+        )
+        if identity is not None:
+            aliases.add(str(identity.get("agentId", "")))
+            cancelled = cancel_jobs_for_identity(workspace_id, aliases)
+    if identity is None:
+        raise HTTPException(status_code=404, detail="Agent identity not found")
+    save_audit_event("agent.kill_switch", current_user_email(), identity_id, "block", request.reason)
+    return {"identity": AgentIdentity.model_validate(identity), "revokedLeases": revoked, "cancelledJobs": cancelled}
 
 
 @app.get("/api/agent-control/production-access", response_model=list[AgentProductionAccessDecision])
 def list_agent_production_access_requests() -> list[AgentProductionAccessDecision]:
+    require_permission("workspace:read", "agent_access_requests.list")
     requests = [AgentProductionAccessDecision.model_validate(item) for item in scoped_records("agent_access_requests")]
     return sorted(requests, key=lambda item: item.createdAt, reverse=True)
 
@@ -7844,6 +8915,121 @@ def list_agent_production_access_requests() -> list[AgentProductionAccessDecisio
 def request_agent_production_access(request: AgentProductionAccessRequest) -> AgentProductionAccessDecision:
     require_permission("release:gate", request.agentId)
     return create_agent_production_access_request(request)
+
+
+def decide_agent_production_access(
+    request_id: str,
+    decision: str,
+    request: AgentApprovalDecisionRequest,
+    idempotency_key: str,
+) -> AgentProductionAccessDecision:
+    access = get_scoped_record("agent_access_requests", request_id)
+    if access is None:
+        raise HTTPException(status_code=404, detail="Production access request not found")
+    allowed_roles = {"Owner", "Admin"} if decision == "approved" else {"Owner", "Admin", "Security"}
+    user = current_access_user()
+    if user.role not in allowed_roles:
+        raise HTTPException(status_code=403, detail=f"{user.role} cannot {decision} production access")
+    if auth_required() and decision == "approved" and access.get("requestedBy") == user.email:
+        raise HTTPException(status_code=403, detail="Requesters cannot approve their own production access request")
+    key_hash, request_hash = decision_idempotency_binding(
+        target_type="agent_production_access",
+        target_id=request_id,
+        decision=decision,
+        request=request,
+        idempotency_key=idempotency_key,
+    )
+    replay = replay_agent_decision(access, key_hash, request_hash)
+    if replay is not None:
+        return AgentProductionAccessDecision.model_validate(replay)
+    actionable_statuses = {
+        "approved": {"pending_review"},
+        "blocked": {"pending_review"},
+        "revoked": {"pending_review", "approved"},
+    }[decision]
+    if access.get("status") not in actionable_statuses:
+        raise HTTPException(status_code=409, detail="Production access request is no longer actionable")
+    now = datetime.now().isoformat()
+    access_patch = dict(
+        decision="allow" if decision == "approved" else "block",
+        reviewedAt=now,
+        reviewedBy=user.email,
+        reason=request.reason,
+        evidenceHash=request.evidenceHash,
+    )
+    decision_result = AgentProductionAccessDecision.model_validate(
+        {**access, **access_patch, "status": decision}
+    ).model_dump()
+    access_patch["decisionHistory"] = decision_history_with_result(
+        access,
+        key_hash,
+        request_hash,
+        decision,
+        decision_result,
+        now,
+    )
+    identity = get_agent_identity(str(access["agentId"]))
+    if identity is None:
+        raise HTTPException(status_code=409, detail="Production access identity no longer exists")
+    workspace_id = current_workspace_id()
+    aliases = {str(access["agentId"]), identity.id, identity.agentId}
+    with identity_execution_guard(workspace_id, aliases):
+        saved_access, saved_identity, _ = decide_agent_production_access_atomic(
+            workspace_id=workspace_id,
+            access_record_id=scoped_record_id(request_id),
+            identity_record_id=scoped_record_id(identity.id),
+            identity_id=identity.id,
+            expected_status=str(access["status"]),
+            new_status=decision,
+            access_patch=access_patch,
+            revoke_reason=request.reason,
+        )
+        if saved_access is not None and saved_identity is not None and decision != "approved":
+            aliases.add(str(saved_identity.get("agentId", "")))
+            cancel_jobs_for_identity(workspace_id, aliases, environment="prod")
+    if saved_access is None or saved_identity is None:
+        current = get_record("agent_access_requests", scoped_record_id(request_id))
+        if current is not None and current.get("workspaceId") != current_workspace_id():
+            current = None
+        replay = replay_agent_decision(current or {}, key_hash, request_hash)
+        if replay is not None:
+            return AgentProductionAccessDecision.model_validate(replay)
+        raise HTTPException(status_code=409, detail="Production access request is no longer actionable")
+    save_audit_event(
+        f"agent.production_access.{decision}",
+        user.email,
+        str(access["agentId"]),
+        "allow" if decision == "approved" else "block",
+        request.reason,
+    )
+    return AgentProductionAccessDecision.model_validate(saved_access)
+
+
+@app.post("/api/agent-control/production-access/{request_id}/approve", response_model=AgentProductionAccessDecision)
+def approve_agent_production_access(
+    request_id: str,
+    request: AgentApprovalDecisionRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=160),
+) -> AgentProductionAccessDecision:
+    return decide_agent_production_access(request_id, "approved", request, idempotency_key)
+
+
+@app.post("/api/agent-control/production-access/{request_id}/block", response_model=AgentProductionAccessDecision)
+def block_agent_production_access(
+    request_id: str,
+    request: AgentApprovalDecisionRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=160),
+) -> AgentProductionAccessDecision:
+    return decide_agent_production_access(request_id, "blocked", request, idempotency_key)
+
+
+@app.post("/api/agent-control/production-access/{request_id}/revoke", response_model=AgentProductionAccessDecision)
+def revoke_agent_production_access(
+    request_id: str,
+    request: AgentApprovalDecisionRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=1, max_length=160),
+) -> AgentProductionAccessDecision:
+    return decide_agent_production_access(request_id, "revoked", request, idempotency_key)
 
 
 @app.get("/api/agent-runtime/definitions", response_model=list[AgentDefinition])
@@ -7989,10 +9175,27 @@ def agent_run_detail(run_id: str) -> AgentRunRecord:
     return AgentRunRecord.model_validate(run)
 
 
+def metadata_only_runtime_records(
+    identity: AgentIdentity,
+    request: AgentRunRequest,
+    run: AgentRunRecord,
+    trace: Trace,
+) -> tuple[AgentRunRecord, Trace]:
+    if identity.captureMode != "metadata_only":
+        return run, trace
+    input_hash = f"sha256:{sha256(run.input.encode('utf-8')).hexdigest()}"
+    output_hash = f"sha256:{sha256(run.output.encode('utf-8')).hexdigest()}"
+    return (
+        run.model_copy(update={"input": input_hash, "output": output_hash}),
+        trace.model_copy(update={"prompt": input_hash, "output": output_hash}),
+    )
+
+
 @app.post("/api/agent-runtime/run", response_model=AgentRunResponse)
 def execute_agent(request: AgentRunRequest) -> AgentRunResponse:
     require_permission("gateway:operate", "agent_runtime.run")
-    ensure_agent_runtime_allowed(request.agentId)
+    identity = ensure_agent_runtime_allowed(request.agentId, request.environment)
+    consume_governed_runtime_lease(identity, request)
     try:
         run, trace = run_agent(request)
     except ValueError as exc:
@@ -8000,9 +9203,12 @@ def execute_agent(request: AgentRunRequest) -> AgentRunResponse:
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    save_scoped_record("agent_runs", run.id, run.model_dump())
-    save_scoped_record("traces", trace.id, trace.model_dump())
-    trigger_trace_automations(trace)
+    if request.environment == "prod" and (run.provider != request.provider or run.model != request.model):
+        raise HTTPException(status_code=409, detail="Runtime provider or model did not match the authorization lease")
+    stored_run, stored_trace = metadata_only_runtime_records(identity, request, run, trace)
+    save_scoped_record("agent_runs", stored_run.id, stored_run.model_dump())
+    save_scoped_record("traces", stored_trace.id, stored_trace.model_dump())
+    trigger_trace_automations(stored_trace)
     return AgentRunResponse(run=run, trace=trace)
 
 
@@ -8028,16 +9234,26 @@ def run_lab_experiment(request: LabRunRequest) -> LabRunResponse:
     failures: list[dict[str, str]] = []
 
     for agent_id in dict.fromkeys(request.agentIds):
+        run_request = AgentRunRequest(
+            agentId=agent_id,
+            input=request.input,
+            providerMode=request.providerMode,
+            provider=request.provider,
+            model=request.model,
+            environment=request.environment,
+            authorizationLeaseId=request.authorizationLeaseIds.get(agent_id),
+            authorizationContextHash=request.authorizationContextHashes.get(agent_id),
+        )
         try:
-            run, trace = run_agent(
-                AgentRunRequest(
-                    agentId=agent_id,
-                    input=request.input,
-                    providerMode=request.providerMode,
-                    model=request.model,
-                    environment=request.environment,
-                )
-            )
+            identity = ensure_agent_runtime_allowed(agent_id, request.environment)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            failures.append({"agentId": agent_id, "error": str(exc.detail)})
+            continue
+        consume_governed_runtime_lease(identity, run_request)
+        try:
+            run, trace = run_agent(run_request)
         except ValueError as exc:
             failures.append({"agentId": agent_id, "error": str(exc)})
             continue
@@ -8045,9 +9261,15 @@ def run_lab_experiment(request: LabRunRequest) -> LabRunResponse:
             failures.append({"agentId": agent_id, "error": str(exc)})
             continue
 
-        save_scoped_record("agent_runs", run.id, run.model_dump())
-        save_scoped_record("traces", trace.id, trace.model_dump())
-        trigger_trace_automations(trace)
+        stored_run, stored_trace = metadata_only_runtime_records(
+            identity,
+            run_request,
+            run,
+            trace,
+        )
+        save_scoped_record("agent_runs", stored_run.id, stored_run.model_dump())
+        save_scoped_record("traces", stored_trace.id, stored_trace.model_dump())
+        trigger_trace_automations(stored_trace)
         variants.append(
             LabVariantResult(
                 agentId=run.agentId,
@@ -8105,7 +9327,15 @@ def run_lab_experiment(request: LabRunRequest) -> LabRunResponse:
             "failures": failures,
         },
     )
-    save_scoped_record("lab_experiments", experiment.id, experiment.model_dump())
+    persisted_experiment = experiment.model_copy(deep=True)
+    persisted_experiment.input = f"sha256:{sha256(experiment.input.encode('utf-8')).hexdigest()}"
+    persisted_experiment.variants = [
+        variant.model_copy(
+            update={"output": f"sha256:{sha256(variant.output.encode('utf-8')).hexdigest()}"}
+        )
+        for variant in experiment.variants
+    ]
+    save_scoped_record("lab_experiments", persisted_experiment.id, persisted_experiment.model_dump())
     save_audit_event(
         "lab.experiment",
         current_workspace_id(),
@@ -8118,17 +9348,20 @@ def run_lab_experiment(request: LabRunRequest) -> LabRunResponse:
 
 @app.get("/api/agent-runtime/jobs", response_model=list[AgentJob])
 def agent_jobs() -> list[AgentJob]:
-    return list_jobs()
+    require_permission("workspace:read", "agent_jobs.list")
+    return list_jobs(current_workspace_id())
 
 
 @app.get("/api/agent-runtime/jobs/summary")
 def agent_jobs_summary() -> dict[str, Any]:
-    return queue_summary()
+    require_permission("workspace:read", "agent_jobs.summary")
+    return queue_summary(current_workspace_id())
 
 
 @app.get("/api/agent-runtime/jobs/{job_id}", response_model=AgentJob)
 def agent_job_detail(job_id: str) -> AgentJob:
-    job = get_job(job_id)
+    require_permission("workspace:read", job_id)
+    job = get_job(job_id, current_workspace_id())
     if job is None:
         raise HTTPException(status_code=404, detail="Agent job not found")
     return job
@@ -8137,14 +9370,20 @@ def agent_job_detail(job_id: str) -> AgentJob:
 @app.post("/api/agent-runtime/jobs", response_model=AgentJobSubmitResponse)
 def submit_agent_job(request: AgentJobSubmitRequest) -> AgentJobSubmitResponse:
     require_permission("gateway:operate", "agent_jobs.submit")
-    ensure_agent_runtime_allowed(request.agentId)
-    return AgentJobSubmitResponse(job=submit_job(request))
+    identity = ensure_agent_runtime_allowed(request.agentId, request.environment)
+    if identity.captureMode == "metadata_only" and not re.fullmatch(r"sha256:[0-9a-f]{64}", request.input):
+        raise HTTPException(
+            status_code=422,
+            detail="Metadata-only runs cannot be queued because queued jobs persist raw input",
+        )
+    consume_governed_runtime_lease(identity, request, consume=False)
+    return AgentJobSubmitResponse(job=submit_job(request, current_workspace_id()))
 
 
 @app.post("/api/agent-runtime/jobs/process-next", response_model=AgentJobProcessResponse)
 def process_next_agent_job() -> AgentJobProcessResponse:
     require_permission("gateway:operate", "agent_jobs.process_next")
-    result = process_next_job()
+    result = process_next_job(current_workspace_id())
     if result is None:
         raise HTTPException(status_code=404, detail="No queued agent jobs")
     return result
@@ -8153,7 +9392,7 @@ def process_next_agent_job() -> AgentJobProcessResponse:
 @app.post("/api/agent-runtime/jobs/{job_id}/process", response_model=AgentJobProcessResponse)
 def process_agent_job(job_id: str) -> AgentJobProcessResponse:
     require_permission("gateway:operate", job_id)
-    result = process_job(job_id)
+    result = process_job(job_id, current_workspace_id())
     if result is None:
         raise HTTPException(status_code=404, detail="Agent job not found")
     return result
@@ -8162,7 +9401,7 @@ def process_agent_job(job_id: str) -> AgentJobProcessResponse:
 @app.post("/api/agent-runtime/jobs/{job_id}/retry", response_model=AgentJob)
 def retry_agent_job(job_id: str) -> AgentJob:
     require_permission("gateway:operate", job_id)
-    job = retry_job(job_id)
+    job = retry_job(job_id, current_workspace_id())
     if job is None:
         raise HTTPException(status_code=404, detail="Agent job not found")
     return job
@@ -8171,7 +9410,7 @@ def retry_agent_job(job_id: str) -> AgentJob:
 @app.post("/api/agent-runtime/jobs/{job_id}/cancel", response_model=AgentJob)
 def cancel_agent_job(job_id: str) -> AgentJob:
     require_permission("gateway:operate", job_id)
-    job = cancel_job(job_id)
+    job = cancel_job(job_id, current_workspace_id())
     if job is None:
         raise HTTPException(status_code=404, detail="Agent job not found")
     return job
@@ -8740,8 +9979,8 @@ def run_data_governance_purge(request: PurgeRunRequest) -> PurgeJob:
     eligible, protected, _inventory = governance_candidates(simulation.policy, domains)
     deleted = 0
     for candidate in eligible:
-        delete_scoped_record(candidate["domain"], candidate["id"])
-        deleted += 1
+        if delete_governance_record(candidate["domain"], candidate["id"]):
+            deleted += 1
     job = PurgeJob(
         id=f"purge_job_{token_hex(6)}",
         simulationId=simulation.id,
