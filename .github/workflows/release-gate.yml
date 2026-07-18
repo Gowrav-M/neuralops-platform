@@ -3,6 +3,8 @@ name: NeuralOps Release Gate
 on:
   workflow_dispatch:
   pull_request:
+  push:
+    branches: [main]
 
 jobs:
   gate:
@@ -30,6 +32,9 @@ jobs:
 
       - name: Verify app before gate
         run: |
+          npm audit --audit-level=high
+          npm run test:sdk
+          npm run test:deployment
           npm run lint
           npm run build
           python -m pytest backend
@@ -39,7 +44,7 @@ jobs:
         run: |
           NEURALOPS_AUTH_REQUIRED=false python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 &
           for i in {1..30}; do
-            curl -fsS http://127.0.0.1:8000/health && exit 0
+            curl -fsS http://127.0.0.1:8000/ready && exit 0
             sleep 1
           done
           exit 1
@@ -90,10 +95,27 @@ jobs:
               )
           PY
 
-      - name: Run local release gate
-        uses: ./
+      - name: Run local release gate and retain evidence
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          set +e
+          node sdk/javascript/bin/neuralops.mjs release-gate run \
+            --base-url http://127.0.0.1:8000 \
+            --target ci \
+            --require-auth false \
+            --fail-on block \
+            --json > artifacts/release-gate.json
+          gate_exit=$?
+          set -e
+          cat artifacts/release-gate.json
+          exit "$gate_exit"
+
+      - name: Upload release-gate evidence
+        if: always()
+        uses: actions/upload-artifact@v6
         with:
-          base-url: http://127.0.0.1:8000
-          target: ci
-          require-auth: "false"
-          fail-on: block
+          name: neuralops-release-gate-${{ github.run_id }}
+          path: artifacts/release-gate.json
+          if-no-files-found: error
+          retention-days: 30
