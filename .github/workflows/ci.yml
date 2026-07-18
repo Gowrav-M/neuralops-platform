@@ -22,12 +22,6 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Lint frontend
-        run: npm run lint
-
-      - name: Build frontend
-        run: npm run build
-
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
@@ -36,5 +30,70 @@ jobs:
       - name: Install backend dependencies
         run: python -m pip install -r backend/requirements.txt
 
+      - name: Lint frontend
+        run: npm run lint
+
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=high
+
+      - name: Test SDK contracts
+        run: npm run test:sdk
+
+      - name: Test deployment verifier
+        run: npm run test:deployment
+
+      - name: Build frontend
+        run: npm run build
+
       - name: Test backend API
         run: python -m pytest backend
+
+  security-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm audit --audit-level=high
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Audit backend dependencies
+        run: |
+          python -m pip install pip-audit
+          python -m pip_audit -r backend/requirements.txt
+
+  e2e:
+    needs: verify
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          npm ci
+          python -m pip install -r backend/requirements.txt
+          npx playwright install --with-deps chromium
+
+      - name: Run desktop and mobile acceptance
+        run: |
+          npm run test:e2e
+          npm run test:e2e:landing

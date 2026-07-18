@@ -174,6 +174,18 @@ def estimate_tokens(text: str) -> int:
 
 
 def _execute(agent: AgentDefinition, request: AgentRunRequest) -> tuple[str, str, str]:
+    if request.provider == "local":
+        if request.providerMode != "local":
+            raise RuntimeError("The local provider requires providerMode=local.")
+        model = request.model or agent.defaultModel or "local-neuralops-agent"
+        return "local", model, _run_local_agent(agent.id, request.input)
+    if request.provider is not None:
+        if request.providerMode != "live":
+            raise RuntimeError("A named live provider requires providerMode=live.")
+        live = _try_live_provider(agent, request, request.provider)
+        if live is None:
+            raise RuntimeError(f"Requested provider {request.provider} is not configured or did not succeed.")
+        return live
     if request.providerMode in ("auto", "live"):
         live = _try_live_provider(agent, request)
         if live is not None:
@@ -185,8 +197,14 @@ def _execute(agent: AgentDefinition, request: AgentRunRequest) -> tuple[str, str
     return "local", model, _run_local_agent(agent.id, request.input)
 
 
-def _try_live_provider(agent: AgentDefinition, request: AgentRunRequest) -> tuple[str, str, str] | None:
+def _try_live_provider(
+    agent: AgentDefinition,
+    request: AgentRunRequest,
+    selected_provider: str | None = None,
+) -> tuple[str, str, str] | None:
     for provider in runtime_providers_for_environment(request.environment):
+        if selected_provider is not None and provider.id != selected_provider:
+            continue
         model = request.model or provider.default_model
         try:
             output = _call_openai_compatible(provider.base_url, provider.api_key, model, agent, request.input)

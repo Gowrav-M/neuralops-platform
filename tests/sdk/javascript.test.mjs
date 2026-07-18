@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { NeuralOps, traceFunction, wrapFetch, wrapOpenAI } from '../../sdk/javascript/index.js';
+import {
+  AGENT_ACTIONS,
+  AGENT_TOOL_CATEGORIES,
+  NeuralOps,
+  traceFunction,
+  wrapFetch,
+  wrapOpenAI,
+} from '../../sdk/javascript/index.js';
 import { runCli } from '../../sdk/javascript/bin/neuralops.mjs';
 
 test('JavaScript SDK routes chat completions through NeuralOps Gateway', async () => {
@@ -576,3 +583,502 @@ function jsonResponse(status, body) {
     json: async () => body,
   };
 }
+
+function canonicalAuthorizeLease(metadata, overrides = {}) {
+  return {
+    id: 'agent_lease_valid',
+    identityId: metadata.identityId,
+    action: metadata.action,
+    toolCategory: metadata.toolCategory,
+    operation: metadata.operation,
+    contextHash: metadata.contextHash,
+    contentHash: metadata.contentHash,
+    provider: metadata.provider,
+    environment: metadata.environment || 'staging',
+    risk: metadata.action === AGENT_ACTIONS.METADATA_READ ? 'low' : 'high',
+    status: 'active',
+    idempotencyKey: metadata.idempotencyKey,
+    createdAt: '2026-07-16T00:00:00Z',
+    expiresAt: '2026-07-16T00:10:00Z',
+    ...(metadata.model ? { model: metadata.model } : {}),
+    ...overrides,
+  };
+}
+
+function canonicalApproval(metadata, overrides = {}) {
+  return {
+    id: 'agent_approval_valid',
+    identityId: metadata.identityId,
+    action: metadata.action,
+    toolCategory: metadata.toolCategory,
+    operation: metadata.operation,
+    contextHash: metadata.contextHash,
+    contentHash: metadata.contentHash,
+    provider: metadata.provider,
+    environment: metadata.environment || 'staging',
+    risk: 'high',
+    status: 'pending',
+    idempotencyKey: metadata.idempotencyKey,
+    requestedBy: metadata.identityId,
+    createdAt: '2026-07-16T00:00:00Z',
+    expiresAt: '2026-07-16T00:10:00Z',
+    ...(metadata.model ? { model: metadata.model } : {}),
+    ...overrides,
+  };
+}
+
+test('JavaScript retries JSON-valid non-canonical allow responses with the same idempotency key', async (t) => {
+  const baseAction = {
+    identityId: 'agent_identity_1', action: AGENT_ACTIONS.METADATA_READ,
+    toolCategory: AGENT_TOOL_CATEGORIES.METADATA, operation: 'traces.list',
+    contextHash: `sha256:${'a'.repeat(64)}`, contentHash: `sha256:${'b'.repeat(64)}`,
+    provider: 'internal', environment: 'staging', model: 'ops-reader-v1',
+  };
+  const invalidLeases = [
+    ['string lease', 'agent_lease_forged'],
+    ['empty lease', {}],
+    ['missing id', canonicalAuthorizeLease(baseAction, { id: undefined })],
+    ['invalid id', canonicalAuthorizeLease(baseAction, { id: 42 })],
+    ['missing status', canonicalAuthorizeLease(baseAction, { status: undefined })],
+    ['invalid status', canonicalAuthorizeLease(baseAction, { status: 'revoked' })],
+    ...['identityId', 'action', 'toolCategory', 'operation', 'contextHash', 'contentHash', 'provider', 'environment', 'model']
+      .map((field) => [`mismatched ${field}`, canonicalAuthorizeLease(baseAction, { [field]: `wrong-${field}` })]),
+  ];
+
+  for (const [name, invalidLease] of invalidLeases) {
+    await t.test(name, async () => {
+      const requests = [];
+      const client = new NeuralOps({
+        agentCredential: 'nop_agent_secret_value',
+        retry: { maxAttempts: 2, initialDelayMs: 0 },
+        fetchImpl: async (_url, options) => {
+          const request = JSON.parse(options.body);
+          requests.push(request);
+          return jsonResponse(200, {
+            decision: 'allow',
+            reason: 'Authorized',
+            lease: requests.length === 1
+              ? invalidLease
+              : canonicalAuthorizeLease(request, { id: 'agent_lease_valid' }),
+          });
+        },
+      });
+
+      const lease = await client.authorizeAction(baseAction);
+      assert.equal(lease.id, 'agent_lease_valid');
+      assert.equal(requests.length, 2);
+      assert.equal(requests[0].idempotencyKey, requests[1].idempotencyKey);
+    });
+  }
+});
+
+test('JavaScript retries an unsafe approval projection before returning approval_required', async () => {
+  const requests = [];
+  const action = {
+    identityId: 'agent_identity_1', action: AGENT_ACTIONS.SHELL,
+    toolCategory: AGENT_TOOL_CATEGORIES.SHELL, operation: 'exec',
+    contextHash: `sha256:${'a'.repeat(64)}`, contentHash: `sha256:${'b'.repeat(64)}`,
+    provider: 'internal', environment: 'staging',
+  };
+  const client = new NeuralOps({
+    agentCredential: 'nop_agent_secret_value',
+    retry: { maxAttempts: 2, initialDelayMs: 0 },
+    fetchImpl: async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      return jsonResponse(200, {
+        decision: 'review', reason: 'Explicit approval required',
+        approval: requests.length === 1
+          ? { id: {}, status: 'pending', reason: 'private' }
+          : { id: 'agent_approval_valid', status: 'pending', reason: 'private' },
+      });
+    },
+  });
+
+  await assert.rejects(client.authorizeAction(action), (error) => (
+    error.code === 'approval_required'
+    && error.approval?.id === 'agent_approval_valid'
+    && !JSON.stringify(error).includes('private')
+  ));
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].idempotencyKey, requests[1].idempotencyKey);
+});
+
+test('JavaScript non-canonical allow exhaustion returns only sanitized backend_unavailable', async () => {
+  let attempts = 0;
+  const client = new NeuralOps({
+    agentCredential: 'nop_agent_secret_value',
+    retry: { maxAttempts: 2, initialDelayMs: 0 },
+    fetchImpl: async () => {
+      attempts += 1;
+      return jsonResponse(200, {
+        decision: 'allow', reason: 'private backend detail',
+        lease: { id: {}, status: 'active', secret: 'nop_agent_secret_value' },
+      });
+    },
+  });
+
+  await assert.rejects(client.authorizeAction({
+    identityId: 'agent_identity_1', action: AGENT_ACTIONS.METADATA_READ,
+    toolCategory: AGENT_TOOL_CATEGORIES.METADATA, operation: 'traces.list',
+    contextHash: `sha256:${'a'.repeat(64)}`, contentHash: `sha256:${'b'.repeat(64)}`,
+    provider: 'internal',
+  }), (error) => (
+    error.code === 'backend_unavailable'
+    && !String(error).includes('private backend detail')
+    && !JSON.stringify(error).includes('nop_agent_secret_value')
+  ));
+  assert.equal(attempts, 2);
+});
+
+test('JavaScript agent control sends only metadata and preserves one idempotency key across retry', async () => {
+  const calls = [];
+  const client = new NeuralOps({
+    apiKey: 'nop_sk_existing_key',
+    agentCredential: 'nop_agent_secret_value',
+    baseUrl: 'https://neuralops.example',
+    retry: { maxAttempts: 2, maxElapsedMs: 1000, initialDelayMs: 0 },
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      if (calls.length === 1) {
+        return jsonResponse(503, { detail: 'warming; prompt=do not retain me' });
+      }
+      const request = JSON.parse(options.body);
+      return jsonResponse(200, {
+        decision: 'allow',
+        reason: 'Authorized',
+        lease: canonicalAuthorizeLease(request, { id: 'agent_lease_1' }),
+      });
+    },
+  });
+
+  const result = await client.authorizeAction({
+    identityId: 'agent_identity_1',
+    action: AGENT_ACTIONS.METADATA_READ,
+    toolCategory: AGENT_TOOL_CATEGORIES.METADATA,
+    operation: 'traces.list',
+    contextHash: `sha256:${'a'.repeat(64)}`,
+    contentHash: `sha256:${'b'.repeat(64)}`,
+    provider: 'internal',
+    environment: 'staging',
+    policyFindings: ['read-only'],
+    prompt: 'raw prompt must not leave the process',
+    output: 'raw output must not leave the process',
+    toolArgs: { apiKey: 'provider-secret' },
+    secret: 'another-secret',
+  });
+
+  assert.equal(result.id, 'agent_lease_1');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, 'https://neuralops.example/api/agent-control/authorize');
+  assert.equal(calls[0].options.headers['x-neuralops-agent-key'], 'nop_agent_secret_value');
+  assert.equal(calls[0].options.headers['x-neuralops-key'], undefined);
+  assert.equal(calls[0].options.headers['Idempotency-Key'], calls[1].options.headers['Idempotency-Key']);
+  const firstBody = JSON.parse(calls[0].options.body);
+  const secondBody = JSON.parse(calls[1].options.body);
+  assert.equal(firstBody.idempotencyKey, calls[0].options.headers['Idempotency-Key']);
+  assert.equal(secondBody.idempotencyKey, firstBody.idempotencyKey);
+  assert.deepEqual(Object.keys(firstBody).sort(), [
+    'action', 'contentHash', 'contextHash', 'environment', 'idempotencyKey', 'identityId',
+    'operation', 'policyFindings', 'provider', 'toolCategory',
+  ].sort());
+  assert.equal(calls.map((call) => call.options.body).join('').includes('raw prompt'), false);
+  assert.equal(calls.map((call) => call.options.body).join('').includes('provider-secret'), false);
+});
+
+test('JavaScript agent control fails closed on review and never retries policy responses', async () => {
+  let attempts = 0;
+  const client = new NeuralOps({
+    apiKey: 'nop_sk_existing_key',
+    agentCredential: 'nop_agent_secret_value',
+    fetchImpl: async () => {
+      attempts += 1;
+      return jsonResponse(200, {
+        decision: 'review',
+        reason: 'Explicit approval required',
+        approval: { id: 'agent_approval_1', status: 'pending' },
+      });
+    },
+  });
+
+  await assert.rejects(
+    client.authorizeAction({
+      identityId: 'agent_identity_1', action: AGENT_ACTIONS.SHELL, toolCategory: AGENT_TOOL_CATEGORIES.SHELL, operation: 'exec',
+      contextHash: `sha256:${'a'.repeat(64)}`, contentHash: `sha256:${'b'.repeat(64)}`, provider: 'internal',
+    }),
+    (error) => error.code === 'approval_required' && error.approval?.id === 'agent_approval_1',
+  );
+  assert.equal(attempts, 1);
+});
+
+test('JavaScript high-risk authorization exposes a safe generated key for approval retry', async () => {
+  const calls = [];
+  const client = new NeuralOps({
+    agentCredential: 'nop_agent_secret_value',
+    fetchImpl: async (_url, options) => {
+      calls.push(JSON.parse(options.body));
+      if (calls.length === 1) {
+        return jsonResponse(200, {
+          decision: 'review',
+          reason: 'Explicit approval required',
+          approval: {
+            id: 'agent_approval_1',
+            status: 'pending',
+      evidenceHash: `sha256:${'a'.repeat(64)}`,
+            reason: 'private operator context',
+          },
+        });
+      }
+      return jsonResponse(200, {
+        decision: 'allow',
+        reason: 'Authorized',
+        lease: canonicalAuthorizeLease(calls.at(-1), { id: 'agent_lease_1' }),
+      });
+    },
+  });
+  const action = {
+    identityId: 'agent_identity_1', action: AGENT_ACTIONS.SHELL, toolCategory: AGENT_TOOL_CATEGORIES.SHELL, operation: 'exec',
+    contextHash: `sha256:${'a'.repeat(64)}`, contentHash: `sha256:${'b'.repeat(64)}`, provider: 'internal',
+  };
+
+  let retryKey;
+  await assert.rejects(client.authorizeAction(action), (error) => {
+    retryKey = error.idempotencyKey;
+    assert.match(retryKey, /^nop_action_/);
+    assert.deepEqual(error.approval, { id: 'agent_approval_1', status: 'pending' });
+    assert.equal(JSON.stringify(error).includes('private-evidence'), false);
+    assert.equal(JSON.stringify(error).includes('private operator context'), false);
+    return error.code === 'approval_required';
+  });
+
+  const lease = await client.authorizeAction({ ...action, idempotencyKey: retryKey });
+  assert.equal(lease.id, 'agent_lease_1');
+  assert.equal(calls[0].idempotencyKey, retryKey);
+  assert.equal(calls[1].idempotencyKey, retryKey);
+});
+
+test('JavaScript agent control supports approval and bound lease lifecycle without leaking credentials in errors', async () => {
+  const calls = [];
+  const binding = {
+    identityId: 'agent_identity_1', action: AGENT_ACTIONS.SHELL, toolCategory: AGENT_TOOL_CATEGORIES.SHELL, operation: 'exec',
+    contextHash: `sha256:${'a'.repeat(64)}`, contentHash: `sha256:${'b'.repeat(64)}`, provider: 'internal',
+    idempotencyKey: 'action-fixed-key', leaseId: 'agent_lease_1',
+  };
+  const responses = [
+    jsonResponse(200, canonicalApproval(binding, { id: 'agent_approval_1' })),
+    jsonResponse(200, canonicalAuthorizeLease(binding, { id: 'agent_lease_1' })),
+    jsonResponse(401, { detail: 'bad nop_agent_secret_value raw prompt' }),
+  ];
+  const client = new NeuralOps({
+    apiKey: 'nop_sk_existing_key',
+    agentCredential: 'nop_agent_secret_value',
+    retry: { maxAttempts: 5, initialDelayMs: 0 },
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return responses.shift();
+    },
+  });
+  const approval = await client.requestApproval(binding);
+  const lease = await client.validateLease(binding);
+  assert.equal(approval.id, 'agent_approval_1');
+  assert.equal(lease.id, 'agent_lease_1');
+  await assert.rejects(client.consumeLease(binding), (error) => {
+    assert.equal(String(error).includes('nop_agent_secret_value'), false);
+    assert.equal(String(error).includes('raw prompt'), false);
+    return error.status === 401;
+  });
+  assert.deepEqual(calls.map((call) => call.url), [
+    'http://localhost:8000/api/agent-control/approvals',
+    'http://localhost:8000/api/agent-control/leases/validate',
+    'http://localhost:8000/api/agent-control/leases/consume',
+  ]);
+  assert.equal(calls[2].options.body.includes('leaseId'), true);
+});
+
+test('JavaScript lifecycle methods retry non-canonical idempotent responses but never replay consume', async (t) => {
+  const binding = {
+    identityId: 'agent_identity_1', action: AGENT_ACTIONS.SHELL,
+    toolCategory: AGENT_TOOL_CATEGORIES.SHELL, operation: 'exec',
+    contextHash: `sha256:${'a'.repeat(64)}`, contentHash: `sha256:${'b'.repeat(64)}`,
+    provider: 'internal', environment: 'staging', model: 'ops-runner-v1',
+    idempotencyKey: 'lifecycle-fixed-key', leaseId: 'agent_lease_1',
+  };
+  const canonicalLease = canonicalAuthorizeLease(binding, { id: binding.leaseId });
+  const invalidCases = [
+    ['empty object', {}],
+    ['wrong id type', { ...canonicalLease, id: 42 }],
+    ['wrong status', { ...canonicalLease, status: 'revoked' }],
+    ['wrong lease id', { ...canonicalLease, id: 'agent_lease_other' }],
+    ['wrong identity binding', { ...canonicalLease, identityId: 'agent_identity_other' }],
+    ['wrong provider binding', { ...canonicalLease, provider: 'other-provider' }],
+  ];
+
+  for (const [name, invalidLease] of invalidCases) {
+    await t.test(`validate rejects ${name}`, async () => {
+      const requests = [];
+      const client = new NeuralOps({
+        agentCredential: 'nop_agent_secret_value',
+        retry: { maxAttempts: 2, initialDelayMs: 0 },
+        fetchImpl: async (_url, options) => {
+          requests.push(JSON.parse(options.body));
+          return jsonResponse(200, requests.length === 1 ? invalidLease : canonicalLease);
+        },
+      });
+      assert.equal((await client.validateLease(binding)).id, binding.leaseId);
+      assert.equal(requests.length, 2);
+      assert.equal(requests[0].idempotencyKey, requests[1].idempotencyKey);
+    });
+  }
+
+  await t.test('approval retries an invalid binding with the same idempotency key', async () => {
+    const requests = [];
+    const valid = canonicalApproval(binding);
+    const client = new NeuralOps({
+      agentCredential: 'nop_agent_secret_value',
+      retry: { maxAttempts: 2, initialDelayMs: 0 },
+      fetchImpl: async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return jsonResponse(200, requests.length === 1 ? { ...valid, action: 'forged-action' } : valid);
+      },
+    });
+    assert.equal((await client.requestApproval(binding)).id, valid.id);
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].idempotencyKey, requests[1].idempotencyKey);
+  });
+
+  for (const [name, invalidLease] of invalidCases) {
+    await t.test(`consume fails closed without replay for ${name}`, async () => {
+      let calls = 0;
+      const client = new NeuralOps({
+        agentCredential: 'nop_agent_secret_value',
+        retry: { maxAttempts: 2, initialDelayMs: 0 },
+        fetchImpl: async () => {
+          calls += 1;
+          return jsonResponse(200, invalidLease);
+        },
+      });
+      await assert.rejects(client.consumeLease(binding), (error) => (
+        error.code === 'backend_unavailable'
+        && !String(error).includes('forged-action')
+        && !JSON.stringify(error).includes('nop_agent_secret_value')
+      ));
+      assert.equal(calls, 1);
+    });
+  }
+
+  await t.test('consume fails closed without replay when delivery outcome is unknown', async () => {
+    let calls = 0;
+    const client = new NeuralOps({
+      agentCredential: 'nop_agent_secret_value',
+      retry: { maxAttempts: 2, initialDelayMs: 0 },
+      fetchImpl: async () => {
+        calls += 1;
+        throw new TypeError('connection reset after private response');
+      },
+    });
+    await assert.rejects(client.consumeLease(binding), (error) => (
+      error.code === 'backend_unavailable' && !String(error).includes('private response')
+    ));
+    assert.equal(calls, 1);
+  });
+});
+
+test('JavaScript agent control fails closed when retries are exhausted', async () => {
+  let attempts = 0;
+  const client = new NeuralOps({
+    agentCredential: 'nop_agent_secret_value',
+    retry: { maxAttempts: 2, maxElapsedMs: 1000, initialDelayMs: 0 },
+    fetchImpl: async () => {
+      attempts += 1;
+      throw new TypeError('network failed with nop_agent_secret_value');
+    },
+  });
+
+  await assert.rejects(client.authorizeAction({
+    identityId: 'agent_identity_1', action: AGENT_ACTIONS.METADATA_READ, toolCategory: AGENT_TOOL_CATEGORIES.METADATA, operation: 'traces.list',
+    contextHash: `sha256:${'a'.repeat(64)}`, contentHash: `sha256:${'b'.repeat(64)}`, provider: 'internal',
+  }), (error) => error.code === 'backend_unavailable' && !String(error).includes('nop_agent_secret_value'));
+  assert.equal(attempts, 2);
+});
+
+test('JavaScript agent control enforces the elapsed retry deadline when fetch hangs', async () => {
+  const client = new NeuralOps({
+    agentCredential: 'nop_agent_secret_value',
+    retry: { maxElapsedMs: 5, initialDelayMs: 0 },
+    fetchImpl: async () => new Promise(() => {}),
+  });
+  const authorization = client.authorizeAction({
+    identityId: 'agent_identity_1', action: AGENT_ACTIONS.METADATA_READ, toolCategory: AGENT_TOOL_CATEGORIES.METADATA, operation: 'traces.list',
+    contextHash: `sha256:${'a'.repeat(64)}`, contentHash: `sha256:${'b'.repeat(64)}`, provider: 'internal',
+  });
+
+  const outcome = await Promise.race([
+    authorization.then(() => 'unexpected_success', (error) => error.code),
+    new Promise((resolve) => setTimeout(() => resolve('test_timeout'), 100)),
+  ]);
+  assert.equal(outcome, 'backend_unavailable');
+});
+
+test('JavaScript exports the backend canonical agent action contract', () => {
+  assert.deepEqual(AGENT_ACTIONS, {
+    METADATA_READ: 'metadata_read',
+    SHELL: 'shell',
+  });
+  assert.deepEqual(AGENT_TOOL_CATEGORIES, {
+    METADATA: 'metadata',
+    SHELL: 'shell',
+  });
+});
+
+test('JavaScript retries a malformed successful response with the same idempotency key', async () => {
+  const requests = [];
+  const client = new NeuralOps({
+    agentCredential: 'nop_agent_secret_value',
+    retry: { maxAttempts: 2, initialDelayMs: 0 },
+    fetchImpl: async (_url, options) => {
+      requests.push(JSON.parse(options.body));
+      if (requests.length === 1) {
+        return { ok: true, status: 200, json: async () => { throw new SyntaxError('truncated private response'); } };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          decision: 'allow',
+          reason: 'Authorized',
+          lease: canonicalAuthorizeLease(requests.at(-1), { id: 'agent_lease_replayed' }),
+        }),
+      };
+    },
+  });
+
+  const lease = await client.authorizeAction({
+    identityId: 'agent_identity_1', action: AGENT_ACTIONS.METADATA_READ,
+    toolCategory: AGENT_TOOL_CATEGORIES.METADATA, operation: 'traces.list',
+    contextHash: `sha256:${'a'.repeat(64)}`, contentHash: `sha256:${'b'.repeat(64)}`, provider: 'internal',
+  });
+
+  assert.equal(lease.id, 'agent_lease_replayed');
+  assert.equal(requests[0].idempotencyKey, requests[1].idempotencyKey);
+});
+
+test('JavaScript malformed successful response exhaustion fails closed without response details', async () => {
+  const client = new NeuralOps({
+    agentCredential: 'nop_agent_secret_value',
+    retry: { maxAttempts: 1, initialDelayMs: 0 },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => { throw new SyntaxError('private partial body nop_agent_secret_value'); },
+    }),
+  });
+
+  await assert.rejects(client.authorizeAction({
+    identityId: 'agent_identity_1', action: AGENT_ACTIONS.METADATA_READ,
+    toolCategory: AGENT_TOOL_CATEGORIES.METADATA, operation: 'traces.list',
+    contextHash: `sha256:${'a'.repeat(64)}`, contentHash: `sha256:${'b'.repeat(64)}`, provider: 'internal',
+  }), (error) => (
+    error.code === 'backend_unavailable'
+    && !String(error).includes('private partial body')
+    && !String(error).includes('nop_agent_secret_value')
+  ));
+});

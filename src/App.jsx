@@ -9,11 +9,16 @@ import {
   useParams,
 } from 'react-router-dom';
 import './index.css';
-import { fetchDashboard, fetchOnboardingStatus, fetchSystemStatus, setApiAuthToken, setApiWorkspaceId, setQaAuthToken } from './lib/api';
+import { ApiError, fetchDashboard, fetchOnboardingStatus, fetchSystemStatus, isRetryableApiError, setApiAuthToken, setApiWorkspaceId, setQaAuthToken } from './lib/api';
 import { AUTH_ENABLED, supabase } from './lib/supabase';
 
 // Import Screens
-import AuthGate from './components/AuthGate';
+import LandingPage from './components/LandingPage';
+
+const configuredWarmingTimeout = Number(import.meta.env.VITE_API_WARMING_TIMEOUT_MS || 90_000);
+const API_WARMING_TIMEOUT_MS = Number.isFinite(configuredWarmingTimeout)
+  ? Math.min(90_000, Math.max(1_000, configuredWarmingTimeout))
+  : 90_000;
 
 const Overview = lazy(() => import('./components/Overview'));
 const ActionCenter = lazy(() => import('./components/ActionCenter'));
@@ -441,6 +446,20 @@ function ScreenLoading({ activeTab }) {
   );
 }
 
+function appDelay(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function withAppTimeout(promise, milliseconds) {
+  if (!milliseconds || milliseconds <= 0) return promise;
+  return Promise.race([
+    promise,
+    appDelay(milliseconds).then(() => {
+      throw new TypeError('Backend readiness check timed out');
+    }),
+  ]);
+}
+
 function WorkspaceLaunchChecklist({ systemStatus, onboardingTruth, traces, apiStatus, session, onNavigate }) {
   const featureById = useMemo(() => {
     return new Map((systemStatus?.features || []).map((feature) => [feature.id, feature]));
@@ -510,14 +529,14 @@ function WorkspaceLaunchChecklist({ systemStatus, onboardingTruth, traces, apiSt
     },
   ];
   const launchSteps = proofLoopSteps.length ? proofLoopSteps : fallbackSteps;
-  const mode = systemStatus?.environment || (apiStatus.state === 'connected' ? 'local' : 'offline');
+  const mode = systemStatus?.environment || (apiStatus.state === 'ready' ? 'local' : apiStatus.state);
   const configured = launchSteps.filter((step) => step.status === 'complete').length;
 
   return (
     <section className="operator-launch-board workspace-launch-checklist" aria-label="Workspace launch checklist">
       <div className="launch-board-copy">
         <div className="launch-board-status-row">
-          <span className={`badge ${apiStatus.state === 'connected' ? 'badge-success' : 'badge-warning'}`}>
+          <span className={`badge ${apiStatus.state === 'ready' ? 'badge-success' : 'badge-warning'}`}>
             Data mode: {mode}
           </span>
           <span className="badge badge-success">{configured}/{launchSteps.length} launch steps ready</span>
@@ -554,7 +573,7 @@ function AppShell() {
   const navigate = useNavigate();
   const location = useLocation();
   const [theme, setTheme] = useState(() => {
-    return localStorage.getItem('neuralops-theme') || 'light';
+    return localStorage.getItem('neuralops-theme') || 'dark';
   });
 
   useEffect(() => {
@@ -567,7 +586,7 @@ function AppShell() {
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
   const [cmdSearch, setCmdSearch] = useState('');
   const [toasts, setToasts] = useState([]);
-  const [apiStatus, setApiStatus] = useState({ state: 'loading', message: 'Connecting to FastAPI backend...' });
+  const [apiStatus, setApiStatus] = useState({ state: 'checking', message: 'Checking the NeuralOps backend...' });
   const [systemStatus, setSystemStatus] = useState(null);
   const [onboardingTruth, setOnboardingTruth] = useState(null);
   const [session, setSession] = useState(null);
@@ -616,29 +635,68 @@ function AppShell() {
   const activeTab = activeTabFromPath(location.pathname);
   const setActiveTab = useCallback((tab) => navigateTab(navigate, tab), [navigate]);
 
-  useEffect(() => {
-    if (AUTH_ENABLED && !session) return undefined;
-    let cancelled = false;
+  const loadBootstrap = useCallback(async ({ retryForMs = 0, isCancelled = () => false } = {}) => {
+    const startedAt = Date.now();
+    const backoff = [1000, 2000, 4000, 8000, 12000];
+    let attempt = 0;
+    setApiStatus({ state: 'checking', message: 'Checking the NeuralOps backend...' });
 
-    Promise.all([fetchDashboard(), fetchSystemStatus(), fetchOnboardingStatus().catch(() => null)])
-      .then(([snapshot, status, proofStatus]) => {
-        if (cancelled) return;
+    while (!isCancelled()) {
+      try {
+        const remainingWindow = retryForMs > 0 ? Math.max(1, retryForMs - (Date.now() - startedAt)) : 0;
+        const [snapshot, status, proofStatus] = await withAppTimeout(
+          Promise.all([
+            fetchDashboard(),
+            fetchSystemStatus(),
+            fetchOnboardingStatus().catch((error) => {
+              if (error instanceof ApiError && error.status === 404) return null;
+              throw error;
+            }),
+          ]),
+          retryForMs > 0 ? Math.min(15000, remainingWindow) : 0,
+        );
+        if (isCancelled()) return false;
         setStats(snapshot.stats);
         setTraces(snapshot.traces);
         setIncidents(snapshot.incidents);
         setSystemStatus(status);
         setOnboardingTruth(proofStatus);
-        setApiStatus({ state: 'connected', message: 'Live backend data store connected' });
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setApiStatus({ state: 'offline', message: 'Backend offline - no local sample data is being shown' });
-      });
+        setApiStatus({ state: 'ready', message: 'Live backend data store connected' });
+        return true;
+      } catch (error) {
+        if (isCancelled()) return false;
+        const elapsed = Date.now() - startedAt;
+        if (retryForMs === 0 || elapsed >= retryForMs || !isRetryableApiError(error)) {
+          const message = error instanceof ApiError && [401, 403].includes(error.status)
+            ? 'Backend access denied. Sign in again or verify workspace access.'
+            : 'Backend unavailable. No local sample data is being shown.';
+          setApiStatus({ state: 'unavailable', message });
+          return false;
+        }
+        setApiStatus({
+          state: 'warming',
+          message: `Backend is warming. Retrying the same safe bootstrap read for up to ${Math.round(retryForMs / 1000)} seconds.`,
+        });
+        const remaining = retryForMs - elapsed;
+        await appDelay(Math.min(backoff[Math.min(attempt, backoff.length - 1)], remaining));
+        attempt += 1;
+      }
+    }
+    return false;
+  }, []);
+
+  useEffect(() => {
+    if (AUTH_ENABLED && !session) return undefined;
+    let cancelled = false;
+    const loadTimer = window.setTimeout(() => {
+      void loadBootstrap({ retryForMs: API_WARMING_TIMEOUT_MS, isCancelled: () => cancelled });
+    }, 0);
 
     return () => {
       cancelled = true;
+      window.clearTimeout(loadTimer);
     };
-  }, [session]);
+  }, [loadBootstrap, session]);
 
   // Web Audio synthesizer for crisp physical haptic audio notes
   const playAudioCue = useCallback((type = 'click') => {
@@ -732,19 +790,8 @@ function AppShell() {
   const [chaosActive, setChaosActive] = useState(false);
 
   const refreshDashboard = useCallback(() => {
-    Promise.all([fetchDashboard(), fetchSystemStatus(), fetchOnboardingStatus().catch(() => null)])
-      .then(([snapshot, status, proofStatus]) => {
-        setStats(snapshot.stats);
-        setTraces(snapshot.traces);
-        setIncidents(snapshot.incidents);
-        setSystemStatus(status);
-        setOnboardingTruth(proofStatus);
-        setApiStatus({ state: 'connected', message: 'Live backend data store connected' });
-      })
-      .catch(() => {
-        setApiStatus({ state: 'offline', message: 'Backend offline - no local sample data is being shown' });
-      });
-  }, []);
+    void loadBootstrap({ retryForMs: API_WARMING_TIMEOUT_MS });
+  }, [loadBootstrap]);
 
   const handleTraceCreated = useCallback((trace) => {
     if (!trace?.id) return;
@@ -847,7 +894,7 @@ function AppShell() {
   );
 
   if (AUTH_ENABLED && !session) {
-    return <AuthGate onSession={(nextSession) => {
+    return <LandingPage onSession={(nextSession) => {
       setSession(nextSession);
       setApiAuthToken(nextSession?.access_token || null);
       setQaAuthToken(nextSession?.qa_token || null);
@@ -893,7 +940,7 @@ function AppShell() {
           <div style={{ display: 'grid', gap: '8px', fontSize: '11px', color: 'var(--text-secondary)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
               <span>API</span>
-              <span className={`badge ${apiStatus.state === 'connected' ? 'badge-success' : apiStatus.state === 'loading' ? 'badge-warning' : 'badge-error'}`} style={{ fontSize: '8px' }}>
+              <span className={`badge ${apiStatus.state === 'ready' ? 'badge-success' : ['checking', 'warming'].includes(apiStatus.state) ? 'badge-warning' : 'badge-error'}`} style={{ fontSize: '8px' }}>
                 {apiStatus.state}
               </span>
             </div>
@@ -958,7 +1005,7 @@ function AppShell() {
           </div>
           <button className="sidebar-profile-info sidebar-profile-button" onClick={() => handleNavClick('Settings')}>
             <span className="sidebar-profile-name">{signedInEmail}</span>
-            <span className="sidebar-profile-role">{apiStatus.state === 'connected' ? 'Backend connected' : 'Backend unavailable'}</span>
+            <span className="sidebar-profile-role">{apiStatus.state === 'ready' ? 'Backend connected' : apiStatus.state === 'warming' ? 'Backend warming' : apiStatus.state === 'checking' ? 'Checking backend' : 'Backend unavailable'}</span>
           </button>
           <button className="sidebar-profile-badge sidebar-signout-button" onClick={handleSignOut}>
             Sign out
@@ -1006,7 +1053,7 @@ function AppShell() {
                 className={`api-status-pill ${apiStatus.state}`}
                 title={apiStatus.message}
               >
-                {apiStatus.state === 'connected' ? 'API LIVE' : apiStatus.state === 'loading' ? 'API LOADING' : 'API OFFLINE'}
+                {apiStatus.state === 'ready' ? 'API LIVE' : apiStatus.state === 'warming' ? 'API WARMING' : apiStatus.state === 'checking' ? 'API CHECKING' : 'API UNAVAILABLE'}
               </span>
               {systemStatus && (
                 <button

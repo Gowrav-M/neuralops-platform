@@ -1,738 +1,583 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  cancelAgentJob,
+  activateAgentKillSwitch,
+  ApiError,
+  approveAgentApproval,
+  approveAgentProductionAccess,
+  blockAgentApproval,
+  blockAgentProductionAccess,
+  fetchAgentApprovals,
   fetchAgentIdentities,
-  fetchAgentDefinitions,
   fetchAgentJobs,
-  fetchAgentJobSummary,
+  fetchAgentLeases,
   fetchAgentProductionAccessRequests,
-  fetchAgentProviders,
   fetchAgentRuns,
-  fetchAgents,
-  patchAgentIdentity,
-  processAgentJob,
-  processNextAgentJob,
+  registerAgentIdentity,
   requestAgentProductionAccess,
-  retryAgentJob,
-  runAgent,
-  submitAgentJob,
+  revokeAgentApproval,
+  revokeAgentIdentity,
+  revokeAgentProductionAccess,
+  rotateAgentIdentity,
 } from '../lib/api';
 
-export default function Agents({ addToast, onTraceCreated }) {
-  const [agentsList, setAgentsList] = useState([]);
-  const [dataSource, setDataSource] = useState('loading');
-  const [agentDefinitions, setAgentDefinitions] = useState([]);
-  const [agentIdentities, setAgentIdentities] = useState([]);
-  const [accessRequests, setAccessRequests] = useState([]);
-  const [providers, setProviders] = useState([]);
-  const [agentRuns, setAgentRuns] = useState([]);
-  const [agentJobs, setAgentJobs] = useState([]);
-  const [jobSummary, setJobSummary] = useState(null);
-  const [selectedAgentId, setSelectedAgentId] = useState('support_triage');
-  const [providerMode, setProviderMode] = useState('auto');
-  const [agentInput, setAgentInput] = useState('');
-  const [activeRun, setActiveRun] = useState(null);
-  const [runtimeBusy, setRuntimeBusy] = useState(false);
-  const [queueBusy, setQueueBusy] = useState(false);
+const EMPTY_REGISTRATION = {
+  displayName: '',
+  owner: '',
+  environment: 'staging',
+  riskLevel: 'Major',
+  providerAccess: '',
+  permissions: '',
+};
 
-  const activeSessions = agentJobs
-    .filter((job) => ['queued', 'running', 'blocked', 'failed'].includes(job.status))
-    .slice(0, 6)
-    .map((job) => ({
-      id: job.id,
-      agent: agentDefinitions.find((agent) => agent.id === job.request.agentId)?.name ?? job.request.agentId,
-      duration: job.startedAt ? elapsedLabel(job.startedAt, job.finishedAt) : 'queued',
-      memory: job.status === 'running' ? 'live' : 'persisted',
-      warnings: ['blocked', 'failed'].includes(job.status) ? 1 : 0,
-      status: job.status,
-    }));
+const EMPTY_DECISION = { reason: '', evidenceHash: '' };
+const EVIDENCE_HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
-  const approvalQueue = agentJobs
-    .filter((job) => ['blocked', 'failed'].includes(job.status))
-    .slice(0, 6)
-    .map((job) => ({
-      id: job.id,
-      agent: agentDefinitions.find((agent) => agent.id === job.request.agentId)?.name ?? job.request.agentId,
-      session: job.runId ?? job.id,
-      tool: `${job.request.agentId}.run`,
-      params: JSON.stringify({ providerMode: job.request.providerMode, traceId: job.traceId, error: job.error }, null, 2),
-      risk: job.status === 'blocked' ? 'Critical' : 'High',
-      status: job.status,
-    }));
+export default function Agents({ addToast }) {
+  const [identities, setIdentities] = useState([]);
+  const [approvals, setApprovals] = useState([]);
+  const [leases, setLeases] = useState([]);
+  const [productionRequests, setProductionRequests] = useState([]);
+  const [runs, setRuns] = useState([]);
+  const [jobs, setJobs] = useState([]);
+  const [connectionState, setConnectionState] = useState('checking');
+  const [registrationOpen, setRegistrationOpen] = useState(false);
+  const [registration, setRegistration] = useState(EMPTY_REGISTRATION);
+  const [credential, setCredential] = useState(null);
+  const [decisionTarget, setDecisionTarget] = useState(null);
+  const [decision, setDecision] = useState(EMPTY_DECISION);
+  const [destructiveTarget, setDestructiveTarget] = useState(null);
+  const [destructiveReason, setDestructiveReason] = useState('');
+  const [busy, setBusy] = useState('');
+  const mounted = useRef(true);
+
+  const loadControlPlane = async ({ retryForMs = 0 } = {}) => {
+    const startedAt = Date.now();
+    const backoff = [1200, 2400, 4800, 8000, 12000];
+    let attempt = 0;
+    if (retryForMs > 0 && mounted.current) setConnectionState('checking');
+
+    while (mounted.current) {
+      try {
+        const [identityItems, approvalItems, leaseItems, accessItems, runItems, jobItems] = await Promise.all([
+          fetchAgentIdentities(),
+          fetchAgentApprovals(),
+          fetchAgentLeases(),
+          fetchAgentProductionAccessRequests(),
+          fetchAgentRuns(),
+          fetchAgentJobs(),
+        ]);
+        if (!mounted.current) return false;
+        setIdentities(identityItems);
+        setApprovals(approvalItems);
+        setLeases(leaseItems);
+        setProductionRequests(accessItems);
+        setRuns(runItems.slice(0, 12));
+        setJobs(jobItems.slice(0, 12));
+        setConnectionState('ready');
+        return true;
+      } catch (error) {
+        const elapsed = Date.now() - startedAt;
+        if (retryForMs === 0 || elapsed >= retryForMs || !isRetryableControlError(error)) {
+          if (!mounted.current) return false;
+          setConnectionState('unavailable');
+          addToast?.(`Agent control data unavailable: ${error.message}`, 'error');
+          return false;
+        }
+        setConnectionState('warming');
+        const remaining = retryForMs - elapsed;
+        await delay(Math.min(backoff[Math.min(attempt, backoff.length - 1)], remaining));
+        attempt += 1;
+      }
+    }
+    return false;
+  };
 
   useEffect(() => {
-    let cancelled = false;
-
-    Promise.all([
-      fetchAgents(),
-      fetchAgentIdentities(),
-      fetchAgentProductionAccessRequests(),
-      fetchAgentDefinitions(),
-      fetchAgentProviders(),
-      fetchAgentRuns(),
-      fetchAgentJobs(),
-      fetchAgentJobSummary(),
-    ])
-      .then(([agents, identities, productionRequests, definitions, providerItems, runs, jobs, summary]) => {
-        if (cancelled) return;
-        setAgentsList(agents.map((agent) => ({
-          id: agent.id,
-          name: agent.name,
-          status: agent.status === 'healthy' ? 'Active' : agent.status === 'blocked' ? 'Blocked' : 'Degraded',
-          sessions: agent.activeSessions,
-          memory: 'not tracked',
-          sandbox: agent.status === 'blocked' ? 'Unsandboxed' : 'Isolated',
-          health: agent.status === 'healthy' ? 'Healthy' : 'Warning'
-        })));
-        setAgentIdentities(identities);
-        setAccessRequests(productionRequests.slice(0, 5));
-        setAgentDefinitions(definitions);
-        setProviders(providerItems);
-        setAgentRuns(runs.slice(0, 5));
-        setAgentJobs(jobs.slice(0, 8));
-        setJobSummary(summary);
-        if (definitions.length > 0) {
-          setSelectedAgentId(definitions[0].id);
-        }
-        setDataSource('api');
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setDataSource('fallback');
-      });
-
+    mounted.current = true;
+    const loadTimer = window.setTimeout(() => loadControlPlane({ retryForMs: 90_000 }), 0);
     return () => {
-      cancelled = true;
+      mounted.current = false;
+      window.clearTimeout(loadTimer);
     };
+    // The control plane loads once when the route mounts; actions update state atomically.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const selectedAgent = agentDefinitions.find((agent) => agent.id === selectedAgentId);
+  const posture = useMemo(() => {
+    const pending = approvals.filter((item) => item.status === 'pending').length;
+    const stopped = identities.filter((item) => ['disabled', 'revoked'].includes(item.status)).length;
+    const productionApproved = identities.filter((item) => item.productionAccessStatus === 'approved').length;
+    const findings = runs.reduce((count, run) => count + (run.evals || []).filter((item) => item.status !== 'pass').length, 0);
+    return { pending, stopped, productionApproved, findings };
+  }, [approvals, identities, runs]);
 
-  const refreshRuns = () => {
-    Promise.all([fetchAgentRuns(), fetchAgentJobs(), fetchAgentJobSummary()])
-      .then(([runs, jobs, summary]) => {
-        setAgentRuns(runs.slice(0, 5));
-        setAgentJobs(jobs.slice(0, 8));
-        setJobSummary(summary);
-      })
-      .catch(() => {});
-  };
-
-  const refreshAgentControl = () => {
-    Promise.all([fetchAgentIdentities(), fetchAgentProductionAccessRequests()])
-      .then(([identities, productionRequests]) => {
-        setAgentIdentities(identities);
-        setAccessRequests(productionRequests.slice(0, 5));
-      })
-      .catch(() => {});
-  };
-
-  const handleRunAgent = async () => {
-    setRuntimeBusy(true);
+  const handleRegister = async (event) => {
+    event.preventDefault();
+    setBusy('register');
     try {
-      const response = await runAgent({
-        agentId: selectedAgentId,
-        input: agentInput,
-        providerMode,
-        environment: 'staging',
+      const result = await registerAgentIdentity({
+        displayName: registration.displayName.trim(),
+        owner: registration.owner.trim(),
+        environment: registration.environment,
+        riskLevel: registration.riskLevel,
+        providerAccess: commaList(registration.providerAccess),
+        permissions: commaList(registration.permissions),
+        captureMode: 'metadata_only',
       });
-      setActiveRun(response.run);
-      setAgentRuns((prev) => [response.run, ...prev.filter((run) => run.id !== response.run.id)].slice(0, 5));
-      onTraceCreated?.(response.trace);
-      addToast(`Agent run created trace ${response.trace.id} with decision ${response.run.decision}.`, response.run.decision === 'block' ? 'error' : 'success');
+      setIdentities((current) => [result.identity, ...current]);
+      setCredential({ value: result.credential, identityName: result.identity.displayName });
+      setRegistrationOpen(false);
+      setRegistration(EMPTY_REGISTRATION);
+      addToast?.(`${result.identity.displayName} registered with metadata-only capture.`, 'success');
     } catch (error) {
-      addToast(`Agent runtime failed: ${error.message}`, 'error');
+      addToast?.(`Identity registration failed: ${error.message}`, 'error');
     } finally {
-      setRuntimeBusy(false);
+      setBusy('');
     }
   };
 
-  const handleProductionAccess = async (identity) => {
+  const revealRotatedCredential = async (identity) => {
+    setBusy(`rotate:${identity.id}`);
+    try {
+      const result = await rotateAgentIdentity(identity.id);
+      replaceById(setIdentities, result.identity);
+      setCredential({ value: result.credential, identityName: result.identity.displayName });
+      addToast?.(`Credential rotated for ${identity.displayName}. Existing leases were revoked.`, 'warning');
+    } catch (error) {
+      addToast?.(`Credential rotation failed: ${error.message}`, 'error');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const requestProduction = async (identity) => {
+    setBusy(`production:${identity.id}`);
     try {
       const result = await requestAgentProductionAccess({
         agentId: identity.agentId,
         targetEnvironment: 'prod',
-        justification: `Requesting governed production access for ${identity.displayName} after NeuralOps release evidence and policy checks.`,
+        justification: `Governed production access requested for ${identity.displayName} after pilot evidence review.`,
       });
-      setAccessRequests((current) => [result, ...current.filter((item) => item.id !== result.id)].slice(0, 5));
-      addToast(`Production access request ${result.status}: ${result.evidenceId}.`, result.decision === 'block' ? 'error' : 'warning');
+      setProductionRequests((current) => [result, ...current.filter((item) => item.id !== result.id)]);
+      addToast?.(`Production access queued for independent review. Evidence: ${result.evidenceId}.`, 'warning');
     } catch (error) {
-      addToast(`Production access request failed: ${error.message}`, 'error');
-    }
-  };
-
-  const handleToggleIdentity = async (identity) => {
-    try {
-      const nextStatus = identity.status === 'disabled' ? 'active' : 'disabled';
-      const result = await patchAgentIdentity(identity.agentId, {
-        status: nextStatus,
-        killSwitchReason: nextStatus === 'disabled' ? 'Operator kill switch from Agent Control Plane.' : null,
-      });
-      setAgentIdentities((current) => current.map((item) => (item.agentId === result.agentId ? result : item)));
-      addToast(`${result.displayName} is now ${result.status}.`, result.status === 'disabled' ? 'warning' : 'success');
-      refreshAgentControl();
-    } catch (error) {
-      addToast(`Agent identity update failed: ${error.message}`, 'error');
-    }
-  };
-
-  const handleSubmitJob = async () => {
-    setQueueBusy(true);
-    try {
-      const response = await submitAgentJob({
-        agentId: selectedAgentId,
-        input: agentInput,
-        providerMode,
-        environment: 'staging',
-        maxAttempts: 2,
-      });
-      setAgentJobs((prev) => [response.job, ...prev.filter((job) => job.id !== response.job.id)].slice(0, 8));
-      addToast(`Queued agent job ${response.job.id}.`, 'success');
-      refreshRuns();
-    } catch (error) {
-      addToast(`Queue submit failed: ${error.message}`, 'error');
+      addToast?.(`Production access request failed: ${error.message}`, 'error');
     } finally {
-      setQueueBusy(false);
+      setBusy('');
     }
   };
 
-  const handleProcessJob = async (jobId) => {
-    setQueueBusy(true);
+  const openDecision = (kind, record) => {
+    setDecisionTarget({ kind, record });
+    setDecision(EMPTY_DECISION);
+  };
+
+  const submitDecision = async (action) => {
+    if (!decisionTarget) return;
+    const { kind, record } = decisionTarget;
+    setBusy(`decision:${record.id}:${action}`);
     try {
-      const response = await processAgentJob(jobId);
-      setAgentJobs((prev) => [response.job, ...prev.filter((job) => job.id !== response.job.id)].slice(0, 8));
-      if (response.run) {
-        setActiveRun(response.run);
-        setAgentRuns((prev) => [response.run, ...prev.filter((run) => run.id !== response.run.id)].slice(0, 5));
+      const payload = { reason: decision.reason.trim(), evidenceHash: decision.evidenceHash.trim() };
+      let result;
+      if (kind === 'approval') {
+        const handlers = { approve: approveAgentApproval, block: blockAgentApproval, revoke: revokeAgentApproval };
+        result = await handlers[action](record.id, payload);
+        replaceById(setApprovals, result);
+      } else {
+        const handlers = { approve: approveAgentProductionAccess, block: blockAgentProductionAccess, revoke: revokeAgentProductionAccess };
+        result = await handlers[action](record.id, payload);
+        replaceById(setProductionRequests, result);
+        await loadControlPlane();
       }
-      addToast(`Processed ${response.job.id}: ${response.job.status}.`, response.job.status === 'blocked' ? 'error' : 'success');
-      refreshRuns();
+      setDecisionTarget(null);
+      setDecision(EMPTY_DECISION);
+      addToast?.(`${kind === 'approval' ? 'Tool action' : 'Production access'} ${pastTense(action)} with audit evidence.`, action === 'approve' ? 'success' : 'warning');
     } catch (error) {
-      addToast(`Worker failed: ${error.message}`, 'error');
+      addToast?.(`Decision failed closed: ${error.message}`, 'error');
     } finally {
-      setQueueBusy(false);
+      setBusy('');
     }
   };
 
-  const handleProcessNext = async () => {
-    setQueueBusy(true);
+  const submitDestructiveAction = async () => {
+    if (!destructiveTarget) return;
+    const { mode, identity } = destructiveTarget;
+    setBusy(`${mode}:${identity.id}`);
     try {
-      const response = await processNextAgentJob();
-      setAgentJobs((prev) => [response.job, ...prev.filter((job) => job.id !== response.job.id)].slice(0, 8));
-      if (response.run) {
-        setActiveRun(response.run);
-        setAgentRuns((prev) => [response.run, ...prev.filter((run) => run.id !== response.run.id)].slice(0, 5));
+      if (mode === 'kill') {
+        const result = await activateAgentKillSwitch(identity.id, destructiveReason.trim());
+        replaceById(setIdentities, result.identity);
+        addToast?.(`Emergency stop active. ${result.revokedLeases} leases revoked; ${result.cancelledJobs} queued jobs cancelled.`, 'warning');
+      } else {
+        const result = await revokeAgentIdentity(identity.id, destructiveReason.trim());
+        replaceById(setIdentities, result);
+        addToast?.(`${identity.displayName} and its credential were revoked.`, 'warning');
       }
-      addToast(`Worker processed ${response.job.id}: ${response.job.status}.`, response.job.status === 'blocked' ? 'error' : 'success');
-      refreshRuns();
+      setDestructiveTarget(null);
+      setDestructiveReason('');
     } catch (error) {
-      addToast(`No queued jobs to process: ${error.message}`, 'warning');
+      addToast?.(`${mode === 'kill' ? 'Emergency stop' : 'Revocation'} failed closed: ${error.message}`, 'error');
     } finally {
-      setQueueBusy(false);
+      setBusy('');
     }
-  };
-
-  const handleRetryJob = async (jobId) => {
-    try {
-      const job = await retryAgentJob(jobId);
-      setAgentJobs((prev) => [job, ...prev.filter((item) => item.id !== job.id)].slice(0, 8));
-      addToast(`Requeued ${job.id}.`, 'success');
-      refreshRuns();
-    } catch (error) {
-      addToast(`Retry failed: ${error.message}`, 'error');
-    }
-  };
-
-  const handleCancelJob = async (jobId) => {
-    try {
-      const job = await cancelAgentJob(jobId);
-      setAgentJobs((prev) => [job, ...prev.filter((item) => item.id !== job.id)].slice(0, 8));
-      addToast(`Cancelled ${job.id}.`, 'warning');
-      refreshRuns();
-    } catch (error) {
-      addToast(`Cancel failed: ${error.message}`, 'error');
-    }
-  };
-
-  const handleApproveTool = (id, toolName) => {
-    handleRetryJob(id);
-    addToast(`Requeued reviewed job (${toolName}) for another worker attempt.`, 'success');
-  };
-
-  const handleDenyTool = (id, toolName) => {
-    handleCancelJob(id);
-    addToast(`Kept job blocked (${toolName}); no execution approved.`, 'error');
   };
 
   return (
-    <div className="main-panel">
-      {/* Page Header */}
-      <div className="page-header">
+    <main className="agent-command" aria-busy={['checking', 'warming'].includes(connectionState)}>
+      <header className="agent-command__hero">
         <div>
-          <h1 className="page-title">Agent Runtime Studio</h1>
+          <span className="agent-command__eyebrow">Supervised agent operations / workspace scope</span>
+          <h1 className="page-title">Agent Command Center</h1>
           <p className="page-subtitle">
-            Run AI agents, capture traces, score evals, inspect provider readiness, and approve risky tool calls.
-            {dataSource === 'api' ? ' Backend connected.' : dataSource === 'fallback' ? ' Backend offline; no local samples shown.' : ' Loading backend data...'}
+            Register every agent, bound every tool call, and stop unsafe execution before it leaves your workspace.
+            Raw prompts, outputs, arguments, secrets, and files are not retained.
           </p>
         </div>
-      </div>
+        <div className="agent-command__hero-actions">
+          <span className={`agent-command__signal agent-command__signal--${connectionState}`} role="status">
+            <span aria-hidden="true" /> {connectionState === 'ready' ? 'Control plane live' : connectionState === 'checking' ? 'checking' : connectionState === 'warming' ? 'warming · retrying up to 90s' : 'unavailable'}
+          </span>
+          <button className="agent-command__primary" onClick={() => setRegistrationOpen(true)}>Register external agent</button>
+        </div>
+      </header>
 
-      <div className="table-container" style={{ padding: '22px', display: 'flex', flexDirection: 'column', gap: '16px', marginBottom: '24px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+      <section className="agent-command__metrics" aria-label="Agent posture summary">
+        <Metric label="Managed identities" value={identities.length} detail={`${posture.stopped} stopped or revoked`} />
+        <Metric label="Pending approvals" value={posture.pending} detail="High-risk actions fail closed" tone={posture.pending ? 'warning' : 'safe'} />
+        <Metric label="Production approved" value={posture.productionApproved} detail="Owner or Admin decision" />
+        <Metric label="Policy findings" value={posture.findings} detail="From recent persisted runs" tone={posture.findings ? 'danger' : 'safe'} />
+      </section>
+
+      <section className="agent-command__section" aria-labelledby="identity-posture-title">
+        <div className="agent-command__section-heading">
           <div>
-            <span style={{ fontSize: '16px', fontWeight: 700 }}>Agent Control Plane</span>
-            <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px', maxWidth: '760px' }}>
-              Managed Agent Identities tie every agent to an owner, permission set, provider boundary, production approval state, and kill switch before runtime execution.
-            </p>
+            <span className="agent-command__kicker">Identity perimeter</span>
+            <h2 id="identity-posture-title">Live agent posture</h2>
           </div>
-          <span className="badge badge-info">{agentIdentities.length} managed identities</span>
+          <button className="agent-command__text-button" onClick={() => loadControlPlane({ retryForMs: 90_000 })} disabled={['checking', 'warming'].includes(connectionState)}>Refresh control plane</button>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '12px' }}>
-          {agentIdentities.map((identity) => (
-            <div
-              className={`agent-identity-card connectivity-check ${identity.status === 'disabled' ? 'missing' : identity.status === 'pending_approval' ? 'degraded' : 'ready'}`}
-              key={identity.id}
-            >
-              <div className="connectivity-check-header">
-                <span className={`badge ${identity.status === 'disabled' ? 'badge-error' : identity.status === 'pending_approval' ? 'badge-warning' : 'badge-success'}`}>
-                  {identity.status}
-                </span>
-                <span className="code-font">{identity.environment}</span>
-              </div>
-              <strong>{identity.displayName}</strong>
-              <p>
-                Owner: {identity.owner}. Risk: {identity.riskLevel}. Provider access: {identity.providerAccess.join(', ')}.
-              </p>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                {identity.permissions.slice(0, 5).map((permission) => (
-                  <span className="badge badge-info" style={{ fontSize: '8px' }} key={permission}>{permission}</span>
-                ))}
-              </div>
-              {identity.killSwitchReason && (
-                <span className="code-font" style={{ color: 'var(--color-error)', overflowWrap: 'anywhere' }}>
-                  {identity.killSwitchReason}
-                </span>
-              )}
-              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '4px' }}>
-                <button className="btn-secondary" style={{ padding: '6px 9px', fontSize: '10px' }} onClick={() => handleProductionAccess(identity)}>
-                  Request Production Access
-                </button>
-                <button className="btn-secondary" style={{ padding: '6px 9px', fontSize: '10px' }} onClick={() => handleToggleIdentity(identity)}>
-                  {identity.status === 'disabled' ? 'Restore Agent' : 'Kill Switch'}
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {accessRequests.length > 0 && (
-          <div className="connect-proof">
-            <span className="badge badge-warning">review</span>
-            <strong>Production access request queue</strong>
-            {accessRequests.map((request) => (
-              <span className="code-font" key={request.id}>
-                {request.agentId}{' -> '}{request.targetEnvironment}: {request.status} ({request.evidenceId})
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className="agent-runtime-grid">
-        <div className="table-container" style={{ padding: '22px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
-            <div>
-              <span style={{ fontSize: '16px', fontWeight: 700 }}>Run A Real Agent Workflow</span>
-          <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px', maxWidth: '620px' }}>
-                Local runtime is deterministic. Auto/live mode uses configured Groq, NVIDIA NIM, or OpenAI-compatible providers when keys are available.
-              </p>
-            </div>
-          </div>
-
-          <div className="agent-form-grid">
-            <select className="filter-select" value={selectedAgentId} onChange={(event) => setSelectedAgentId(event.target.value)}>
-              {agentDefinitions.map((agent) => (
-                <option key={agent.id} value={agent.id}>{agent.name}</option>
-              ))}
-            </select>
-            <select className="filter-select" value={providerMode} onChange={(event) => setProviderMode(event.target.value)}>
-              <option value="auto">Auto provider</option>
-              <option value="local">Local deterministic</option>
-              <option value="live">Require live provider</option>
-            </select>
-          </div>
-
-          {selectedAgent && (
-            <div style={{ background: 'rgba(26,26,25,0.025)', border: '1px solid var(--border-color)', borderRadius: '10px', padding: '12px', display: 'grid', gap: '8px' }}>
-              <span style={{ fontSize: '12px', fontWeight: 700 }}>{selectedAgent.role}</span>
-              <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{selectedAgent.industrySignal}</span>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                {selectedAgent.capabilities.map((capability) => (
-                  <span key={capability} className="badge badge-success" style={{ fontSize: '9px' }}>{capability}</span>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <textarea
-            className="code-editor-panel"
-            style={{ minHeight: '118px', resize: 'vertical', color: 'var(--text-primary)', background: 'var(--bg-card)' }}
-            placeholder="Paste a real support ticket, incident note, RAG question, or cost anomaly for the selected agent."
-            value={agentInput}
-            onChange={(event) => setAgentInput(event.target.value)}
-          />
-
-          <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
-            <button className="btn-primary" onClick={handleRunAgent} disabled={runtimeBusy || !selectedAgentId || agentInput.trim().length === 0}>
-              {runtimeBusy ? 'Running Agent...' : 'Run Agent + Create Trace'}
-            </button>
-            <button className="btn-secondary" onClick={handleSubmitJob} disabled={queueBusy || !selectedAgentId || agentInput.trim().length === 0}>
-              {queueBusy ? 'Queue Busy...' : 'Queue Job'}
-            </button>
-            <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
-              Output becomes an agent run, trace record, eval result, cost estimate, and policy decision.
-            </span>
-          </div>
-        </div>
-
-        <div className="dark-panel-container" style={{ minHeight: 0 }}>
-          <div className="dark-panel-title-row">
-            <span className="dark-panel-title">Runtime Output</span>
-            <span className={`badge ${activeRun?.decision === 'block' ? 'badge-error' : activeRun?.decision === 'review' ? 'badge-warning' : 'badge-success'}`} style={{ fontSize: '9px' }}>
-              {activeRun ? activeRun.decision.toUpperCase() : 'READY'}
-            </span>
-          </div>
-
-          {activeRun ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' }}>
-                <div>
-                  <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: '9px', textTransform: 'uppercase' }}>Provider</span>
-                  <div style={{ color: '#fff', fontWeight: 700, fontSize: '12px' }}>{activeRun.provider} / {activeRun.model}</div>
-                </div>
-                <div>
-                  <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: '9px', textTransform: 'uppercase' }}>Trace</span>
-                  <div className="code-font" style={{ color: 'var(--accent-gold)', fontSize: '11px' }}>{activeRun.traceId}</div>
-                </div>
-              </div>
-              <pre style={{ background: 'rgba(0,0,0,0.22)', color: '#fff', borderRadius: '10px', padding: '12px', fontSize: '11px', lineHeight: 1.5, whiteSpace: 'pre-wrap', maxHeight: '220px', overflowY: 'auto' }}>
-                {activeRun.output}
-              </pre>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {activeRun.evals.map((check) => (
-                  <div key={check.name} style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', alignItems: 'center', fontSize: '11px' }}>
-                    <span style={{ color: '#fff' }}>{check.name}</span>
-                    <span className={`badge ${check.status === 'fail' ? 'badge-error' : check.status === 'warn' ? 'badge-warning' : 'badge-success'}`} style={{ fontSize: '8px' }}>
-                      {check.status} {Math.round(check.score * 100)}%
-                    </span>
+        <div className="agent-command__identity-grid">
+          {identities.map((identity, index) => {
+            const pendingCount = approvals.filter((item) => item.identityId === identity.id && item.status === 'pending').length;
+            const activeLeases = leases.filter((item) => item.identityId === identity.id && item.status === 'active');
+            const recentRun = runs.find((run) => [identity.id, identity.agentId].includes(run.agentId));
+            return (
+              <article className="agent-command__identity" data-identity-id={identity.id} key={identity.id} style={{ '--entry-index': index }}>
+                <div className="agent-command__identity-head">
+                  <div>
+                    <span className="agent-command__identity-id">{identity.agentId}</span>
+                    <h3>{identity.displayName}</h3>
                   </div>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="state-container" style={{ background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.55)', padding: '36px 0' }}>
-              <span style={{ fontSize: '12px' }}>Run an agent to see the decision, eval checks, cost estimate, and trace ID.</span>
-            </div>
-          )}
-        </div>
-      </div>
+                  <Status value={identity.status} />
+                </div>
 
-      <div className="agent-provider-grid">
-        <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ fontSize: '15px', fontWeight: 700 }}>Provider Gateway</span>
-          <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Readiness comes from backend environment configuration.</span>
+                <dl className="agent-command__boundary-list">
+                  <Boundary label="Owner" value={identity.owner} />
+                  <Boundary label="Environment" value={identity.environment} />
+                  <Boundary label="Risk" value={identity.riskLevel} />
+                  <Boundary label="Credential" value={identity.credentialStatus} />
+                  <Boundary label="Production" value={identity.productionAccessStatus.replaceAll('_', ' ')} />
+                  <Boundary label="Capture" value="Metadata only" />
+                  <Boundary label="Active leases" value={`${activeLeases.length} active`} />
+                  <Boundary label="Pending approvals" value={String(pendingCount)} />
+                  <Boundary label="Recent run" value={recentRun ? `${recentRun.decision} / ${formatTime(recentRun.createdAt)}` : 'No recent run'} />
+                </dl>
+
+                <BoundaryChips label="Providers" values={identity.providerAccess} empty="No provider allowed" />
+                <BoundaryChips label="Permissions" values={identity.permissions} empty="No tool permission" />
+
+                {identity.killSwitchReason && <p className="agent-command__stop-reason"><strong>Stopped:</strong> {identity.killSwitchReason}</p>}
+
+                <div className="agent-command__identity-actions">
+                  <button onClick={() => requestProduction(identity)} disabled={busy !== '' || identity.productionAccessStatus === 'approved'}>
+                    {identity.productionAccessStatus === 'approved' ? 'Production approved' : 'Request production'}
+                  </button>
+                  <button onClick={() => revealRotatedCredential(identity)} disabled={busy !== '' || identity.status === 'revoked'}>Rotate credential</button>
+                  <button className="danger" onClick={() => setDestructiveTarget({ mode: 'kill', identity })} disabled={busy !== '' || ['disabled', 'revoked'].includes(identity.status)}>Emergency stop</button>
+                  <button className="danger ghost" onClick={() => setDestructiveTarget({ mode: 'revoke', identity })} disabled={busy !== '' || identity.status === 'revoked'}>Revoke identity</button>
+                </div>
+              </article>
+            );
+          })}
+          {['checking', 'warming'].includes(connectionState) && <LoadingPanel label={connectionState === 'warming' ? 'Backend warming; preserving this read' : 'Checking workspace identities'} />}
+          {connectionState === 'ready' && identities.length === 0 && <EmptyPanel title="No governed identities" detail="Register the first external agent to issue a scoped, one-time credential." />}
         </div>
-        {providers.map((provider) => (
-          <div key={provider.id} className="agent-provider-card">
-            <span className="metric-label">{provider.label}</span>
-            <span className="agent-provider-status">{provider.configured ? 'Ready' : provider.id === 'local' ? 'Ready' : 'No Key'}</span>
-            <span className={provider.configured ? 'trend-positive' : 'trend-neutral'} style={{ overflowWrap: 'anywhere' }}>
-              {provider.defaultModel}
-            </span>
+      </section>
+
+      <div className="agent-command__review-grid">
+        <section className="agent-command__section" aria-labelledby="approval-title">
+          <div className="agent-command__section-heading">
+            <div>
+              <span className="agent-command__kicker">Human authorization</span>
+              <h2 id="approval-title">Tool action approvals</h2>
+            </div>
+            <span className="agent-command__count">{approvals.filter((item) => item.status === 'pending').length} pending</span>
           </div>
-        ))}
+          <div className="agent-command__review-list">
+            {approvals.map((item) => (
+              <article className="agent-command__review" data-approval-id={item.id} key={item.id}>
+                <div className="agent-command__review-head">
+                  <div><span>{item.toolCategory}</span><strong>{item.operation}</strong></div>
+                  <Status value={item.status} />
+                </div>
+                <dl>
+                  <Boundary label="Identity" value={item.identityId} />
+                  <Boundary label="Environment" value={item.environment} />
+                  <Boundary label="Requested by" value={item.requestedBy} />
+                  <Boundary label="Expires" value={formatTime(item.expiresAt)} />
+                  <Boundary label="Idempotency" value={item.idempotencyKey} />
+                  <Boundary label="Evidence binding" value={shortHash(item.contentHash)} />
+                </dl>
+                <button className="agent-command__review-button" onClick={() => openDecision('approval', item)}>
+                  {item.status === 'pending' ? 'Review request' : item.status === 'approved' || item.status === 'consumed' ? 'Review or revoke' : 'View decision'}
+                </button>
+              </article>
+            ))}
+            {approvals.length === 0 && <EmptyPanel title="Approval queue clear" detail="No persisted high-risk actions are waiting for review." />}
+          </div>
+        </section>
+
+        <section className="agent-command__section" aria-labelledby="production-title">
+          <div className="agent-command__section-heading">
+            <div>
+              <span className="agent-command__kicker">Environment boundary</span>
+              <h2 id="production-title">Production access</h2>
+            </div>
+            <span className="agent-command__count">{productionRequests.filter((item) => item.status === 'pending_review').length} pending</span>
+          </div>
+          <div className="agent-command__review-list">
+            {productionRequests.map((item) => (
+              <article className="agent-command__review" data-production-request-id={item.id} key={item.id}>
+                <div className="agent-command__review-head">
+                  <div><span>{item.targetEnvironment}</span><strong>{identityName(identities, item.agentId)}</strong></div>
+                  <Status value={item.status} />
+                </div>
+                <p>{item.justification}</p>
+                <dl>
+                  <Boundary label="Requested by" value={item.requestedBy} />
+                  <Boundary label="Evidence" value={item.evidenceId} />
+                  <Boundary label="Created" value={formatTime(item.createdAt)} />
+                </dl>
+                <button className="agent-command__review-button" onClick={() => openDecision('production', item)}>Review production access</button>
+              </article>
+            ))}
+            {productionRequests.length === 0 && <EmptyPanel title="No production requests" detail="Production remains denied until an Owner or Admin approves it." />}
+          </div>
+        </section>
       </div>
 
-      <div className="table-container" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px', marginBottom: '24px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
+      <section className="agent-command__section" aria-labelledby="lease-title">
+        <div className="agent-command__section-heading">
           <div>
-            <span style={{ fontSize: '15px', fontWeight: '700' }}>Agent Worker Queue</span>
-            <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-              Submit jobs, process them through the worker, retry failures, and preserve run evidence.
-            </p>
+            <span className="agent-command__kicker">Short-lived authority</span>
+            <h2 id="lease-title">Authorization leases</h2>
           </div>
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-            {jobSummary && (
-              <span className="badge badge-success" style={{ fontSize: '9px' }}>
-                {jobSummary.queued} queued / {jobSummary.running} running / {jobSummary.blocked} blocked
-              </span>
-            )}
-            <button className="btn-primary" onClick={handleProcessNext} disabled={queueBusy}>
-              {queueBusy ? 'Worker Busy...' : 'Process Next Job'}
-            </button>
-          </div>
+          <span className="agent-command__count">{leases.filter((item) => item.status === 'active').length} active</span>
         </div>
-
-        <div className="table-container" style={{ boxShadow: 'none', borderRadius: '12px' }}>
-          <table className="dense-table" style={{ fontSize: '11px' }}>
-            <thead>
-              <tr>
-                <th>Job</th>
-                <th>Agent</th>
-                <th>Status</th>
-                <th>Attempts</th>
-                <th>Trace</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
+        <div className="agent-command__evidence-table" role="region" aria-label="Authorization lease posture" tabIndex="0">
+          <table>
+            <thead><tr><th>Lease</th><th>Identity</th><th>Action / operation</th><th>Risk</th><th>Environment</th><th>Status</th><th>Expires</th></tr></thead>
             <tbody>
-              {agentJobs.length > 0 ? agentJobs.map((job) => (
-                <tr key={job.id}>
-                  <td className="code-font">{job.id}</td>
-                  <td>{agentDefinitions.find((agent) => agent.id === job.request.agentId)?.name ?? job.request.agentId}</td>
-                  <td>
-                    <span className={`badge ${
-                      job.status === 'blocked' || job.status === 'failed' ? 'badge-error' :
-                      job.status === 'queued' || job.status === 'running' ? 'badge-warning' :
-                      job.status === 'cancelled' ? 'badge-blocked' : 'badge-success'
-                    }`}>
-                      {job.status}
-                    </span>
-                  </td>
-                  <td>{job.attempts}/{job.maxAttempts}</td>
-                  <td className="code-font">{job.traceId ?? 'pending'}</td>
-                  <td>
-                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                      <button className="btn-secondary" style={{ padding: '5px 8px', fontSize: '10px' }} onClick={() => handleProcessJob(job.id)} disabled={queueBusy || !['queued', 'failed'].includes(job.status)}>
-                        Process
-                      </button>
-                      <button className="btn-secondary" style={{ padding: '5px 8px', fontSize: '10px' }} onClick={() => handleRetryJob(job.id)} disabled={!['failed', 'blocked', 'cancelled'].includes(job.status)}>
-                        Retry
-                      </button>
-                      <button className="btn-secondary" style={{ padding: '5px 8px', fontSize: '10px' }} onClick={() => handleCancelJob(job.id)} disabled={['succeeded', 'blocked', 'failed', 'cancelled'].includes(job.status)}>
-                        Cancel
-                      </button>
-                    </div>
-                  </td>
+              {leases.map((lease) => (
+                <tr data-lease-id={lease.id} key={lease.id}>
+                  <td>{lease.id}</td>
+                  <td>{identityName(identities, lease.identityId)}</td>
+                  <td>{lease.action} / {lease.operation}</td>
+                  <td>{lease.risk}</td>
+                  <td>{lease.environment}</td>
+                  <td><Status value={lease.status} /></td>
+                  <td>{formatTime(lease.expiresAt)}</td>
                 </tr>
-              )) : (
-                <tr>
-                  <td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: '18px' }}>
-                    No jobs queued. Use Queue Job to create one.
-                  </td>
-                </tr>
-              )}
+              ))}
+              {leases.length === 0 && <tr><td colSpan="7">No authorization leases have been issued in this workspace.</td></tr>}
             </tbody>
           </table>
         </div>
-      </div>
+      </section>
 
-      <div className="agents-main-grid">
-        {/* Left Side: Agent Registry & Active Sessions */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-          {/* Registry Grid */}
-          <div className="table-container" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center' }}>
-              <span style={{ fontSize: '15px', fontWeight: '600' }}>Configured AI Agents</span>
-              <button className="btn-secondary" onClick={refreshRuns} style={{ padding: '6px 10px', fontSize: '10px' }}>Refresh Runs</button>
+      <section className="agent-command__section" aria-labelledby="evidence-title">
+        <div className="agent-command__section-heading">
+          <div>
+            <span className="agent-command__kicker">Operational evidence</span>
+            <h2 id="evidence-title">Recent runs and queued work</h2>
+          </div>
+          <span className="agent-command__count">Metadata only</span>
+        </div>
+        <div className="agent-command__evidence-table" role="region" aria-label="Recent agent evidence" tabIndex="0">
+          <table>
+            <thead><tr><th>Record</th><th>Agent</th><th>State</th><th>Provider</th><th>Policy findings</th><th>Time</th></tr></thead>
+            <tbody>
+              {runs.slice(0, 6).map((run) => (
+                <tr key={run.id}><td>{run.id}</td><td>{run.agentName || run.agentId}</td><td><Status value={run.decision} /></td><td>{run.provider || 'metadata'}</td><td>{(run.evals || []).filter((item) => item.status !== 'pass').length}</td><td>{formatTime(run.createdAt)}</td></tr>
+              ))}
+              {jobs.slice(0, 6).map((job) => (
+                <tr key={job.id}><td>{job.id}</td><td>{job.request?.agentId}</td><td><Status value={job.status} /></td><td>{job.request?.providerMode || 'queued'}</td><td>{job.error ? 1 : 0}</td><td>{formatTime(job.updatedAt)}</td></tr>
+              ))}
+              {runs.length + jobs.length === 0 && <tr><td colSpan="6">No recent runtime evidence.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {registrationOpen && (
+        <Modal title="Register external agent" onClose={() => setRegistrationOpen(false)}>
+          <form className="agent-command__form" onSubmit={handleRegister}>
+            <label>Agent name<input aria-label="Agent name" required value={registration.displayName} onChange={(event) => setRegistration({ ...registration, displayName: event.target.value })} /></label>
+            <label>Owner<input aria-label="Owner" required value={registration.owner} onChange={(event) => setRegistration({ ...registration, owner: event.target.value })} /></label>
+            <div className="agent-command__form-row">
+              <label>Environment<select value={registration.environment} onChange={(event) => setRegistration({ ...registration, environment: event.target.value })}><option value="dev">Development</option><option value="staging">Staging</option><option value="prod">Production boundary</option><option value="all">All environments</option></select></label>
+              <label>Risk level<select value={registration.riskLevel} onChange={(event) => setRegistration({ ...registration, riskLevel: event.target.value })}><option>Critical</option><option>Major</option><option>Minor</option><option>Low</option></select></label>
             </div>
+            <label>Allowed providers<input aria-label="Allowed providers" required value={registration.providerAccess} onChange={(event) => setRegistration({ ...registration, providerAccess: event.target.value })} /><small>Comma-separated provider IDs. Provider keys are never entered here.</small></label>
+            <label>Allowed permissions<textarea aria-label="Allowed permissions" required value={registration.permissions} onChange={(event) => setRegistration({ ...registration, permissions: event.target.value })} /><small>Grant the smallest exact tool scopes this agent needs.</small></label>
+            <div className="agent-command__privacy-note"><strong>Metadata-only by default.</strong> NeuralOps stores IDs, timing, totals, status, findings, and hashes — not prompts, outputs, tool arguments, secrets, or files.</div>
+            <div className="agent-command__modal-actions"><button type="button" onClick={() => setRegistrationOpen(false)}>Cancel</button><button className="primary" disabled={busy === 'register'}>{busy === 'register' ? 'Issuing…' : 'Issue one-time credential'}</button></div>
+          </form>
+        </Modal>
+      )}
 
-            <table className="dense-table" style={{ fontSize: '11.5px' }}>
-              <thead>
-                <tr>
-                  <th>Agent ID</th>
-                  <th>Status</th>
-                  <th>Sessions</th>
-                  <th>Memory</th>
-                  <th>Sandbox</th>
-                  <th>Health</th>
-                </tr>
-              </thead>
-              <tbody>
-                {agentsList.length > 0 ? agentsList.map((ag) => (
-                  <tr key={ag.id}>
-                    <td style={{ fontWeight: 600 }}>{ag.name}</td>
-                    <td>
-                      <span className={`badge ${ag.status === 'Active' ? 'badge-success' : 'badge-warning'}`}>
-                        {ag.status}
-                      </span>
-                    </td>
-                    <td>{ag.sessions}</td>
-                    <td className="code-font">{ag.memory}</td>
-                    <td>
-                      <span className={`badge ${ag.sandbox === 'Isolated' ? 'badge-success' : 'badge-blocked'}`}>
-                        {ag.sandbox}
-                      </span>
-                    </td>
-                    <td>
-                      <span style={{ fontWeight: 600, color: ag.health === 'Healthy' ? 'var(--color-success)' : 'var(--color-warning)' }}>
-                        {ag.health}
-                      </span>
-                    </td>
-                  </tr>
-                )) : (
-                  <tr>
-                    <td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: '18px' }}>
-                      No backend agent records available.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+      {credential && (
+        <Modal title="One-time agent credential" onClose={() => setCredential(null)}>
+          <div className="agent-command__credential">
+            <p><strong>{credential.identityName}</strong> is registered. This credential will not be shown again.</p>
+            <code>{credential.value}</code>
+            <p>Store it in the agent runtime secret manager. Never paste it into prompts, logs, chat, or source control.</p>
+            <div className="agent-command__modal-actions"><button type="button" onClick={() => copyCredential(credential.value, addToast)}>Copy credential</button><button className="primary" type="button" onClick={() => setCredential(null)}>I saved it — close</button></div>
           </div>
+        </Modal>
+      )}
 
-          {/* Active Sessions */}
-          <div className="table-container" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
-            <span style={{ fontSize: '14px', fontWeight: '600' }}>Active Runtime Sessions</span>
-
-            <table className="dense-table" style={{ fontSize: '11px' }}>
-              <thead>
-                <tr>
-                  <th>Session ID</th>
-                  <th>Agent Name</th>
-                  <th>Duration</th>
-                  <th>Memory</th>
-                  <th>Warnings</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {activeSessions.map((sess) => (
-                  <tr key={sess.id}>
-                    <td className="code-font">{sess.id}</td>
-                    <td>{sess.agent}</td>
-                    <td>{sess.duration}</td>
-                    <td className="code-font">{sess.memory}</td>
-                    <td style={{ fontWeight: 600, color: sess.warnings > 0 ? 'var(--color-error)' : 'var(--text-secondary)' }}>
-                      {sess.warnings}
-                    </td>
-                    <td>
-                      <span style={{
-                        fontWeight: 600,
-                        color: ['blocked', 'failed'].includes(sess.status) ? 'var(--color-error)' : 'var(--color-success)'
-                      }}>
-                        {sess.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {decisionTarget && (
+        <Modal title={decisionTarget.kind === 'approval' ? 'Review tool action' : 'Review production access'} onClose={() => setDecisionTarget(null)}>
+          <div className="agent-command__decision-summary">
+            <Status value={decisionTarget.record.status} />
+            <strong>{decisionTarget.record.operation || identityName(identities, decisionTarget.record.agentId)}</strong>
+            <span>Idempotency: {decisionTarget.record.idempotencyKey || decisionTarget.record.id}</span>
           </div>
-
-          <div className="table-container" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
-            <span style={{ fontSize: '14px', fontWeight: '600' }}>Recent Agent Run Evidence</span>
-            <table className="dense-table" style={{ fontSize: '11px' }}>
-              <thead>
-                <tr>
-                  <th>Run</th>
-                  <th>Agent</th>
-                  <th>Decision</th>
-                  <th>Score</th>
-                  <th>Cost</th>
-                </tr>
-              </thead>
-              <tbody>
-                {agentRuns.length > 0 ? agentRuns.map((run) => (
-                  <tr key={run.id} onClick={() => setActiveRun(run)}>
-                    <td className="code-font">{run.id}</td>
-                    <td>{run.agentName}</td>
-                    <td><span className={`badge ${run.decision === 'block' ? 'badge-error' : run.decision === 'review' ? 'badge-warning' : 'badge-success'}`}>{run.decision}</span></td>
-                    <td>{Math.round(run.score * 100)}%</td>
-                    <td>${run.costUsd.toFixed(4)}</td>
-                  </tr>
-                )) : (
-                  <tr>
-                    <td colSpan="5" style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: '18px' }}>
-                      No agent runs yet. Run an agent above to create evidence.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+          {busy.startsWith(`decision:${decisionTarget.record.id}:`) && (
+            <p className="agent-command__decision-pending" role="status">Decision pending backend confirmation. Retryable failures reuse the same action, evidence, and idempotency key.</p>
+          )}
+          <div className="agent-command__form">
+            <label>Decision reason<textarea aria-label="Decision reason" required value={decision.reason} onChange={(event) => setDecision({ ...decision, reason: event.target.value })} /></label>
+            <label>
+              Evidence hash (SHA-256)
+              <input
+                aria-label="Evidence hash"
+                required
+                pattern="sha256:[0-9a-f]{64}"
+                placeholder={`sha256:${'a'.repeat(64)}`}
+                spellCheck={false}
+                autoCapitalize="none"
+                value={decision.evidenceHash}
+                onChange={(event) => setDecision({ ...decision, evidenceHash: event.target.value })}
+              />
+              <small>Required format: sha256 followed by 64 lowercase hexadecimal characters.</small>
+            </label>
+            <div className="agent-command__modal-actions agent-command__modal-actions--decisions">
+              {decisionTarget.record.status === 'pending' || decisionTarget.record.status === 'pending_review' ? <><button className="danger" onClick={() => submitDecision('block')} disabled={!validDecision(decision) || busy !== ''}>Block action</button><button className="primary" onClick={() => submitDecision('approve')} disabled={!validDecision(decision) || busy !== ''}>Approve action</button></> : null}
+              {['approved', 'consumed'].includes(decisionTarget.record.status) && <button className="danger" onClick={() => submitDecision('revoke')} disabled={!validDecision(decision) || busy !== ''}>Revoke approval</button>}
+              <button onClick={() => setDecisionTarget(null)}>Close review</button>
+            </div>
           </div>
-        </div>
+        </Modal>
+      )}
 
-        {/* Right Side: Risky Tool Approval Queue */}
-        <div className="dark-panel-container">
-          <div className="dark-panel-title-row">
-            <span className="dark-panel-title">Risky Tool Call Approval Queue</span>
-            <span className="badge badge-error" style={{ fontSize: '10px' }}>{approvalQueue.length} Pending</span>
+      {destructiveTarget && (
+        <Modal title={destructiveTarget.mode === 'kill' ? 'Confirm emergency stop' : 'Confirm identity revocation'} onClose={() => setDestructiveTarget(null)}>
+          <div className="agent-command__form">
+            <p className="agent-command__danger-copy">{destructiveTarget.mode === 'kill' ? 'This immediately disables the agent, revokes active authorization leases, cancels queued jobs, and prevents new runs.' : 'This permanently revokes the credential and all active leases. Register a new identity to restore access.'}</p>
+            <label>{destructiveTarget.mode === 'kill' ? 'Emergency stop reason' : 'Revocation reason'}<textarea aria-label={destructiveTarget.mode === 'kill' ? 'Emergency stop reason' : 'Revocation reason'} required value={destructiveReason} onChange={(event) => setDestructiveReason(event.target.value)} /></label>
+            <div className="agent-command__modal-actions"><button onClick={() => setDestructiveTarget(null)}>Cancel</button><button className="danger" onClick={submitDestructiveAction} disabled={destructiveReason.trim().length < 3 || busy !== ''}>{destructiveTarget.mode === 'kill' ? 'Stop agent now' : 'Revoke identity now'}</button></div>
           </div>
-
-          <div className="dark-list">
-            {approvalQueue.length > 0 ? (
-              approvalQueue.map((item) => (
-                <div key={item.id} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontSize: '12px', fontWeight: 600, color: '#FFF' }}>
-                      {item.agent} ({item.session})
-                    </span>
-                    <span className={`badge ${item.risk === 'Critical' ? 'badge-error' : 'badge-warning'}`} style={{ fontSize: '8px' }}>
-                      {item.risk} Risk
-                    </span>
-                  </div>
-
-                  <div style={{ fontSize: '11px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                    <span style={{ color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', fontSize: '9px' }}>Requested Tool</span>
-                    <code style={{ background: 'rgba(0,0,0,0.2)', padding: '4px 8px', borderRadius: '4px', color: 'var(--accent-gold)' }}>
-                      {item.tool}
-                    </code>
-                  </div>
-
-                  <div style={{ fontSize: '11px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                    <span style={{ color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', fontSize: '9px' }}>Parameters</span>
-                    <pre style={{ background: 'rgba(0,0,0,0.2)', padding: '8px', borderRadius: '6px', overflowX: 'auto', fontSize: '10px', color: '#FFF', fontFamily: 'var(--font-mono)' }}>
-                      {item.params}
-                    </pre>
-                  </div>
-
-                  <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
-                    <button
-                      className="btn-primary"
-                      style={{ flex: 1, background: 'var(--accent-gold)', color: 'var(--text-primary)', fontWeight: 600 }}
-                      onClick={() => handleApproveTool(item.id, item.tool)}
-                    >
-                      Approve & Exec
-                    </button>
-                    <button
-                      className="btn-primary"
-                      style={{ background: 'var(--color-blocked)', color: '#FFF' }}
-                      onClick={() => handleDenyTool(item.id, item.tool)}
-                    >
-                      Deny Call
-                    </button>
-                  </div>
-                </div>
-              ))
-            ) : (
-              <div className="state-container" style={{ background: 'transparent', border: 'none', padding: '20px 0' }}>
-                <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: 'var(--color-success)', marginBottom: '8px' }}>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" style={{ width: '24px', height: '24px' }}>
-                    <polyline points="20 6 9 17 4 12" />
-                  </svg>
-                </span>
-                <span style={{ fontWeight: '600', fontSize: '12px', color: '#FFF' }}>Approval queue clear</span>
-                <span style={{ fontSize: '10px', color: 'rgba(255,255,255,0.4)' }}>No blocked or failed jobs require manual review.</span>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
+        </Modal>
+      )}
+    </main>
   );
 }
 
-function elapsedLabel(startedAt, finishedAt) {
-  const start = new Date(startedAt).getTime();
-  const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
-  if (Number.isNaN(start) || Number.isNaN(end)) {
-    return 'unknown';
+function Metric({ label, value, detail, tone = '' }) {
+  return <article className={`agent-command__metric ${tone ? `agent-command__metric--${tone}` : ''}`}><span>{label}</span><strong>{value}</strong><small>{detail}</small></article>;
+}
+
+function Status({ value }) {
+  const normalized = String(value || 'unknown').replaceAll('_', ' ');
+  return <span className={`agent-command__status agent-command__status--${statusTone(value)}`}><span aria-hidden="true" />{normalized}</span>;
+}
+
+function Boundary({ label, value }) {
+  return <div><dt>{label}</dt><dd title={String(value)}>{value}</dd></div>;
+}
+
+function BoundaryChips({ label, values, empty }) {
+  return <div className="agent-command__chips"><span>{label}</span><div>{values?.length ? values.map((value) => <code key={value}>{value}</code>) : <em>{empty}</em>}</div></div>;
+}
+
+function Modal({ title, onClose, children }) {
+  return <div className="agent-command__scrim" onKeyDown={(event) => event.key === 'Escape' && onClose()} onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="agent-command__modal" role="dialog" aria-modal="true" aria-label={title}><div className="agent-command__modal-head"><h2>{title}</h2><button autoFocus aria-label={`Close ${title}`} onClick={onClose}>Close</button></div>{children}</section></div>;
+}
+
+function EmptyPanel({ title, detail }) {
+  return <div className="agent-command__empty"><strong>{title}</strong><span>{detail}</span></div>;
+}
+
+function LoadingPanel({ label }) {
+  return <div className="agent-command__empty agent-command__loading" role="status"><strong>{label}</strong><span>Reading workspace-scoped posture and approvals.</span></div>;
+}
+
+function replaceById(setter, next) {
+  setter((current) => current.map((item) => item.id === next.id ? next : item));
+}
+
+function commaList(value) {
+  return [...new Set(value.split(',').map((item) => item.trim()).filter(Boolean))];
+}
+
+function validDecision(value) {
+  return value.reason.trim().length >= 3 && EVIDENCE_HASH_PATTERN.test(value.evidenceHash.trim());
+}
+
+function statusTone(value) {
+  if (['active', 'approved', 'allow', 'succeeded'].includes(value)) return 'safe';
+  if (['pending', 'pending_review', 'review', 'queued', 'running'].includes(value)) return 'warning';
+  if (['disabled', 'revoked', 'blocked', 'block', 'failed', 'cancelled', 'expired'].includes(value)) return 'danger';
+  return 'neutral';
+}
+
+function identityName(identities, id) {
+  return identities.find((item) => item.id === id || item.agentId === id)?.displayName || id;
+}
+
+function shortHash(value) {
+  return value && value.length > 24 ? `${value.slice(0, 18)}…${value.slice(-6)}` : value || 'not supplied';
+}
+
+function formatTime(value) {
+  if (!value) return 'not recorded';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+}
+
+function pastTense(action) {
+  return action === 'approve' ? 'approved' : action === 'block' ? 'blocked' : 'revoked';
+}
+
+async function copyCredential(value, addToast) {
+  try {
+    await navigator.clipboard.writeText(value);
+    addToast?.('Credential copied. Move it directly into the agent secret manager.', 'success');
+  } catch {
+    addToast?.('Clipboard access was blocked. Select and copy the credential manually.', 'warning');
   }
-  const seconds = Math.max(0, Math.round((end - start) / 1000));
-  if (seconds < 60) {
-    return `${seconds}s`;
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function isRetryableControlError(error) {
+  if (error instanceof ApiError) {
+    return error.status === 429 || error.status >= 500;
   }
-  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return error instanceof TypeError;
 }
