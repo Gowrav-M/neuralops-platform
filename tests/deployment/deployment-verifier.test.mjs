@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   buildDeploymentCanaryIdentity,
   ensureGovernanceSimulation,
+  fetchWithTimeout,
   waitForDeploymentReadiness,
   verifyHighRiskFailsClosed,
 } from '../../scripts/deployment-verifier.mjs';
@@ -32,11 +33,11 @@ test('deployment canary registration matches the production identity contract', 
 test('deployment verifier creates missing non-destructive governance evidence', async () => {
   const requests = [];
   const check = await ensureGovernanceSimulation({
+    readiness: {
+      checks: [{ id: 'data_governance', state: 'block' }],
+    },
     requestJson: async (path, options = {}) => {
       requests.push({ path, options });
-      if (path === '/api/data-governance/evidence') {
-        return { response: jsonResponse(200, { latestSimulation: null }), payload: { latestSimulation: null } };
-      }
       return {
         response: jsonResponse(200, { id: 'purge_sim_release' }),
         payload: { id: 'purge_sim_release' },
@@ -45,27 +46,41 @@ test('deployment verifier creates missing non-destructive governance evidence', 
   });
 
   assert.equal(check.status, 'pass');
-  assert.equal(requests.length, 2);
-  assert.equal(requests[1].path, '/api/data-governance/purge/simulate');
-  assert.equal(requests[1].options.method, 'POST');
-  assert.equal(requests[1].options.body, '{}');
+  assert.equal(check.remediated, true);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, '/api/data-governance/purge/simulate');
+  assert.equal(requests[0].options.method, 'POST');
+  assert.equal(requests[0].options.body, JSON.stringify({ domains: ['agent_identities'] }));
 });
 
 test('deployment verifier reuses existing governance evidence', async () => {
   let calls = 0;
   const check = await ensureGovernanceSimulation({
+    readiness: {
+      checks: [{ id: 'data_governance', state: 'pass' }],
+    },
     requestJson: async () => {
       calls += 1;
-      return {
-        response: jsonResponse(200, { latestSimulation: { id: 'purge_sim_existing' } }),
-        payload: { latestSimulation: { id: 'purge_sim_existing' } },
-      };
+      throw new Error('request must not be called');
     },
   });
 
   assert.equal(check.status, 'pass');
-  assert.equal(calls, 1);
-  assert.match(check.detail, /purge_sim_existing/);
+  assert.equal(check.remediated, false);
+  assert.equal(calls, 0);
+  assert.match(check.detail, /already satisfied/);
+});
+
+test('fetchWithTimeout aborts a stalled production request', async () => {
+  await assert.rejects(
+    fetchWithTimeout('https://api.example.test/stalled', {}, {
+      timeoutMs: 5,
+      fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+      }),
+    }),
+    /timed out after 5ms/,
+  );
 });
 
 test('waitForDeploymentReadiness preserves warming state and becomes ready within the deadline', async () => {

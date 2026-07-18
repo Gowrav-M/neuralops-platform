@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import {
   buildDeploymentCanaryIdentity,
   ensureGovernanceSimulation,
+  fetchWithTimeout,
   waitForDeploymentReadiness,
   verifyHighRiskFailsClosed,
 } from './deployment-verifier.mjs';
@@ -31,13 +32,17 @@ const headers = {
 const checks = [];
 
 async function getJson(path, options = {}) {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
-    ...options,
-    headers: {
-      ...headers,
-      ...(options.headers || {}),
+  const response = await fetchWithTimeout(
+    `${apiBaseUrl}${path}`,
+    {
+      ...options,
+      headers: {
+        ...headers,
+        ...(options.headers || {}),
+      },
     },
-  });
+    { timeoutMs: 90_000 },
+  );
   const text = await response.text();
   let payload = {};
   if (text) {
@@ -52,7 +57,7 @@ async function getJson(path, options = {}) {
 
 async function assertPublicFrontend() {
   if (!frontendUrl) return { name: 'frontend', status: 'skipped', detail: 'NEURALOPS_DEPLOYED_FRONTEND_URL not set' };
-  const response = await fetch(frontendUrl);
+  const response = await fetchWithTimeout(frontendUrl, {}, { timeoutMs: 30_000 });
   if (!response.ok) {
     throw new Error(`frontend returned ${response.status}`);
   }
@@ -178,11 +183,17 @@ async function main() {
     throw new Error(`/api/system/status failed with ${status.response.status}`);
   }
 
-  if (authToken || qaToken) {
-    checks.push(await ensureGovernanceSimulation({ requestJson: getJson }));
+  let readiness = await getJson('/api/production/readiness');
+  if (readiness.response.ok && (authToken || qaToken)) {
+    const governance = await ensureGovernanceSimulation({
+      requestJson: getJson,
+      readiness: readiness.payload,
+    });
+    checks.push(governance);
+    if (governance.remediated) {
+      readiness = await getJson('/api/production/readiness');
+    }
   }
-
-  const readiness = await getJson('/api/production/readiness');
   if (readiness.response.status === 401 && !(authToken || qaToken)) {
     checks.push({ name: 'production-readiness-auth', status: 'pass', detail: 'readiness endpoint is private' });
   } else if (readiness.response.ok) {
