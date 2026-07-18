@@ -4,6 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import {
   buildDeploymentCanaryIdentity,
+  ensureGovernanceSimulation,
   waitForDeploymentReadiness,
   verifyHighRiskFailsClosed,
 } from './deployment-verifier.mjs';
@@ -175,6 +176,10 @@ async function main() {
     });
   } else {
     throw new Error(`/api/system/status failed with ${status.response.status}`);
+  }
+
+  if (authToken || qaToken) {
+    checks.push(await ensureGovernanceSimulation({ requestJson: getJson }));
   }
 
   const readiness = await getJson('/api/production/readiness');
