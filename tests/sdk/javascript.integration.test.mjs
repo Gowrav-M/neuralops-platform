@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -62,7 +63,11 @@ test('JavaScript SDK canonical contract works against a real FastAPI service', {
   const workdir = await mkdtemp(path.join(tmpdir(), 'neuralops-js-contract-'));
   const port = await availablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
-  const python = path.join(ROOT, 'backend', '.venv', 'Scripts', 'python.exe');
+  const venvPython = process.platform === 'win32'
+    ? path.join(ROOT, 'backend', '.venv', 'Scripts', 'python.exe')
+    : path.join(ROOT, 'backend', '.venv', 'bin', 'python');
+  const python = process.env.NEURALOPS_TEST_PYTHON
+    || (existsSync(venvPython) ? venvPython : process.platform === 'win32' ? 'python' : 'python3');
   const output = [];
   const env = { ...process.env, NEURALOPS_DB_PATH: path.join(workdir, 'contract.sqlite3') };
   delete env.NEURALOPS_DATABASE_URL;

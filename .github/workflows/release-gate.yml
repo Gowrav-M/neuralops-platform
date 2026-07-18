@@ -31,13 +31,40 @@ jobs:
           python -m pip install -r backend/requirements.txt
 
       - name: Verify app before gate
+        shell: bash
         run: |
-          npm audit --audit-level=high
-          npm run test:sdk
-          npm run test:deployment
-          npm run lint
-          npm run build
-          python -m pytest backend
+          mkdir -p artifacts
+          set +e
+          (
+            set -e
+            npm audit --audit-level=high
+            npm run test:sdk
+            npm run test:deployment
+            npm run lint
+            npm run build
+            python -m pytest backend
+          )
+          preflight_exit=$?
+          PREFLIGHT_EXIT="$preflight_exit" python - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          status = int(os.environ["PREFLIGHT_EXIT"])
+          with open("artifacts/release-gate.json", "w", encoding="utf-8") as artifact:
+              json.dump(
+                  {
+                      "schemaVersion": 1,
+                      "generatedAt": datetime.now(timezone.utc).isoformat(),
+                      "outcome": "preflight_pass" if status == 0 else "preflight_fail",
+                      "exitCode": status,
+                  },
+                  artifact,
+                  indent=2,
+              )
+              artifact.write("\n")
+          PY
+          exit "$preflight_exit"
 
       - name: Start NeuralOps API
         shell: bash
