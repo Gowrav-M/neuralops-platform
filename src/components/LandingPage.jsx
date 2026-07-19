@@ -1,6 +1,25 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import {
+  ArrowDownRight,
+  ArrowRight,
+  Check,
+  Fingerprint,
+  Key,
+  LockKey,
+  ShieldCheck,
+  TerminalWindow,
+  X,
+} from '@phosphor-icons/react';
+import {
+  AnimatePresence,
+  motion,
+  useMotionValueEvent,
+  useReducedMotion,
+  useScroll,
+} from 'motion/react';
 import AuthGate from './AuthGate';
 import { submitPilotApplication } from '../lib/api';
+import '../landing.css';
 
 const EMPTY_APPLICATION = {
   name: '',
@@ -27,7 +46,7 @@ const plans = [
     price: '$149',
     cadence: '/ month',
     description: 'For a product team supervising agents that use real tools and providers.',
-    features: ['Everything in Developer', 'Shared approval queue', 'Credential rotation and revocation', 'Emergency stop and evidence exports'],
+    features: ['Shared approval queue', 'Credential rotation and revocation', 'Emergency stop', 'Evidence exports'],
     featured: true,
   },
   {
@@ -35,26 +54,84 @@ const plans = [
     price: '$499',
     cadence: '/ month',
     description: 'For multiple teams operating governed agents across production boundaries.',
-    features: ['Everything in Team', 'Production access decisions', 'Retention policies and legal holds', 'Priority pilot onboarding'],
+    features: ['Production access decisions', 'Retention policies', 'Legal holds', 'Priority pilot onboarding'],
   },
   {
     name: 'Enterprise',
     price: 'Custom',
     cadence: 'scoped with you',
-    description: 'For organizations that need a documented security and deployment review.',
-    features: ['Everything in Business', 'Architecture and security review', 'Deployment planning', 'Procurement-ready commercial terms'],
+    description: 'For organizations that need documented security and deployment review.',
+    features: ['Architecture review', 'Security review', 'Deployment planning', 'Commercial terms'],
   },
 ];
+
+const proofItems = [
+  {
+    id: 'command',
+    kicker: 'Command posture',
+    title: 'Know what can act before it acts.',
+    body: 'See workspace health, agent ownership, connected systems, and enforcement readiness in one operational surface.',
+    image: '/media/product-connectivity.webp',
+    alt: 'Sanitized NeuralOps Action Center in a local demonstration workspace.',
+  },
+  {
+    id: 'control',
+    kicker: 'Authorization evidence',
+    title: 'Require a decision at the tool boundary.',
+    body: 'High-risk actions wait for current approval. Revoked identities, expired leases, and unavailable policy checks fail closed.',
+    image: '/media/product-agent-control.webp',
+    alt: 'Sanitized NeuralOps Agent Command Center in a local demonstration workspace.',
+  },
+  {
+    id: 'evidence',
+    kicker: 'Release proof',
+    title: 'Carry the decision into the audit trail.',
+    body: 'Every allowed, blocked, and revoked action produces workspace-scoped evidence without storing the sensitive content itself.',
+    image: '/media/product-evidence.webp',
+    alt: 'Sanitized NeuralOps evidence and release gate in a local demonstration workspace.',
+  },
+];
+
+const captured = [
+  'Agent, action, and tool category IDs',
+  'Timing, provider, model, tokens, and cost totals',
+  'Status, policy findings, and content hashes',
+  'Approval actors, reasons, expiry, and evidence',
+];
+
+const excluded = [
+  'Raw prompts or model outputs',
+  'Tool arguments, provider keys, or secrets',
+  'Uploaded files or browser content',
+  'Agent credentials after one-time issuance',
+];
+
+const reveal = {
+  hidden: { opacity: 0, y: 28 },
+  visible: { opacity: 1, y: 0 },
+};
 
 export default function LandingPage({ onSession }) {
   const [authOpen, setAuthOpen] = useState(false);
   const [application, setApplication] = useState(EMPTY_APPLICATION);
   const [submission, setSubmission] = useState({ state: 'idle', message: '' });
   const idempotencyKey = useRef(createPilotKey());
+  const authTrigger = useRef(null);
+  const reduceMotion = useReducedMotion();
+
+  const openAuth = (event) => {
+    authTrigger.current = event.currentTarget;
+    setAuthOpen(true);
+  };
+
+  const closeAuth = () => {
+    setAuthOpen(false);
+    window.requestAnimationFrame(() => authTrigger.current?.focus());
+  };
 
   const handlePilotSubmit = async (event) => {
     event.preventDefault();
-    setSubmission({ state: 'submitting', message: 'Submitting with one stable idempotency key; success will appear only after backend confirmation.' });
+    setSubmission({ state: 'submitting', message: 'Contacting NeuralOps. Your application remains unchanged while the backend wakes.' });
     try {
       const receipt = await submitPilotApplication({
         ...application,
@@ -77,111 +154,90 @@ export default function LandingPage({ onSession }) {
       <a className="landing__skip" href="#main">Skip to content</a>
       <header className="landing__nav">
         <a className="landing__brand" href="#top" aria-label="NeuralOps home">
-          <span className="landing__brand-mark" aria-hidden="true"><i /><i /><i /></span>
+          <BoundaryMark />
           <span>NeuralOps</span>
         </a>
         <nav aria-label="Public navigation">
           <a href="#how-it-works">Control model</a>
           <a href="#privacy">Privacy</a>
           <a href="#pricing">Pricing</a>
-          <button type="button" onClick={() => setAuthOpen(true)}>Sign in</button>
+          <button type="button" onClick={openAuth}>Sign in</button>
         </nav>
       </header>
 
       <main id="main">
         <section className="landing__hero" id="top">
-          <div className="landing__hero-copy">
-            <span className="landing__eyebrow">Authorization infrastructure for AI agents</span>
-            <h1>Stop unsafe agent actions before they happen.</h1>
-            <p>
-              NeuralOps gives every agent a governed identity and requires authorization before every high-risk action—shell execution,
-              writes, browser interaction, external communication, and secret access.
-            </p>
-            <div className="landing__hero-actions">
-              <a className="landing__cta" href="#pilot">Apply for invited pilot</a>
-              <a className="landing__secondary-link" href="#how-it-works">Inspect the control model <span aria-hidden="true">→</span></a>
-            </div>
-            <div className="landing__truth-strip" aria-label="Pilot operating model">
-              <span><strong>5–20</strong> invited teams</span>
-              <span><strong>Fail closed</strong> on high risk</span>
-              <span><strong>Metadata</strong> by default</span>
-            </div>
-          </div>
+          <motion.div
+            className="landing__hero-copy"
+            initial={false}
+          >
+            <motion.span className="landing__eyebrow">Runtime authorization for AI agents</motion.span>
+            <motion.h1>Stop unsafe agent actions before they happen.</motion.h1>
+            <motion.p>Identity-bound authorization and human approval before high-risk tools touch production.</motion.p>
+            <motion.div className="landing__hero-actions">
+              <a className="landing__cta" href="#pilot">Request pilot access <ArrowDownRight weight="bold" /></a>
+              <a className="landing__text-link" href="#how-it-works">See the control path <ArrowRight /></a>
+            </motion.div>
+          </motion.div>
 
-          <div className="landing__control-preview" aria-label="Authorization sequence preview">
-            <div className="landing__preview-head"><span>LIVE CONTROL PATH</span><span className="landing__live"><i /> ENFORCED</span></div>
-            <div className="landing__agent-row">
-              <span className="landing__node-index">01</span>
-              <div><small>IDENTITY</small><strong>support-resolution-agent</strong><span>Owner / Customer Systems</span></div>
-              <b>BOUND</b>
-            </div>
-            <div className="landing__path-line"><span>Requests browser.write</span><i /></div>
-            <div className="landing__decision-row">
-              <span className="landing__node-index">02</span>
-              <div><small>POLICY DECISION</small><strong>Human approval required</strong><span>Production · high risk · no active lease</span></div>
-              <b>BLOCK</b>
-            </div>
-            <div className="landing__preview-foot"><span>Raw arguments not retained</span><code>sha256:8f7a…d219</code></div>
-          </div>
+          <AuthorizationCanvas reduceMotion={reduceMotion} />
         </section>
 
         <aside className="landing__cold-start" aria-label="Pilot infrastructure disclosure">
-          <span>FREE-INFRA PILOT</span>
-          <p>The free-tier backend may need up to 90 seconds to wake. NeuralOps shows warming status, preserves the intended action with an idempotency key, and never reports success before the backend confirms it.</p>
+          <div><ShieldCheck weight="fill" /><strong>Honest pilot infrastructure</strong></div>
+          <p>The free-tier backend may need up to 90 seconds to wake. NeuralOps preserves the intended action with an idempotency key and never reports success before backend confirmation.</p>
         </aside>
 
-        <section className="landing__control-model" id="how-it-works" aria-labelledby="control-heading">
-          <div className="landing__section-lead">
-            <span className="landing__eyebrow">The control model</span>
-            <h2 id="control-heading">Permission is a runtime decision, not a policy document.</h2>
-            <p>Built-in and external agents take the same enforcement path. High-risk actions cannot proceed on stale approval or backend unavailability.</p>
-          </div>
-          <ol className="landing__steps">
-            <li><span>01 / IDENTIFY</span><h3>Give the agent boundaries</h3><p>Register an owner, environment, risk level, providers, and exact permissions. The scoped credential is shown once and stored only as a hash.</p></li>
-            <li><span>02 / AUTHORIZE</span><h3>Check before the tool runs</h3><p>Allowlisted reads can receive short leases. Writes, shell, browser, communications, secrets, and destructive operations require current approval.</p></li>
-            <li><span>03 / PROVE</span><h3>Keep auditable evidence</h3><p>Record actors, reasons, expiry, hashes, findings, status, cost, and timing without retaining the agent’s sensitive content.</p></li>
-          </ol>
-        </section>
+        <AuthorizationPath reduceMotion={reduceMotion} />
+        <ProductProof reduceMotion={reduceMotion} />
 
         <section className="landing__privacy" id="privacy" aria-labelledby="privacy-heading">
-          <div>
+          <motion.div className="landing__privacy-intro" initial={reduceMotion ? false : 'hidden'} whileInView="visible" viewport={{ once: true, amount: 0.35 }} variants={reveal}>
             <span className="landing__eyebrow">Privacy boundary</span>
-            <h2 id="privacy-heading">Metadata by default. Content stays out.</h2>
-          </div>
-          <div className="landing__privacy-columns">
-            <article><span className="landing__included">CAPTURED</span><ul><li>Agent, action, and tool category IDs</li><li>Timing, provider, model, tokens, and cost totals</li><li>Status, policy findings, and content hashes</li><li>Approval actors, reasons, expiry, and evidence</li></ul></article>
-            <article><span className="landing__excluded">NOT CAPTURED</span><ul><li>Raw prompts or model outputs</li><li>Tool arguments, provider keys, or secrets</li><li>Uploaded files or browser content</li><li>Agent credentials after one-time issuance</li></ul></article>
+            <h2 id="privacy-heading">Metadata in.<br />Sensitive content out.</h2>
+            <p>NeuralOps proves what happened without becoming another store of prompts, secrets, files, and provider credentials.</p>
+          </motion.div>
+          <div className="landing__privacy-ledger">
+            <PrivacyList title="Captured by default" items={captured} included reduceMotion={reduceMotion} />
+            <PrivacyList title="Outside the boundary" items={excluded} reduceMotion={reduceMotion} />
           </div>
         </section>
 
         <section className="landing__pricing" id="pricing" role="region" aria-label="Pricing">
-          <div className="landing__section-lead">
-            <span className="landing__eyebrow">Pilot list pricing</span>
+          <motion.div className="landing__section-heading" initial={reduceMotion ? false : 'hidden'} whileInView="visible" viewport={{ once: true, amount: 0.4 }} variants={reveal}>
             <h2>Start with control. Pay when the team depends on it.</h2>
-            <p>These are the intended post-pilot monthly prices. Pilot participation is invitation-only; billing activates only after commercial acceptance.</p>
-          </div>
-          <div className="landing__plans">
-            {plans.map((plan) => (
-              <article className={plan.featured ? 'landing__plan landing__plan--featured' : 'landing__plan'} key={plan.name}>
-                <div><span>{plan.name}</span>{plan.featured && <b>PILOT DEFAULT</b>}</div>
-                <strong>{plan.price}</strong><small>{plan.cadence}</small>
+            <p>Billing activates only after pilot acceptance and commercial approval.</p>
+          </motion.div>
+          <div className="landing__price-rail">
+            {plans.map((plan, index) => (
+              <motion.article
+                className={plan.featured ? 'landing__plan landing__plan--featured' : 'landing__plan'}
+                key={plan.name}
+                initial={reduceMotion ? false : { opacity: 0, y: 18 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true, amount: 0.45 }}
+                transition={{ delay: index * 0.06 }}
+              >
+                <div className="landing__plan-name"><span>{plan.name}</span>{plan.featured && <b>Recommended pilot</b>}</div>
+                <div className="landing__plan-price"><strong>{plan.price}</strong><small>{plan.cadence}</small></div>
                 <p>{plan.description}</p>
-                <ul>{plan.features.map((feature) => <li key={feature}>{feature}</li>)}</ul>
-                <a href="#pilot">{plan.name === 'Enterprise' ? 'Discuss requirements' : 'Apply for pilot'}</a>
-              </article>
+                <ul>{plan.features.map((feature) => <li key={feature}><Check weight="bold" />{feature}</li>)}</ul>
+              </motion.article>
             ))}
           </div>
         </section>
 
         <section className="landing__pilot" id="pilot" aria-labelledby="pilot-heading">
-          <div className="landing__pilot-copy">
-            <span className="landing__eyebrow">Invited pilot application</span>
+          <motion.div className="landing__pilot-copy" initial={reduceMotion ? false : 'hidden'} whileInView="visible" viewport={{ once: true, amount: 0.3 }} variants={reveal}>
             <h2 id="pilot-heading">Bring one real agent workflow.</h2>
-            <p>We are selecting teams with a concrete agent, a named owner, and at least one meaningful tool boundary. The pilot validates control—not a staged demo.</p>
-            <dl><div><dt>What happens next</dt><dd>We review fit, confirm the workflow, and schedule onboarding if accepted.</dd></div><div><dt>What we collect here</dt><dd>Contact and pilot-scoping metadata only. Do not submit prompts, secrets, provider keys, or customer data.</dd></div></dl>
-          </div>
+            <p>We select teams with a concrete agent, a named owner, and at least one meaningful tool boundary.</p>
+            <dl>
+              <div><dt>What happens next</dt><dd>We review fit, confirm the workflow, and schedule onboarding if accepted.</dd></div>
+              <div><dt>What belongs here</dt><dd>Contact and pilot-scoping metadata only. Never submit prompts, secrets, provider keys, or customer data.</dd></div>
+            </dl>
+          </motion.div>
 
-          <form className="landing__pilot-form" aria-label="Invited pilot application" onSubmit={handlePilotSubmit}>
+          <motion.form className="landing__pilot-form" aria-label="Invited pilot application" onSubmit={handlePilotSubmit} initial={reduceMotion ? false : { opacity: 0, y: 24 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true, amount: 0.2 }}>
             <div className="landing__field-row">
               <label>Name<input value={application.name} onChange={(event) => setApplication({ ...application, name: event.target.value })} required minLength="2" autoComplete="name" /></label>
               <label>Work email<input type="email" value={application.workEmail} onChange={(event) => setApplication({ ...application, workEmail: event.target.value })} required autoComplete="email" /></label>
@@ -191,29 +247,261 @@ export default function LandingPage({ onSession }) {
               <label>Role <small>optional</small><input value={application.role} onChange={(event) => setApplication({ ...application, role: event.target.value })} autoComplete="organization-title" /></label>
             </div>
             <div className="landing__field-row">
-              <label>Team size<select value={application.teamSize} onChange={(event) => setApplication({ ...application, teamSize: event.target.value })}><option value="1-5">1–5</option><option value="6-20">6–20</option><option value="21-50">21–50</option><option value="51+">51+</option></select></label>
+              <label>Team size<select value={application.teamSize} onChange={(event) => setApplication({ ...application, teamSize: event.target.value })}><option value="1-5">1-5</option><option value="6-20">6-20</option><option value="21-50">21-50</option><option value="51+">51+</option></select></label>
               <label>Expected managed agents<input type="number" min="1" max="10000" value={application.expectedAgents} onChange={(event) => setApplication({ ...application, expectedAgents: event.target.value })} required /></label>
             </div>
             <label>Primary use case<textarea value={application.primaryUseCase} onChange={(event) => setApplication({ ...application, primaryUseCase: event.target.value })} required minLength="12" placeholder="Which agent acts, which tools it uses, and what must require approval?" /></label>
             <label className="landing__consent"><input type="checkbox" checked={application.consent} onChange={(event) => setApplication({ ...application, consent: event.target.checked })} required /><span>I agree to be contacted about the invited NeuralOps pilot and understand this form stores lead metadata.</span></label>
             <label className="landing__honeypot" aria-hidden="true">Website<input value={application.website} onChange={(event) => setApplication({ ...application, website: event.target.value })} tabIndex="-1" autoComplete="off" /></label>
-            <button type="submit" disabled={submission.state === 'submitting'}>{submission.state === 'submitting' ? 'Submitting…' : 'Submit pilot application'}</button>
-            {submission.message && <p className={`landing__form-status landing__form-status--${submission.state}`} role={submission.state === 'error' ? 'alert' : 'status'}>{submission.message}</p>}
-          </form>
+            <button type="submit" disabled={submission.state === 'submitting'}>{submission.state === 'submitting' ? 'Submitting application' : 'Submit pilot application'} <ArrowRight weight="bold" /></button>
+            <AnimatePresence mode="wait">
+              {submission.message && <motion.p key={submission.state} className={`landing__form-status landing__form-status--${submission.state}`} role={submission.state === 'error' ? 'alert' : 'status'} initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>{submission.message}</motion.p>}
+            </AnimatePresence>
+          </motion.form>
         </section>
       </main>
 
-      <footer className="landing__footer"><a className="landing__brand" href="#top"><span className="landing__brand-mark" aria-hidden="true"><i /><i /><i /></span><span>NeuralOps</span></a><p>Supervised agent operations. Built for honest control.</p><button type="button" onClick={() => setAuthOpen(true)}>Operator sign in</button></footer>
+      <footer className="landing__footer">
+        <a className="landing__brand" href="#top"><BoundaryMark /><span>NeuralOps</span></a>
+        <p>Runtime authority for agents that act.</p>
+        <button type="button" onClick={openAuth}>Operator sign in <ArrowRight /></button>
+      </footer>
 
-      {authOpen && (
-        <div className="landing__auth-scrim" onMouseDown={(event) => event.target === event.currentTarget && setAuthOpen(false)} onKeyDown={(event) => event.key === 'Escape' && setAuthOpen(false)}>
-          <section className="landing__auth-modal" role="dialog" aria-modal="true" aria-label="Sign in to NeuralOps">
-            <button className="landing__auth-close" type="button" autoFocus onClick={() => setAuthOpen(false)}>Close</button>
-            <AuthGate onSession={onSession} allowSignup={false} />
-          </section>
-        </div>
-      )}
+      {authOpen && <AuthDialog onClose={closeAuth} onSession={onSession} reduceMotion={reduceMotion} />}
     </div>
+  );
+}
+
+function BoundaryMark() {
+  return <span className="landing__brand-mark" aria-hidden="true"><i /><i /></span>;
+}
+
+function AuthorizationCanvas({ reduceMotion }) {
+  const canvasRef = useRef(null);
+  const [decision, setDecision] = useState('pending');
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+    const context = canvas.getContext('2d');
+    let frame = 0;
+    let progress = 0;
+
+    const draw = () => {
+      const bounds = canvas.getBoundingClientRect();
+      const ratio = Math.min(window.devicePixelRatio || 1, 2);
+      const width = Math.max(320, bounds.width);
+      const height = Math.max(260, bounds.height);
+      if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) {
+        canvas.width = Math.round(width * ratio);
+        canvas.height = Math.round(height * ratio);
+      }
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = '#0b0b0b';
+      context.fillRect(0, 0, width, height);
+
+      const y = height * 0.48;
+      const nodes = [
+        { x: width * 0.12, label: 'AGENT', value: 'deploy-bot' },
+        { x: width * 0.5, label: 'NEURALOPS', value: decision === 'pending' ? 'approval required' : decision },
+        { x: width * 0.88, label: 'TOOL', value: 'browser.write' },
+      ];
+      context.lineWidth = 1;
+      context.strokeStyle = '#343434';
+      context.beginPath();
+      context.moveTo(nodes[0].x + 62, y);
+      context.lineTo(nodes[2].x - 62, y);
+      context.stroke();
+
+      nodes.forEach((node, index) => {
+        const gated = index === 1;
+        context.fillStyle = gated ? '#151515' : '#101010';
+        context.strokeStyle = gated ? '#ff6547' : '#3a3a3a';
+        context.beginPath();
+        context.roundRect(node.x - 62, y - 44, 124, 88, 6);
+        context.fill();
+        context.stroke();
+        context.fillStyle = gated ? '#ff8068' : '#858585';
+        context.font = '10px "IBM Plex Mono", monospace';
+        context.textAlign = 'center';
+        context.fillText(node.label, node.x, y - 10);
+        context.fillStyle = '#ededed';
+        context.font = '12px "Instrument Sans", sans-serif';
+        context.fillText(node.value, node.x, y + 14);
+      });
+
+      const start = nodes[0].x + 68;
+      const gate = nodes[1].x - 68;
+      const end = nodes[2].x - 68;
+      const destination = decision === 'approved' ? end : gate;
+      const packetX = start + (destination - start) * progress;
+      context.fillStyle = '#ff6547';
+      context.beginPath();
+      context.arc(packetX, y, 5, 0, Math.PI * 2);
+      context.fill();
+
+      if (decision === 'blocked') {
+        context.strokeStyle = '#ff6547';
+        context.lineWidth = 2;
+        context.beginPath();
+        context.moveTo(gate - 8, y - 10);
+        context.lineTo(gate + 8, y + 10);
+        context.moveTo(gate + 8, y - 10);
+        context.lineTo(gate - 8, y + 10);
+        context.stroke();
+      }
+
+      if (!reduceMotion && progress < 1) {
+        progress = Math.min(1, progress + 0.025);
+        frame = window.requestAnimationFrame(draw);
+      }
+    };
+
+    if (reduceMotion) progress = 1;
+    draw();
+    const observer = new ResizeObserver(() => {
+      progress = reduceMotion ? 1 : progress;
+      draw();
+    });
+    observer.observe(canvas);
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(frame);
+    };
+  }, [decision, reduceMotion]);
+
+  return (
+    <motion.section
+      className="landing__auth-canvas"
+      aria-labelledby="auth-canvas-title"
+      initial={reduceMotion ? false : { opacity: 0, scale: 0.98, x: 18 }}
+      animate={{ opacity: 1, scale: 1, x: 0 }}
+      transition={{ duration: 0.65, delay: 0.14, ease: [0.22, 1, 0.36, 1] }}
+    >
+      <header>
+        <div><span>Interactive control path</span><strong id="auth-canvas-title">Production write request</strong></div>
+        <b className={`landing__canvas-state landing__canvas-state--${decision}`}>{decision}</b>
+      </header>
+      <canvas ref={canvasRef} role="img" aria-label={`Authorization path for deploy-bot requesting browser.write. Decision: ${decision}.`} />
+      <div className="landing__canvas-request">
+        <div><small>Agent</small><strong>deploy-bot</strong></div>
+        <div><small>Action</small><strong>browser.write</strong></div>
+        <div><small>Risk</small><strong>High</strong></div>
+        <div><small>Environment</small><strong>Production</strong></div>
+      </div>
+      <footer>
+        <p>This local simulation does not execute a tool.</p>
+        <div>
+          <button type="button" onClick={() => setDecision('blocked')} aria-pressed={decision === 'blocked'}>Block</button>
+          <button type="button" onClick={() => setDecision('approved')} aria-pressed={decision === 'approved'}>Approve 60s</button>
+          {decision !== 'pending' && <button type="button" onClick={() => setDecision('pending')}>Reset</button>}
+        </div>
+      </footer>
+    </motion.section>
+  );
+}
+
+function AuthorizationPath({ reduceMotion }) {
+  const steps = [
+    { icon: Fingerprint, title: 'Identity bound', detail: 'Owner, workspace, environment, and permissions verified.' },
+    { icon: TerminalWindow, title: 'Action requested', detail: 'browser.write is classified as a high-risk tool action.' },
+    { icon: Key, title: 'Approval checked', detail: 'No current approval or active authorization lease exists.' },
+    { icon: LockKey, title: 'Execution blocked', detail: 'The tool does not run. Evidence is written to the audit chain.' },
+  ];
+  return (
+    <section className="landing__path" id="how-it-works" aria-labelledby="path-heading">
+      <motion.div className="landing__section-heading" initial={reduceMotion ? false : 'hidden'} whileInView="visible" viewport={{ once: true, amount: 0.35 }} variants={reveal}>
+        <h2 id="path-heading">Permission lives in the runtime.</h2>
+        <p>Built-in and external agents take the same enforcement path. High-risk actions cannot proceed on stale approval or backend unavailability.</p>
+      </motion.div>
+      <ol className="landing__path-flow">
+        {steps.map((step, index) => {
+          const Icon = step.icon;
+          return (
+            <motion.li key={step.title} initial={reduceMotion ? false : { opacity: 0, x: -20 }} whileInView={{ opacity: 1, x: 0 }} viewport={{ once: true, amount: 0.7 }} transition={{ delay: index * 0.08 }}>
+              <span className="landing__path-icon"><Icon weight={index === steps.length - 1 ? 'fill' : 'regular'} /></span>
+              <span className="landing__path-index">0{index + 1}</span>
+              <div><h3>{step.title}</h3><p>{step.detail}</p></div>
+              <strong>{index === steps.length - 1 ? 'BLOCK' : 'VERIFY'}</strong>
+            </motion.li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
+function ProductProof({ reduceMotion }) {
+  const containerRef = useRef(null);
+  const [activeProof, setActiveProof] = useState(0);
+  const { scrollYProgress } = useScroll({ target: containerRef, offset: ['start center', 'end center'] });
+
+  useMotionValueEvent(scrollYProgress, 'change', (value) => {
+    if (reduceMotion) return;
+    setActiveProof(Math.min(proofItems.length - 1, Math.floor(value * proofItems.length)));
+  });
+
+  return (
+    <section className="landing__proof" ref={containerRef} aria-labelledby="proof-heading">
+      <div className="landing__proof-sticky">
+        <div className="landing__proof-copy">
+          <span className="landing__section-label">Product evidence</span>
+          <h2 id="proof-heading">See what NeuralOps proves.</h2>
+          <div className="landing__proof-tabs" aria-label="Product proof views">
+            {proofItems.map((item, index) => (
+              <button className={index === activeProof ? 'active' : ''} type="button" key={item.id} onClick={() => setActiveProof(index)}>
+                <span>0{index + 1}</span><strong>{item.title}</strong><small>{item.body}</small>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="landing__proof-media">
+          <AnimatePresence mode="wait">
+            <motion.figure key={proofItems[activeProof].id} initial={reduceMotion ? false : { opacity: 0, y: 18, scale: 0.985 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={reduceMotion ? undefined : { opacity: 0, y: -12 }} transition={{ duration: 0.38 }}>
+              <img src={proofItems[activeProof].image} width="1440" height="900" alt={proofItems[activeProof].alt} loading="lazy" />
+              <figcaption><span>{proofItems[activeProof].kicker}</span><strong>Real interface, sanitized workspace</strong></figcaption>
+            </motion.figure>
+          </AnimatePresence>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function PrivacyList({ title, items, included = false, reduceMotion }) {
+  return (
+    <motion.article initial={reduceMotion ? false : { opacity: 0, y: 22 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true, amount: 0.45 }}>
+      <div><span>{included ? <Check weight="bold" /> : <X weight="bold" />}</span><h3>{title}</h3></div>
+      <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul>
+    </motion.article>
+  );
+}
+
+function AuthDialog({ onClose, onSession, reduceMotion }) {
+  const dialogRef = useRef(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    dialog?.showModal();
+    return () => {
+      if (dialog?.open) dialog.close();
+    };
+  }, []);
+
+  return (
+    <dialog
+      className="landing__auth-dialog"
+      ref={dialogRef}
+      aria-label="Sign in to NeuralOps"
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+      onClick={(event) => { if (event.target === dialogRef.current) onClose(); }}
+    >
+      <motion.div initial={reduceMotion ? false : { opacity: 0, y: 18, scale: 0.985 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={reduceMotion ? { duration: 0 } : { duration: 0.24 }}>
+        <button className="landing__auth-close" type="button" autoFocus onClick={onClose} aria-label="Close sign in"><X weight="bold" /></button>
+        <AuthGate onSession={onSession} allowSignup={false} />
+      </motion.div>
+    </dialog>
   );
 }
 
