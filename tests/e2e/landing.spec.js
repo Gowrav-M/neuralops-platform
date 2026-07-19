@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
 
 async function fillPilotApplication(form) {
   await form.getByLabel('Name').fill('Asha Rao');
@@ -15,8 +16,8 @@ test('public landing explains the product honestly and opens sign in', async ({ 
   await page.goto('/');
 
   await expect(page.getByRole('heading', { name: /Stop unsafe agent actions before they happen/i })).toBeVisible();
-  await expect(page.getByText(/authorization before every high-risk action/i)).toBeVisible();
-  await expect(page.getByRole('heading', { name: /Metadata by default\. Content stays out/i })).toBeVisible();
+  await expect(page.getByText(/Identity-bound authorization and human approval/i)).toBeVisible();
+  await expect(page.getByRole('heading', { name: /Metadata in\. Sensitive content out/i })).toBeVisible();
   await expect(page.getByText(/free-tier backend may need up to 90 seconds to wake/i)).toBeVisible();
 
   const pricing = page.getByRole('region', { name: 'Pricing' });
@@ -25,9 +26,12 @@ test('public landing explains the product honestly and opens sign in', async ({ 
   await expect(pricing.getByText('$499', { exact: true })).toBeVisible();
   await expect(pricing.getByText('Custom', { exact: true })).toBeVisible();
 
-  await page.getByRole('button', { name: 'Sign in' }).first().click();
+  const signIn = page.getByRole('button', { name: 'Sign in' }).first();
+  await signIn.click();
   await expect(page.getByRole('dialog', { name: 'Sign in to NeuralOps' })).toBeVisible();
   await expect(page.getByPlaceholder('operator@company.com')).toBeVisible();
+  await page.getByRole('button', { name: 'Close sign in' }).click();
+  await expect(signIn).toBeFocused();
 });
 
 test('pilot application submits metadata with a bounded idempotency key', async ({ page }) => {
@@ -51,7 +55,7 @@ test('pilot application submits metadata with a bounded idempotency key', async 
   });
 
   await page.goto('/');
-  await page.getByRole('link', { name: 'Apply for invited pilot' }).first().click();
+  await page.getByRole('link', { name: 'Request pilot access' }).click();
   const form = page.getByRole('form', { name: 'Invited pilot application' });
   await fillPilotApplication(form);
   await form.getByRole('button', { name: 'Submit pilot application' }).click();
@@ -86,7 +90,7 @@ test('pilot application never reports success when every bounded retry fails', a
   });
 
   await page.goto('/');
-  await page.getByRole('link', { name: 'Apply for invited pilot' }).first().click();
+  await page.getByRole('link', { name: 'Request pilot access' }).click();
   const form = page.getByRole('form', { name: 'Invited pilot application' });
   await fillPilotApplication(form);
   await form.getByRole('button', { name: 'Submit pilot application' }).click();
@@ -100,8 +104,49 @@ test('pilot application never reports success when every bounded retry fails', a
 
 test('landing remains operable without horizontal overflow at 390px', async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.includes('mobile'));
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
   await expect(page.getByRole('heading', { name: /Stop unsafe agent actions before they happen/i })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Apply for invited pilot' }).first()).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Request pilot access' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1)).toBe(false);
+});
+
+test('landing honors reduced motion and passes the automated accessibility baseline', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/');
+
+  await expect(page.getByRole('heading', { name: /Stop unsafe agent actions before they happen/i })).toBeVisible();
+  const runningAnimations = await page.locator('.landing').evaluate((element) => (
+    element.getAnimations({ subtree: true }).filter((animation) => animation.playState === 'running').length
+  ));
+  expect(runningAnimations).toBe(0);
+
+  await page.getByRole('button', { name: 'Sign in' }).first().click();
+  const dialogPanel = page.getByRole('dialog', { name: 'Sign in to NeuralOps' }).locator(':scope > div');
+  await expect(dialogPanel).toBeVisible();
+  expect(await dialogPanel.evaluate((element) => getComputedStyle(element).transform)).toBe('none');
+
+  const results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations).toEqual([]);
+});
+
+test('interactive authorization canvas changes decision state', async ({ page }) => {
+  await page.goto('/');
+  const canvas = page.getByRole('img', { name: /Authorization path for deploy-bot/i });
+  await expect(canvas).toHaveAttribute('aria-label', /Decision: pending/);
+  await page.getByRole('button', { name: 'Block', exact: true }).click();
+  await expect(canvas).toHaveAttribute('aria-label', /Decision: blocked/);
+  await page.getByRole('button', { name: 'Approve 60s' }).click();
+  await expect(canvas).toHaveAttribute('aria-label', /Decision: approved/);
+});
+
+test('landing visual baseline remains stable', async ({ page }, testInfo) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: /Stop unsafe agent actions before they happen/i })).toBeVisible();
+  await expect(page).toHaveScreenshot(`neuralops-landing-${testInfo.project.name}.png`, {
+    fullPage: true,
+    animations: 'disabled',
+    maxDiffPixelRatio: 0.03,
+  });
 });

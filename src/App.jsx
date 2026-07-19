@@ -905,11 +905,9 @@ function AppShell() {
     <div className="dashboard-wrapper">
       {/* Left Sidebar Panel */}
       <aside className="sidebar-container">
-        {/* Brand Logo with dynamic animated SVG */}
+        {/* NeuralOps boundary-gate brand mark */}
         <button className="sidebar-logo" onClick={() => handleNavClick('Dashboard')}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
-          </svg>
+          <span className="sidebar-boundary-mark" aria-hidden="true"><i /><i /></span>
           NeuralOps
         </button>
 
