@@ -145,7 +145,6 @@ test('landing visual baseline remains stable', async ({ page }, testInfo) => {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: /Stop unsafe agent actions before they happen/i })).toBeVisible();
   await expect(page).toHaveScreenshot(`neuralops-landing-${testInfo.project.name}.png`, {
-    fullPage: true,
     animations: 'disabled',
     // Chromium text rasterization and mobile font metrics differ between
     // Windows development and the Linux CI runner. Structural drift still
