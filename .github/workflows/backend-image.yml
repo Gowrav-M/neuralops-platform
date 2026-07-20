@@ -4,9 +4,6 @@ on:
   push:
     branches: [main]
     tags: [v*]
-    paths:
-      - backend/**
-      - .github/workflows/backend-image.yml
   workflow_dispatch:
 
 permissions:
@@ -21,6 +18,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate version tag before publishing
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            test "${GITHUB_REF_NAME#v}" = "$(node -p "require('./package.json').version")"
+          fi
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Build backend image locally for scanning
@@ -33,7 +43,7 @@ jobs:
           tags: ghcr.io/gowrav-m/neuralops-api:${{ github.sha }}
 
       - name: Fail on high or critical image vulnerabilities
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/gowrav-m/neuralops-api:${{ github.sha }}
           format: table

@@ -79,12 +79,22 @@ jobs:
           push: false
           tags: neuralops-api:${{ github.sha }}
 
+      - name: Fail on high or critical release image vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: neuralops-api:${{ github.sha }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+
       - name: Export backend release image
         shell: bash
         run: docker save neuralops-api:${GITHUB_SHA} | gzip -n > artifacts/neuralops-backend-image.tar.gz
 
       - name: Generate backend SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           image: neuralops-api:${{ github.sha }}
           format: spdx-json
@@ -100,6 +110,21 @@ jobs:
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: artifacts/neuralops-frontend.tar.gz
+
+      - name: Attest backend image release artifact
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: artifacts/neuralops-backend-image.tar.gz
+
+      - name: Attest backend SBOM
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: artifacts/neuralops-backend.spdx.json
+
+      - name: Attest release checksums
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: artifacts/SHA256SUMS
 
       - name: Upload release assets
         uses: actions/upload-artifact@v6
@@ -122,7 +147,7 @@ jobs:
           path: artifacts
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@c12583777ecdfd3be55c69cf75464299dc01057e # v3
         with:
           generate_release_notes: true
           files: artifacts/*

@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
   group: production-deploy
@@ -29,9 +30,26 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Initialize deployment evidence
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          printf '{"status":"not_started"}\n' > artifacts/image-preflight.json
+          printf '{"status":"not_started"}\n' > artifacts/image-manifest.json
+          printf '{"status":"not_started"}\n' > artifacts/migration-verification.json
+          printf 'not_started\n' > artifacts/migration-verification.txt
+          printf '{"status":"not_started"}\n' > artifacts/readiness.json
+          printf 'not_started\n' > artifacts/readiness.txt
+          printf '{"status":"not_started"}\n' > artifacts/render-deploy.json
+          printf '{"status":"not_started"}\n' > artifacts/render-deploy-status.json
+          printf '{"status":"not_started"}\n' > artifacts/deployment-verification.json
+          printf 'not_started\n' > artifacts/supabase-rls.txt
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+
+      - uses: docker/setup-buildx-action@v3
 
       - name: Validate required production configuration
         shell: bash
@@ -43,11 +61,35 @@ jobs:
             fi
           done
 
+      - name: Authenticate to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve immutable backend image digest
+        shell: bash
+        run: |
+          image_tag="ghcr.io/gowrav-m/neuralops-api:${GITHUB_SHA}"
+          docker buildx imagetools inspect "$image_tag" --raw > artifacts/image-manifest.json
+          image_digest="$(docker buildx imagetools inspect "$image_tag" --format '{{.Digest}}')"
+          [[ "$image_digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          IMAGE_REFERENCE="ghcr.io/gowrav-m/neuralops-api@${image_digest}"
+          jq -n \
+            --arg source "$image_tag" \
+            --arg digest "$image_digest" \
+            --arg image "$IMAGE_REFERENCE" \
+            '{schemaVersion: 1, status: "verified", source: $source, digest: $digest, image: $image}' \
+            > artifacts/image-preflight.json
+          echo "IMAGE_REFERENCE=$IMAGE_REFERENCE" >> "$GITHUB_ENV"
+
       - name: Apply reviewed Supabase migration
         shell: bash
         run: |
           python -m pip install --disable-pip-version-check "psycopg[binary]>=3.2,<4"
           python - <<'PY'
+          import json
           import os
           from pathlib import Path
 
@@ -63,19 +105,41 @@ jobs:
                   )
                   if cursor.fetchone() != (True,):
                       raise SystemExit("credential hash index verification failed")
-          print("migration_verified=records_agent_identity_credential_hash_idx")
+
+          evidence = {
+              "schemaVersion": 1,
+              "migration": str(migration),
+              "status": "verified",
+              "verifiedIndex": "neuralops_private.records_agent_identity_credential_hash_idx",
+          }
+          Path("artifacts/migration-verification.json").write_text(
+              json.dumps(evidence, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          Path("artifacts/migration-verification.txt").write_text(
+              "migration_verified=records_agent_identity_credential_hash_idx\n",
+              encoding="utf-8",
+          )
           PY
 
       - name: Deploy immutable image to Render
         shell: bash
         run: |
-          mkdir -p artifacts
-          curl --fail-with-body --silent --show-error             --request POST             --url "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys"             --header "Authorization: Bearer ${RENDER_API_KEY}"             --header "Content-Type: application/json"             --data "{\"imageUrl\":\"ghcr.io/gowrav-m/neuralops-api:${GITHUB_SHA}\"}"             > artifacts/render-deploy.json
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys" \
+            --header "Authorization: Bearer ${RENDER_API_KEY}" \
+            --header "Content-Type: application/json" \
+            --data "{\"imageUrl\":\"${IMAGE_REFERENCE}\"}" \
+            > artifacts/render-deploy.json
 
           deploy_id="$(jq -r '.id // empty' artifacts/render-deploy.json)"
           test -n "$deploy_id"
           for attempt in {1..60}; do
-            curl --fail-with-body --silent --show-error               --url "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys/${deploy_id}"               --header "Authorization: Bearer ${RENDER_API_KEY}"               > artifacts/render-deploy-status.json
+            curl --fail-with-body --silent --show-error \
+              --url "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys/${deploy_id}" \
+              --header "Authorization: Bearer ${RENDER_API_KEY}" \
+              > artifacts/render-deploy-status.json
             status="$(jq -r '.status // empty' artifacts/render-deploy-status.json)"
             if [ "$status" = "live" ]; then
               break
@@ -94,6 +158,8 @@ jobs:
           for attempt in {1..18}; do
             if payload="$(curl --fail --silent --show-error "${NEURALOPS_DEPLOYED_API_URL}/ready")"; then
               echo "$payload" | jq -e '.ok == true and .storage == "postgres" and .startup == "ready"'
+              printf '%s\n' "$payload" > artifacts/readiness.json
+              printf 'readiness_verified=postgres\n' > artifacts/readiness.txt
               exit 0
             fi
             sleep 5
@@ -103,8 +169,7 @@ jobs:
 
       - name: Verify Supabase row-level security
         shell: bash
-        run: |
-          python backend/scripts/verify_supabase_rls.py > artifacts/supabase-rls.txt
+        run: python backend/scripts/verify_supabase_rls.py > artifacts/supabase-rls.txt
 
       - name: Run authenticated production acceptance
         shell: bash
@@ -116,8 +181,14 @@ jobs:
         with:
           name: production-deploy-${{ github.sha }}
           path: |
+            artifacts/image-preflight.json
+            artifacts/image-manifest.json
+            artifacts/migration-verification.json
+            artifacts/migration-verification.txt
+            artifacts/readiness.json
+            artifacts/readiness.txt
             artifacts/render-deploy*.json
             artifacts/deployment-verification.json
             artifacts/supabase-rls.txt
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
