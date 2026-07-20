@@ -8,7 +8,7 @@ It is an open-source control plane for teams building agents, LLM workflows, RAG
 
 ## Quick start
 
-Requirements: Node.js 18+ and Python 3.12+.
+Requirements: Node.js 20.19+ or 22.12+, and Python 3.12+.
 
 ```powershell
 npm install
@@ -85,12 +85,12 @@ npm run test:sdk
 npm run test:deployment
 npm run build
 python -m pytest backend
-npx playwright install chromium
+npx playwright install --with-deps chromium
 npm run test:e2e
 npm run test:e2e:landing
 ```
 
-The release-gate workflow also starts a local API, seeds bounded test evidence, and runs the CLI release gate. Passing these checks demonstrates only the checked behavior; it does not certify a deployment, provider, or security posture.
+The Linux CI workflow uses `npx playwright install --with-deps chromium`. On Windows, use `npx playwright install chromium` instead because Playwright does not support `--with-deps` there. The release-gate workflow also starts a local API, seeds bounded test evidence, and runs the CLI release gate. Passing these checks demonstrates only the checked behavior; it does not certify a deployment, provider, or security posture.
 
 ## Repository guide
 

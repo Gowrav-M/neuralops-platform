@@ -21,12 +21,12 @@ npm run test:sdk
 npm run test:deployment
 npm run build
 python -m pytest backend
-npx playwright install chromium
+npx playwright install --with-deps chromium
 npm run test:e2e
 npm run test:e2e:landing
 ```
 
-Run the smallest relevant test first, then the complete applicable set before requesting review. For a backend or authorization change, `python -m pytest backend` is required. For UI behavior, run the applicable Playwright commands as well. Do not describe a deployment, provider integration, or security property as verified unless you ran the relevant check against the relevant environment.
+The Linux CI workflow uses `npx playwright install --with-deps chromium`. On Windows, use `npx playwright install chromium` instead because Playwright does not support `--with-deps` there. Run the smallest relevant test first, then the complete applicable set before requesting review. For a backend or authorization change, `python -m pytest backend` is required. For UI behavior, run the applicable Playwright commands as well. Do not describe a deployment, provider integration, or security property as verified unless you ran the relevant check against the relevant environment.
 
 ## Pull requests
 
