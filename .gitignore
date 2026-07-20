@@ -39,5 +39,10 @@ playwright-report
 
 # Local Codex and deployment verification state
 .codex/
+.superpowers/
 .prod-login.tmp
 .vercel-env-check
+
+# Local operator integrations and private verification captures
+.mcp.json
+proof/
