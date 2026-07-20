@@ -8,6 +8,18 @@ It is an open-source control plane for teams building agents, LLM workflows, RAG
 
 ## Quick start
 
+Requirements: Docker Desktop with Docker Compose.
+
+```powershell
+git clone https://github.com/Gowrav-M/neuralops-platform.git
+cd neuralops-platform
+docker compose up --build
+```
+
+Open http://localhost:5173. The API is available only on http://localhost:8000 and stores local SQLite data in a Docker named volume. This local stack disables authentication and outbound connector/GitHub delivery, uses no provider keys, and is for evaluation rather than public deployment. Press `Ctrl+C` to stop it; use `docker compose down` to remove containers while retaining the local database volume.
+
+### Native development alternative
+
 Requirements: Node.js 20.19+ or 22.12+, and Python 3.12+.
 
 ```powershell
