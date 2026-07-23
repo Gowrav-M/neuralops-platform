@@ -17,13 +17,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     env:
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-      RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
-      NEURALOPS_DEPLOYED_API_URL: ${{ vars.NEURALOPS_DEPLOYED_API_URL }}
-      NEURALOPS_DEPLOYED_FRONTEND_URL: ${{ vars.NEURALOPS_DEPLOYED_FRONTEND_URL }}
-      NEURALOPS_QA_AUTH_TOKEN: ${{ secrets.NEURALOPS_QA_AUTH_TOKEN }}
-      NEURALOPS_WORKSPACE_ID: ${{ secrets.NEURALOPS_QA_WORKSPACE_ID }}
       NEURALOPS_DEPLOYMENT_EVIDENCE_PATH: artifacts/deployment-verification.json
       NEURALOPS_DEPLOYED_FAIL_ON: block
 
@@ -49,9 +42,17 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3
 
       - name: Validate required production configuration
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+          NEURALOPS_DEPLOYED_API_URL: ${{ vars.NEURALOPS_DEPLOYED_API_URL }}
+          NEURALOPS_DEPLOYED_FRONTEND_URL: ${{ vars.NEURALOPS_DEPLOYED_FRONTEND_URL }}
+          NEURALOPS_QA_AUTH_TOKEN: ${{ secrets.NEURALOPS_QA_AUTH_TOKEN }}
+          NEURALOPS_WORKSPACE_ID: ${{ secrets.NEURALOPS_QA_WORKSPACE_ID }}
         shell: bash
         run: |
           for name in DATABASE_URL RENDER_API_KEY RENDER_SERVICE_ID NEURALOPS_DEPLOYED_API_URL NEURALOPS_DEPLOYED_FRONTEND_URL NEURALOPS_QA_AUTH_TOKEN NEURALOPS_WORKSPACE_ID; do
@@ -62,7 +63,7 @@ jobs:
           done
 
       - name: Authenticate to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -85,6 +86,8 @@ jobs:
           echo "IMAGE_REFERENCE=$IMAGE_REFERENCE" >> "$GITHUB_ENV"
 
       - name: Apply reviewed Supabase migration
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         shell: bash
         run: |
           python -m pip install --disable-pip-version-check "psycopg[binary]>=3.2,<4"
@@ -123,6 +126,9 @@ jobs:
           PY
 
       - name: Deploy immutable image to Render
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
         shell: bash
         run: |
           curl --fail-with-body --silent --show-error \
@@ -153,6 +159,8 @@ jobs:
           test "$status" = "live"
 
       - name: Verify Render Postgres readiness
+        env:
+          NEURALOPS_DEPLOYED_API_URL: ${{ vars.NEURALOPS_DEPLOYED_API_URL }}
         shell: bash
         run: |
           for attempt in {1..18}; do
@@ -168,10 +176,17 @@ jobs:
           exit 1
 
       - name: Verify Supabase row-level security
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         shell: bash
         run: python backend/scripts/verify_supabase_rls.py > artifacts/supabase-rls.txt
 
       - name: Run authenticated production acceptance
+        env:
+          NEURALOPS_DEPLOYED_API_URL: ${{ vars.NEURALOPS_DEPLOYED_API_URL }}
+          NEURALOPS_DEPLOYED_FRONTEND_URL: ${{ vars.NEURALOPS_DEPLOYED_FRONTEND_URL }}
+          NEURALOPS_QA_AUTH_TOKEN: ${{ secrets.NEURALOPS_QA_AUTH_TOKEN }}
+          NEURALOPS_WORKSPACE_ID: ${{ secrets.NEURALOPS_QA_WORKSPACE_ID }}
         shell: bash
         run: node scripts/verify-deployment.mjs
 

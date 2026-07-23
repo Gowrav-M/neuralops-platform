@@ -18,6 +18,26 @@ function assertBefore(content, earlier, later) {
   assert.ok(earlierIndex < laterIndex, `${earlier} must precede ${later}`);
 }
 
+function stepBlock(workflow, stepName) {
+  const start = workflow.indexOf(`- name: ${stepName}`);
+  assert.notEqual(start, -1, `missing step ${stepName}`);
+  const next = workflow.indexOf('\n      - ', start + 1);
+  return workflow.slice(start, next === -1 ? undefined : next);
+}
+
+function assertThirdPartyActionsAreImmutable(workflow) {
+  const uses = [...workflow.matchAll(/^\s*(?:-\s+)?uses:\s*([^\s#]+)(?:\s+#.*)?$/gm)];
+  assert.ok(uses.length > 0, 'expected workflow actions');
+  for (const match of uses) {
+    const reference = match[1];
+    const [action] = reference.split('@');
+    if (action.startsWith('actions/') || action.startsWith('github/')) {
+      continue;
+    }
+    assert.match(reference, /@[a-f0-9]{40}$/i, `third-party action must be SHA-pinned: ${reference}`);
+  }
+}
+
 test('public CI and release automation keeps protected contexts and supply-chain controls', async () => {
   const [ci, gate, backendImage, codeql, dependencyReview, dependabot] = await Promise.all([
     readRepositoryFile('.github/workflows/ci.yml'),
@@ -57,7 +77,9 @@ test('public CI and release automation keeps protected contexts and supply-chain
   assert.match(dependabot, /package-ecosystem: docker\s+directory: \/backend/);
 
   assert.match(backendImage, /github\.repository == 'Gowrav-M\/neuralops-platform'/);
-  assert.match(backendImage, /docker\/build-push-action@v6/);
+  assert.match(backendImage, /docker\/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435\s+# v3/);
+  assert.match(backendImage, /docker\/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83\s+# v6/);
+  assert.match(backendImage, /docker\/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567\s+# v3/);
   assert.doesNotMatch(backendImage, /\n    paths:/);
   assert.match(backendImage, /Validate version tag before publishing/);
   assert.match(backendImage, /\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$/);
@@ -66,6 +88,7 @@ test('public CI and release automation keeps protected contexts and supply-chain
   assert.match(backendImage, /exit-code:\s*['\"]?1/);
   assert.match(backendImage, /severity:\s*HIGH,CRITICAL/);
   assertBefore(backendImage, 'Validate version tag before publishing', 'Authenticate to GitHub Container Registry');
+  assertThirdPartyActionsAreImmutable(backendImage);
   assert.doesNotMatch(backendImage, /RENDER_API_KEY|DATABASE_URL|verify-deployment|migration/i);
 });
 
@@ -106,6 +129,23 @@ test('production deployment is owner-only and release publishing is tag-driven a
   assert.match(production, /if-no-files-found:\s*error/);
   assert.match(production, /retention-days:/);
   assertBefore(production, 'Resolve immutable backend image digest', 'Apply reviewed Supabase migration');
+  const deploymentJobHeader = production.slice(production.indexOf('  deploy:'), production.indexOf('\n    steps:'));
+  assert.doesNotMatch(deploymentJobHeader, /secrets\./);
+  assert.match(stepBlock(production, 'Validate required production configuration'), /secrets\.DATABASE_URL/);
+  assert.match(stepBlock(production, 'Validate required production configuration'), /secrets\.RENDER_API_KEY/);
+  assert.match(stepBlock(production, 'Apply reviewed Supabase migration'), /secrets\.DATABASE_URL/);
+  assert.doesNotMatch(stepBlock(production, 'Apply reviewed Supabase migration'), /RENDER_API_KEY|NEURALOPS_QA_AUTH_TOKEN/);
+  assert.match(stepBlock(production, 'Deploy immutable image to Render'), /secrets\.RENDER_API_KEY/);
+  assert.match(stepBlock(production, 'Deploy immutable image to Render'), /secrets\.RENDER_SERVICE_ID/);
+  assert.match(stepBlock(production, 'Verify Supabase row-level security'), /secrets\.DATABASE_URL/);
+  const acceptance = stepBlock(production, 'Run authenticated production acceptance');
+  assert.match(acceptance, /secrets\.NEURALOPS_QA_AUTH_TOKEN/);
+  assert.match(acceptance, /secrets\.NEURALOPS_QA_WORKSPACE_ID/);
+  assert.match(acceptance, /NEURALOPS_DEPLOYED_API_URL/);
+  assert.match(acceptance, /NEURALOPS_DEPLOYED_FRONTEND_URL/);
+  assert.match(production, /docker\/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435\s+# v3/);
+  assert.match(production, /docker\/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567\s+# v3/);
+  assertThirdPartyActionsAreImmutable(production);
 
   assert.match(release, /tags:\s*\[v\*\]/);
   assert.match(release, /v\[0-9\]/);
@@ -123,6 +163,9 @@ test('production deployment is owner-only and release publishing is tag-driven a
   for (const subject of attestedSubjects) {
     assert.match(release, new RegExp(`subject-path: ${subject.replaceAll('.', '\\.')}`));
   }
+  assert.match(release, /docker\/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435\s+# v3/);
+  assert.match(release, /docker\/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83\s+# v6/);
+  assertThirdPartyActionsAreImmutable(release);
   assert.doesNotMatch(release, /deploy-production/i);
   assert.doesNotMatch(release, /pull_request_target:/);
 
