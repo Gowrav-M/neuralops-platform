@@ -1,0 +1,153 @@
+name: Publish Release
+
+on:
+  push:
+    tags: [v*]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    if: github.repository == 'Gowrav-M/neuralops-platform'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Validate semantic version tag and package metadata
+        shell: bash
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "${GITHUB_REF_NAME#v}" = "$(node -p "require('./package.json').version")"
+          test "$(node -p "require('./package.json').license")" = "Apache-2.0"
+          grep -q 'Apache License' LICENSE
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          python -m pip install --disable-pip-version-check -r backend/requirements.txt
+
+      - name: Run release quality gates
+        run: |
+          npm audit --audit-level=high
+          npm run lint
+          npm run test:sdk
+          npm run test:deployment
+          npm run build
+          python -m pytest backend
+
+  build-release:
+    needs: quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3
+
+      - name: Build frontend release artifact
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+          mkdir -p artifacts
+          tar -C dist -czf artifacts/neuralops-frontend.tar.gz .
+
+      - name: Build backend release image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          load: true
+          push: false
+          tags: neuralops-api:${{ github.sha }}
+
+      - name: Fail on high or critical release image vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: neuralops-api:${{ github.sha }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+
+      - name: Export backend release image
+        shell: bash
+        run: docker save neuralops-api:${GITHUB_SHA} | gzip -n > artifacts/neuralops-backend-image.tar.gz
+
+      - name: Generate backend SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: neuralops-api:${{ github.sha }}
+          format: spdx-json
+          output-file: artifacts/neuralops-backend.spdx.json
+
+      - name: Generate release checksums
+        shell: bash
+        run: |
+          cd artifacts
+          sha256sum neuralops-frontend.tar.gz neuralops-backend-image.tar.gz neuralops-backend.spdx.json > SHA256SUMS
+
+      - name: Attest frontend release artifact
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: artifacts/neuralops-frontend.tar.gz
+
+      - name: Attest backend image release artifact
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: artifacts/neuralops-backend-image.tar.gz
+
+      - name: Attest backend SBOM
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: artifacts/neuralops-backend.spdx.json
+
+      - name: Attest release checksums
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: artifacts/SHA256SUMS
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-assets-${{ github.ref_name }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v6
+        with:
+          name: release-assets-${{ github.ref_name }}
+          path: artifacts
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@c12583777ecdfd3be55c69cf75464299dc01057e # v3
+        with:
+          generate_release_notes: true
+          files: artifacts/*

@@ -1,0 +1,24 @@
+name: Good first issue proposal
+description: Suggest a bounded contribution suitable for a new contributor.
+title: "[Good first issue]: "
+labels: [good first issue]
+body:
+  - type: textarea
+    id: scope
+    attributes:
+      label: Bounded scope
+      description: Identify affected files, expected behavior, and what is out of scope.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: List tests or observable checks that demonstrate completion.
+    validations:
+      required: true
+  - type: textarea
+    id: mentor
+    attributes:
+      label: Maintainer context
+      description: Add links or context a contributor will need.

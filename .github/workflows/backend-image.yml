@@ -3,12 +3,7 @@ name: Build Backend Image
 on:
   push:
     branches: [main]
-    paths:
-      - backend/**
-      - scripts/deployment-verifier.mjs
-      - scripts/verify-deployment.mjs
-      - supabase/migrations/**
-      - .github/workflows/backend-image.yml
+    tags: [v*]
   workflow_dispatch:
 
 permissions:
@@ -17,136 +12,61 @@ permissions:
 
 jobs:
   build:
+    if: github.repository == 'Gowrav-M/neuralops-platform'
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-node@v6
         with:
-          python-version: "3.12"
+          node-version: 22
+          cache: npm
 
-      - uses: docker/setup-buildx-action@v3
+      - name: Validate version tag before publishing
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            test "${GITHUB_REF_NAME#v}" = "$(node -p "require('./package.json').version")"
+          fi
 
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3
+
+      - name: Build backend image locally for scanning
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          load: true
+          push: false
+          tags: ghcr.io/gowrav-m/neuralops-api:${{ github.sha }}
+
+      - name: Fail on high or critical image vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/gowrav-m/neuralops-api:${{ github.sha }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+
+      - name: Authenticate to GitHub Container Registry
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: backend/Dockerfile
-          push: true
-          tags: |
-            ghcr.io/gowrav-m/neuralops-api:latest
-            ghcr.io/gowrav-m/neuralops-api:${{ github.sha }}
-
-      - name: Apply reviewed Supabase migration
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: Push scanned backend image
         shell: bash
         run: |
-          test -n "$DATABASE_URL"
-          python -m pip install --disable-pip-version-check "psycopg[binary]>=3.2,<4"
-          python - <<'PY'
-          import os
-          from pathlib import Path
-
-          import psycopg
-
-          migration = Path("supabase/migrations/20260715225812_add_agent_credential_hash_index.sql")
-          sql = migration.read_text(encoding="utf-8")
-          with psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=10) as connection:
-              with connection.cursor() as cursor:
-                  cursor.execute(sql)
-                  cursor.execute(
-                      "select to_regclass('neuralops_private.records_agent_identity_credential_hash_idx') is not null"
-                  )
-                  if cursor.fetchone() != (True,):
-                      raise SystemExit("credential hash index verification failed")
-          print("migration_verified=records_agent_identity_credential_hash_idx")
-          PY
-
-      - name: Deploy immutable image to Render
-        env:
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          RENDER_SERVICE_ID: srv-d8go5pu47okc7380fbr0
-        shell: bash
-        run: |
-          mkdir -p artifacts
-          test -n "$RENDER_API_KEY"
-          curl --fail-with-body --silent --show-error \
-            --request POST \
-            --url "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys" \
-            --header "Authorization: Bearer ${RENDER_API_KEY}" \
-            --header "Content-Type: application/json" \
-            --data "{\"imageUrl\":\"ghcr.io/gowrav-m/neuralops-api:${GITHUB_SHA}\"}" \
-            > artifacts/render-deploy.json
-
-          deploy_id="$(jq -r '.id // empty' artifacts/render-deploy.json)"
-          test -n "$deploy_id"
-          for attempt in {1..60}; do
-            curl --fail-with-body --silent --show-error \
-              --url "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys/${deploy_id}" \
-              --header "Authorization: Bearer ${RENDER_API_KEY}" \
-              > artifacts/render-deploy-status.json
-            status="$(jq -r '.status // empty' artifacts/render-deploy-status.json)"
-            if [ "$status" = "live" ]; then
-              exit 0
-            fi
-            if [[ "$status" == *failed ]] || [ "$status" = "canceled" ]; then
-              jq '{id,status,createdAt,finishedAt}' artifacts/render-deploy-status.json
-              exit 1
-            fi
-            sleep 5
-          done
-          echo "Render deploy did not become live within five minutes."
-          exit 1
-
-      - name: Verify Render database readiness
-        shell: bash
-        run: |
-          for attempt in {1..18}; do
-            if payload="$(curl --fail --silent --show-error https://neuralops-api.onrender.com/ready)"; then
-              echo "$payload" | jq -e '.ok == true and .storage == "postgres" and .startup == "ready"'
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "Render backend did not report Postgres readiness within the communicated 90-second window."
-          exit 1
-
-      - name: Verify Supabase row-level security
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        shell: bash
-        run: |
-          test -n "$DATABASE_URL"
-          python backend/scripts/verify_supabase_rls.py | tee artifacts/supabase-rls.txt
-
-      - name: Run authenticated production acceptance
-        env:
-          NEURALOPS_DEPLOYED_API_URL: https://neuralops-api.onrender.com
-          NEURALOPS_DEPLOYED_FRONTEND_URL: https://neuralops-platform.vercel.app
-          NEURALOPS_QA_AUTH_TOKEN: ${{ secrets.NEURALOPS_QA_AUTH_TOKEN }}
-          NEURALOPS_WORKSPACE_ID: ${{ secrets.NEURALOPS_QA_WORKSPACE_ID }}
-          NEURALOPS_DEPLOYMENT_EVIDENCE_PATH: artifacts/deployment-verification.json
-          NEURALOPS_DEPLOYED_FAIL_ON: block
-        shell: bash
-        run: |
-          test -n "$NEURALOPS_QA_AUTH_TOKEN"
-          test -n "$NEURALOPS_WORKSPACE_ID"
-          node scripts/verify-deployment.mjs
-
-      - name: Upload Render deployment evidence
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: render-deploy-${{ github.sha }}
-          path: |
-            artifacts/render-deploy*.json
-            artifacts/deployment-verification.json
-            artifacts/supabase-rls.txt
-          if-no-files-found: error
-          retention-days: 30
+          docker push "ghcr.io/gowrav-m/neuralops-api:${GITHUB_SHA}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            docker tag "ghcr.io/gowrav-m/neuralops-api:${GITHUB_SHA}" "ghcr.io/gowrav-m/neuralops-api:${GITHUB_REF_NAME}"
+            docker push "ghcr.io/gowrav-m/neuralops-api:${GITHUB_REF_NAME}"
+          elif [ "${GITHUB_REF_NAME}" = "main" ]; then
+            docker tag "ghcr.io/gowrav-m/neuralops-api:${GITHUB_SHA}" "ghcr.io/gowrav-m/neuralops-api:latest"
+            docker push "ghcr.io/gowrav-m/neuralops-api:latest"
+          fi
