@@ -8,6 +8,7 @@ permissions:
 
 jobs:
   dependency-review:
+    if: github.event.repository.private == false
     runs-on: ubuntu-latest
     steps:
       - name: Review dependency changes
