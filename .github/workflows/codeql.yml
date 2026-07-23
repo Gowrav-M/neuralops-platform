@@ -14,6 +14,9 @@ permissions:
 
 jobs:
   analyze:
+    # Code scanning uploads require GitHub Advanced Security for private repositories.
+    # Run automatically once this repository is public, where CodeQL is available.
+    if: github.event.repository.private == false
     name: CodeQL (${{ matrix.language }})
     runs-on: ubuntu-latest
     strategy:
