@@ -141,7 +141,7 @@ jobs:
       contents: write
     steps:
       - name: Download release assets
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: release-assets-${{ github.ref_name }}
           path: artifacts
