@@ -10,6 +10,7 @@ import {
   wrapOpenAI,
 } from '../../sdk/javascript/index.js';
 import { runCli } from '../../sdk/javascript/bin/neuralops.mjs';
+import { guardMcpTool } from '../../sdk/javascript/mcp.js';
 
 test('JavaScript SDK routes chat completions through NeuralOps Gateway', async () => {
   const calls = [];
@@ -1000,6 +1001,187 @@ test('JavaScript agent control fails closed when retries are exhausted', async (
   assert.equal(attempts, 2);
 });
 
+test('JavaScript agent privacy policy lookup returns only its mode for the bound identity', async () => {
+  let call;
+  const client = new NeuralOps({
+    agentCredential: 'nop_agent_private',
+    baseUrl: 'https://neuralops.example',
+    fetchImpl: async (url, options) => {
+      call = { url, options };
+      return jsonResponse(200, { mode: 'redacted_preview', updatedAt: 'private timestamp', updatedBy: 'private operator' });
+    },
+  });
+
+  assert.deepEqual(await client.getApprovalPreviewPolicy('agent/a'), { mode: 'redacted_preview' });
+  assert.equal(call.url, 'https://neuralops.example/api/agent-control/agent-privacy-policy/agent%2Fa');
+  assert.equal(call.options.method, 'GET');
+  assert.equal(call.options.headers['x-neuralops-agent-key'], 'nop_agent_private');
+});
+
+test('MCP adapter consumes an action-bound lease before invoking the real tool handler', async () => {
+  const calls = [];
+  const client = {
+    getApprovalPreviewPolicy: async (identityId) => {
+      calls.push(['policy', identityId]);
+      return { mode: 'metadata_only' };
+    },
+    authorizeAction: async (metadata) => {
+      calls.push(['authorize', metadata]);
+      return { id: 'lease_mcp_1' };
+    },
+    consumeLease: async (metadata) => {
+      calls.push(['consume', metadata]);
+      return { status: 'consumed' };
+    },
+  };
+  const args = { path: '/tmp/demo.txt', content: 'sensitive body' };
+  let handlerCalls = 0;
+  const handler = guardMcpTool(client, {
+    identityId: 'agent_demo',
+    toolName: 'write_file',
+    action: AGENT_ACTIONS.WRITE,
+    toolCategory: AGENT_TOOL_CATEGORIES.WRITE,
+    provider: 'mcp',
+    environment: 'dev',
+  }, async (input) => {
+    handlerCalls += 1;
+    return { content: [{ type: 'text', text: `wrote ${input.path}` }] };
+  });
+
+  const result = await handler(args);
+
+  assert.equal(result.content[0].text, 'wrote /tmp/demo.txt');
+  assert.equal(handlerCalls, 1);
+  assert.deepEqual(calls.map(([kind]) => kind), ['policy', 'authorize', 'consume']);
+  const authorization = calls[1][1];
+  assert.match(authorization.contextHash, /^sha256:[a-f0-9]{64}$/);
+  assert.match(authorization.contentHash, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(JSON.stringify(authorization).includes('sensitive body'), false);
+  assert.equal(Object.hasOwn(authorization, 'approvalPreview'), false);
+  assert.equal(calls[2][1].leaseId, 'lease_mcp_1');
+  assert.equal(handlerCalls, 1);
+});
+
+test('MCP adapter fails closed on approval-required and never calls the tool', async () => {
+  let handlerCalls = 0;
+  const handler = guardMcpTool({
+    getApprovalPreviewPolicy: async () => ({ mode: 'metadata_only' }),
+    authorizeAction: async () => {
+      throw Object.assign(new Error('approval required'), { code: 'approval_required' });
+    },
+    consumeLease: async () => assert.fail('lease must not be consumed'),
+  }, {
+    identityId: 'agent_demo',
+    toolName: 'publish_message',
+    action: AGENT_ACTIONS.EXTERNAL_POST,
+    toolCategory: AGENT_TOOL_CATEGORIES.EXTERNAL_POST,
+    provider: 'mcp',
+    environment: 'dev',
+  }, async () => {
+    handlerCalls += 1;
+  });
+
+  await assert.rejects(handler({ destination: 'external', text: 'private' }), { code: 'approval_required' });
+  assert.equal(handlerCalls, 0);
+});
+
+test('MCP adapter reuses the pending idempotency key after approval and rotates it after execution', async () => {
+  const authorized = [];
+  const consumed = [];
+  let approved = false;
+  let handlerCalls = 0;
+  const handler = guardMcpTool({
+    getApprovalPreviewPolicy: async () => ({ mode: 'metadata_only' }),
+    authorizeAction: async (metadata) => {
+      authorized.push(metadata.idempotencyKey);
+      if (!approved) {
+        throw Object.assign(new Error('approval required'), {
+          code: 'approval_required', idempotencyKey: metadata.idempotencyKey,
+        });
+      }
+      return { id: `lease_${authorized.length}` };
+    },
+    consumeLease: async (metadata) => consumed.push(metadata.leaseId),
+  }, {
+    identityId: 'agent_demo',
+    toolName: 'write_file',
+    action: AGENT_ACTIONS.WRITE,
+    toolCategory: AGENT_TOOL_CATEGORIES.WRITE,
+    provider: 'mcp',
+    environment: 'dev',
+  }, async () => {
+    handlerCalls += 1;
+    return 'executed';
+  });
+
+  const args = { path: '/reports/approved.txt' };
+  await assert.rejects(handler(args), { code: 'approval_required' });
+  approved = true;
+  assert.equal(await handler(args), 'executed');
+  assert.equal(await handler(args), 'executed');
+
+  assert.equal(authorized[0], authorized[1]);
+  assert.notEqual(authorized[1], authorized[2]);
+  assert.deepEqual(consumed, ['lease_2', 'lease_3']);
+  assert.equal(handlerCalls, 2);
+});
+
+test('MCP adapter sends only caller-redacted preview when workspace policy enables it', async () => {
+  let submitted;
+  let handlerCalls = 0;
+  const handler = guardMcpTool({
+    getApprovalPreviewPolicy: async () => ({ mode: 'redacted_preview' }),
+    authorizeAction: async (metadata) => {
+      submitted = metadata;
+      return { id: 'lease_redacted' };
+    },
+    consumeLease: async () => ({ status: 'consumed' }),
+  }, {
+    identityId: 'agent_demo',
+    toolName: 'write_file',
+    action: AGENT_ACTIONS.WRITE,
+    toolCategory: AGENT_TOOL_CATEGORIES.WRITE,
+    provider: 'mcp',
+    environment: 'dev',
+    createApprovalPreview: (args) => ({ summary: 'Write approved report', resource: args.path, impact: 'One file' }),
+  }, async () => {
+    handlerCalls += 1;
+    return 'done';
+  });
+
+  assert.equal(await handler({ path: '/reports/q3.txt', content: 'raw secret' }), 'done');
+  assert.deepEqual(submitted.approvalPreview, {
+    summary: 'Write approved report', resource: '/reports/q3.txt', impact: 'One file',
+  });
+  assert.equal(JSON.stringify(submitted).includes('raw secret'), false);
+  assert.equal(handlerCalls, 1);
+});
+
+test('MCP adapter sanitizes preview callback errors and does not leak argument content', async () => {
+  let handlerCalls = 0;
+  const handler = guardMcpTool({
+    getApprovalPreviewPolicy: async () => ({ mode: 'redacted_preview' }),
+    authorizeAction: async () => assert.fail('invalid preview must prevent authorization'),
+    consumeLease: async () => assert.fail('invalid preview must prevent lease consumption'),
+  }, {
+    identityId: 'agent_demo',
+    toolName: 'write_file',
+    action: AGENT_ACTIONS.WRITE,
+    toolCategory: AGENT_TOOL_CATEGORIES.WRITE,
+    provider: 'mcp',
+    environment: 'dev',
+    createApprovalPreview: () => { throw new Error('raw secret from callback'); },
+  }, async () => {
+    handlerCalls += 1;
+  });
+
+  await assert.rejects(handler({ content: 'raw secret' }), (error) => (
+    error.code === 'invalid_metadata'
+    && !error.message.includes('raw secret')
+  ));
+  assert.equal(handlerCalls, 0);
+});
+
 test('JavaScript agent control enforces the elapsed retry deadline when fetch hangs', async () => {
   const client = new NeuralOps({
     agentCredential: 'nop_agent_secret_value',
@@ -1021,11 +1203,21 @@ test('JavaScript agent control enforces the elapsed retry deadline when fetch ha
 test('JavaScript exports the backend canonical agent action contract', () => {
   assert.deepEqual(AGENT_ACTIONS, {
     METADATA_READ: 'metadata_read',
+    WRITE: 'write',
     SHELL: 'shell',
+    BROWSER: 'browser',
+    EXTERNAL_POST: 'external_post',
+    SECRET: 'secret',
+    DESTRUCTIVE: 'destructive',
   });
   assert.deepEqual(AGENT_TOOL_CATEGORIES, {
     METADATA: 'metadata',
+    WRITE: 'write',
     SHELL: 'shell',
+    BROWSER: 'browser',
+    EXTERNAL_POST: 'external_post',
+    SECRET: 'secret',
+    DESTRUCTIVE: 'destructive',
   });
 });
 

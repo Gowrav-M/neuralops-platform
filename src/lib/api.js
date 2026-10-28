@@ -619,6 +619,19 @@ export function fetchAgentLeases() {
   return request('/api/agent-control/leases');
 }
 
+export function fetchAgentPrivacyPolicy() {
+  return request('/api/agent-control/privacy-policy');
+}
+
+export function updateAgentPrivacyPolicy(mode) {
+  return request('/api/agent-control/privacy-policy', {
+    method: 'PATCH',
+    headers: { 'Idempotency-Key': `agent-preview-policy:${mode}` },
+    body: JSON.stringify({ mode }),
+    retryWithIdempotency: true,
+  });
+}
+
 function decideAgentApproval(approvalId, decision, payload) {
   return request(`/api/agent-control/approvals/${approvalId}/${decision}`, {
     method: 'POST',

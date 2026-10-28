@@ -38,6 +38,11 @@ const approval = {
   requestedBy: 'developer@pilot.test',
   createdAt: '2026-07-16T00:00:00',
   expiresAt: '2026-07-17T00:00:00',
+  preview: {
+    summary: 'Publish the approved release note',
+    resource: 'release-notes.md',
+    impact: 'One public document',
+  },
 };
 
 const productionRequest = {
@@ -72,7 +77,7 @@ const lease = {
   policyFindings: [],
 };
 
-async function mockCommandCenter(page, { identityFailures = 0, identityFailureStatus = 503, approvalFailures = 0 } = {}) {
+async function mockCommandCenter(page, { identityFailures = 0, identityFailureStatus = 503, approvalFailures = 0, privacyMode = 'metadata_only' } = {}) {
   const state = {
     identities: [{ ...identity }],
     approvals: [{ ...approval }],
@@ -82,6 +87,7 @@ async function mockCommandCenter(page, { identityFailures = 0, identityFailureSt
     killBody: null,
     identityAttempts: 0,
     decisionAttempts: [],
+    privacyPolicy: { mode: privacyMode, updatedAt: null, updatedBy: privacyMode === 'metadata_only' ? 'system' : 'owner@pilot.test' },
   };
 
   await page.route('**/api/agent-control/**', async (route) => {
@@ -96,6 +102,13 @@ async function mockCommandCenter(page, { identityFailures = 0, identityFailureSt
         return route.fulfill({ status: identityFailureStatus, json: { detail: identityFailureStatus === 401 ? `Authentication required\n${'x'.repeat(400)}` : 'Service is waking' } });
       }
       return route.fulfill({ json: state.identities });
+    }
+    if (path === '/api/agent-control/privacy-policy' && request.method() === 'GET') {
+      return route.fulfill({ json: state.privacyPolicy });
+    }
+    if (path === '/api/agent-control/privacy-policy' && request.method() === 'PATCH') {
+      state.privacyPolicy = { ...state.privacyPolicy, mode: body.mode, updatedBy: 'owner@pilot.test' };
+      return route.fulfill({ json: state.privacyPolicy });
     }
     if (path === '/api/agent-control/identities' && request.method() === 'POST') {
       const created = { ...identity, id: 'agent_identity_new', agentId: 'agent_identity_new', displayName: body.displayName, owner: body.owner };
@@ -175,12 +188,14 @@ test('onboards an external identity and reveals its credential once', async ({ p
 });
 
 test('approves a persisted high-risk request with review evidence', async ({ page }) => {
-  const state = await mockCommandCenter(page, { approvalFailures: 1 });
+  const state = await mockCommandCenter(page, { approvalFailures: 1, privacyMode: 'redacted_preview' });
   await openCommandCenter(page);
 
   const request = page.locator('[data-approval-id="agent_approval_shell"]');
   await expect(request).toContainText('deploy_release');
   await request.getByRole('button', { name: 'Review request' }).click();
+  await expect(page.getByText('Publish the approved release note')).toBeVisible();
+  await expect(page.getByText('One public document')).toBeVisible();
   await page.getByLabel('Decision reason').fill('Validated release evidence and exact tool boundary.');
   await page.getByLabel('Evidence hash').fill('ticket-42');
   await expect(page.getByText('Required format: sha256 followed by 64 lowercase hexadecimal characters.')).toBeVisible();
@@ -197,6 +212,19 @@ test('approves a persisted high-risk request with review evidence', async ({ pag
   expect(state.decisionAttempts).toHaveLength(2);
   expect(state.decisionAttempts[1].idempotencyKey).toBe(state.decisionAttempts[0].idempotencyKey);
   expect(state.decisionAttempts[1].body).toEqual(state.decisionAttempts[0].body);
+});
+
+test('workspace owner can enable redacted approval previews from the safe metadata-only default', async ({ page }) => {
+  const state = await mockCommandCenter(page);
+  await openCommandCenter(page);
+
+  const policy = page.getByLabel('Approval preview policy');
+  await expect(policy).toHaveValue('metadata_only');
+  await policy.selectOption('redacted_preview');
+
+  await expect(policy).toHaveValue('redacted_preview');
+  await expect(page.getByText(/switching back clears all pending preview content/i)).toBeVisible();
+  expect(state.privacyPolicy.mode).toBe('redacted_preview');
 });
 
 test('shows workspace lease posture without exposing action content', async ({ page }) => {

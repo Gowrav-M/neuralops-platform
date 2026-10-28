@@ -1190,6 +1190,30 @@ class AgentApprovalDecisionRequest(BaseModel):
     evidenceHash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
+class AgentApprovalPreview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, max_length=240)
+    resource: str | None = Field(default=None, min_length=1, max_length=160)
+    impact: str | None = Field(default=None, min_length=1, max_length=240)
+
+
+AgentPrivacyMode = Literal["metadata_only", "redacted_preview"]
+
+
+class AgentControlPrivacyPolicy(BaseModel):
+    mode: AgentPrivacyMode = "metadata_only"
+    updatedAt: str | None = None
+    updatedBy: str = "system"
+    workspaceId: str
+
+
+class AgentControlPrivacyPolicyPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: AgentPrivacyMode
+
+
 class AgentAuthorizeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1208,6 +1232,7 @@ class AgentAuthorizeRequest(BaseModel):
     costUsd: float | None = Field(default=None, ge=0, le=1_000_000)
     status: Literal["pending", "success", "error", "blocked"] | None = None
     policyFindings: list[Annotated[str, Field(min_length=1, max_length=240)]] = Field(default_factory=list, max_length=50)
+    approvalPreview: AgentApprovalPreview | None = None
 
 
 class AgentLeaseBindingRequest(AgentAuthorizeRequest):
@@ -1237,6 +1262,7 @@ class AgentApproval(BaseModel):
     evidenceHash: str | None = None
     reviewedAt: str | None = None
     consumedAt: str | None = None
+    preview: AgentApprovalPreview | None = None
 
 
 class AgentAuthorizationLease(BaseModel):

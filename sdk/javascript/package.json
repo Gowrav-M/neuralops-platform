@@ -1,21 +1,31 @@
 {
   "name": "@neuralops/sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Server-side JavaScript client for NeuralOps trace ingestion and policy-gateway model routing.",
   "main": "index.js",
   "exports": {
-    ".": "./index.js"
+    ".": "./index.js",
+    "./mcp": "./mcp.js"
   },
   "bin": {
     "neuralops": "./bin/neuralops.mjs"
   },
   "files": [
     "index.js",
+    "mcp.js",
     "bin/"
   ],
   "license": "Apache-2.0",
   "engines": {
     "node": ">=18"
+  },
+  "peerDependencies": {
+    "@modelcontextprotocol/server": "^2.4.0"
+  },
+  "peerDependenciesMeta": {
+    "@modelcontextprotocol/server": {
+      "optional": true
+    }
   }
 }

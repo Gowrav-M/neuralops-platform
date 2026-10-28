@@ -104,7 +104,10 @@ from .schemas import (
     AgentIdentityPatch,
     AgentLeaseBindingRequest,
     AgentControlReasonRequest,
+    AgentControlPrivacyPolicy,
+    AgentControlPrivacyPolicyPatch,
     AgentApproval,
+    AgentApprovalPreview,
     AgentApprovalDecisionRequest,
     AgentAuthorizationLease,
     AgentAuthorizeRequest,
@@ -385,6 +388,8 @@ AGENT_CREDENTIAL_RUNTIME_PATHS: set[tuple[str, str]] = {
     ("POST", "/api/agent-control/leases/consume"),
 }
 
+AGENT_PRIVACY_POLICY_AGENT_PATH_PREFIX = "/api/agent-control/agent-privacy-policy/"
+
 
 def workspace_for_agent_credential(credential: str | None) -> str:
     if not credential:
@@ -410,7 +415,11 @@ async def auth_gate(request: Request, call_next):
     token = None
     workspace_token = None
     try:
-        if (request.method, request.url.path) in AGENT_CREDENTIAL_RUNTIME_PATHS:
+        agent_policy_read = (
+            request.method == "GET"
+            and request.url.path.startswith(AGENT_PRIVACY_POLICY_AGENT_PATH_PREFIX)
+        )
+        if (request.method, request.url.path) in AGENT_CREDENTIAL_RUNTIME_PATHS or agent_policy_read:
             workspace_id = workspace_for_agent_credential(request.headers.get("x-neuralops-agent-key"))
             workspace_token = set_requested_workspace_id(workspace_id)
             return await call_next(request)
@@ -8268,6 +8277,36 @@ def require_agent_control_role(allowed_roles: set[str], action: str) -> None:
         raise HTTPException(status_code=403, detail=f"{user.role} cannot {action}")
 
 
+def agent_control_privacy_policy_record() -> dict[str, Any]:
+    saved = get_scoped_record("agent_control_privacy_policies", "current")
+    if saved is not None:
+        return saved
+    return {
+        "mode": "metadata_only",
+        "updatedAt": None,
+        "updatedBy": "system",
+        "workspaceId": current_workspace_id(),
+    }
+
+
+def agent_approval_preview_payload(preview: AgentApprovalPreview | None) -> dict[str, str] | None:
+    if preview is None:
+        return None
+    safe_preview = preview.model_dump(exclude_none=True)
+    secret_assignment = re.compile(
+        r"(?i)\b(api[_-]?key|access[_-]?token|password|secret|authorization)\b"
+        r"(\s*[:=]\s*)(?:(?:bearer|basic)\s+)?[^\s,;]+"
+    )
+    known_secret = re.compile(
+        r"(?i)\b(?:sk-(?:live-)?[A-Za-z0-9_-]{12,}|sk_live_[A-Za-z0-9]{12,}|"
+        r"ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})\b"
+    )
+    return {
+        key: known_secret.sub("[REDACTED]", secret_assignment.sub(r"\1\2[REDACTED]", value))
+        for key, value in safe_preview.items()
+    }
+
+
 def requested_agent_environment(identity: dict[str, Any], request: AgentAuthorizeRequest) -> str:
     environment = request.environment or (identity.get("environment") if identity.get("environment") != "all" else "staging")
     if environment not in {"prod", "staging", "dev"}:
@@ -8373,6 +8412,7 @@ def create_agent_approval(
             raise HTTPException(status_code=409, detail="Approval and authorization lease are single-use")
         return existing
     now = datetime.now()
+    preview = agent_approval_preview_payload(request.approvalPreview)
     workspace_id = current_workspace_id()
     approval_id = f"agent_approval_{sha256(f'{workspace_id}:{request.identityId}:{request.idempotencyKey}'.encode('utf-8')).hexdigest()[:16]}"
     approval = {
@@ -8393,6 +8433,7 @@ def create_agent_approval(
         "createdAt": now.isoformat(),
         "expiresAt": (now + timedelta(minutes=15)).isoformat(),
         "bindingHash": agent_action_content_hash(request, environment),
+        "preview": preview,
     }
     approval = stamp_workspace(approval)
     saved, created = insert_record_if_absent(
@@ -8459,6 +8500,56 @@ def create_agent_production_access_request(request: AgentProductionAccessRequest
 @app.get("/api/agents", response_model=list[AgentRuntime])
 def agents() -> list[AgentRuntime]:
     return [AgentRuntime.model_validate(item) for item in scoped_records("agents")]
+
+
+@app.get("/api/agent-control/privacy-policy", response_model=AgentControlPrivacyPolicy)
+def get_agent_control_privacy_policy() -> AgentControlPrivacyPolicy:
+    require_permission("workspace:read", "agent_control_privacy_policy.read")
+    return AgentControlPrivacyPolicy.model_validate(agent_control_privacy_policy_record())
+
+
+@app.patch("/api/agent-control/privacy-policy", response_model=AgentControlPrivacyPolicy)
+def patch_agent_control_privacy_policy(request: AgentControlPrivacyPolicyPatch) -> AgentControlPrivacyPolicy:
+    require_agent_control_role({"Owner", "Admin"}, "update agent preview privacy policy")
+    current = agent_control_privacy_policy_record()
+    if current.get("mode") == request.mode:
+        return AgentControlPrivacyPolicy.model_validate(current)
+
+    updated_at = datetime.now().isoformat()
+    payload = {
+        "mode": request.mode,
+        "updatedAt": updated_at,
+        "updatedBy": current_user_email(),
+        "workspaceId": current_workspace_id(),
+    }
+    saved = save_scoped_record("agent_control_privacy_policies", "current", payload)
+    purged_previews = 0
+    if request.mode == "metadata_only":
+        for approval in scoped_records("agent_approvals"):
+            if approval.get("preview") is not None:
+                approval["preview"] = None
+                save_scoped_record("agent_approvals", str(approval["id"]), approval)
+                purged_previews += 1
+    save_audit_event(
+        "agent.privacy_policy.update",
+        current_user_email(),
+        "workspace",
+        "allow",
+        f"Agent approval preview mode set to {request.mode}; cleared {purged_previews} stored previews.",
+    )
+    return AgentControlPrivacyPolicy.model_validate(saved)
+
+
+@app.get(
+    "/api/agent-control/agent-privacy-policy/{identity_id}",
+    response_model=AgentControlPrivacyPolicy,
+)
+def get_agent_privacy_policy_for_identity(
+    identity_id: str,
+    x_neuralops_agent_key: str | None = Header(default=None),
+) -> AgentControlPrivacyPolicy:
+    agent_credential_identity(x_neuralops_agent_key, identity_id)
+    return AgentControlPrivacyPolicy.model_validate(agent_control_privacy_policy_record())
 
 
 @app.get("/api/agent-control/identities", response_model=list[AgentIdentity])
@@ -8748,6 +8839,12 @@ def authorize_agent_action(request: AgentAuthorizeRequest, x_neuralops_agent_key
     identity = agent_credential_identity(x_neuralops_agent_key, request.identityId)
     now = datetime.now()
     risk, environment = validate_agent_action(identity, request)
+    if request.approvalPreview is not None:
+        privacy_policy = agent_control_privacy_policy_record()
+        if privacy_policy.get("mode") != "redacted_preview":
+            raise HTTPException(status_code=422, detail="Workspace policy does not allow approval previews")
+        if risk != "high":
+            raise HTTPException(status_code=422, detail="Approval previews are only accepted for high-risk actions")
     if request.action == "agent_run" and environment == "prod" and not request.model:
         raise HTTPException(status_code=422, detail="Production agent authorization requires an exact model")
     approval = approval_for_action(request, environment) if risk == "high" else None

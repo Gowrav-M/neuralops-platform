@@ -10,6 +10,7 @@ import {
   fetchAgentIdentities,
   fetchAgentJobs,
   fetchAgentLeases,
+  fetchAgentPrivacyPolicy,
   fetchAgentProductionAccessRequests,
   fetchAgentRuns,
   registerAgentIdentity,
@@ -18,6 +19,7 @@ import {
   revokeAgentIdentity,
   revokeAgentProductionAccess,
   rotateAgentIdentity,
+  updateAgentPrivacyPolicy,
 } from '../lib/api';
 
 const EMPTY_REGISTRATION = {
@@ -39,6 +41,7 @@ export default function Agents({ addToast }) {
   const [productionRequests, setProductionRequests] = useState([]);
   const [runs, setRuns] = useState([]);
   const [jobs, setJobs] = useState([]);
+  const [privacyPolicy, setPrivacyPolicy] = useState({ mode: 'metadata_only', updatedAt: null, updatedBy: 'system' });
   const [connectionState, setConnectionState] = useState('checking');
   const [registrationOpen, setRegistrationOpen] = useState(false);
   const [registration, setRegistration] = useState(EMPTY_REGISTRATION);
@@ -58,13 +61,14 @@ export default function Agents({ addToast }) {
 
     while (mounted.current) {
       try {
-        const [identityItems, approvalItems, leaseItems, accessItems, runItems, jobItems] = await Promise.all([
+        const [identityItems, approvalItems, leaseItems, accessItems, runItems, jobItems, previewPolicy] = await Promise.all([
           fetchAgentIdentities(),
           fetchAgentApprovals(),
           fetchAgentLeases(),
           fetchAgentProductionAccessRequests(),
           fetchAgentRuns(),
           fetchAgentJobs(),
+          fetchAgentPrivacyPolicy(),
         ]);
         if (!mounted.current) return false;
         setIdentities(identityItems);
@@ -73,6 +77,7 @@ export default function Agents({ addToast }) {
         setProductionRequests(accessItems);
         setRuns(runItems.slice(0, 12));
         setJobs(jobItems.slice(0, 12));
+        setPrivacyPolicy(previewPolicy);
         setConnectionState('ready');
         return true;
       } catch (error) {
@@ -222,6 +227,25 @@ export default function Agents({ addToast }) {
     }
   };
 
+  const savePrivacyPolicy = async (mode) => {
+    if (!['metadata_only', 'redacted_preview'].includes(mode) || mode === privacyPolicy.mode) return;
+    setBusy('privacy-policy');
+    try {
+      const saved = await updateAgentPrivacyPolicy(mode);
+      setPrivacyPolicy(saved);
+      addToast?.(
+        mode === 'metadata_only'
+          ? 'Metadata-only approval context is active. Stored previews were cleared.'
+          : 'Redacted approval previews are enabled for this workspace.',
+        'success',
+      );
+    } catch (error) {
+      addToast?.(`Privacy policy update failed: ${error.message}`, 'error');
+    } finally {
+      setBusy('');
+    }
+  };
+
   return (
     <main className="agent-command" aria-busy={['checking', 'warming'].includes(connectionState)}>
       <header className="agent-command__hero">
@@ -230,7 +254,7 @@ export default function Agents({ addToast }) {
           <h1 className="page-title">Agent Command Center</h1>
           <p className="page-subtitle">
             Register every agent, bound every tool call, and stop unsafe execution before it leaves your workspace.
-            Raw prompts, outputs, arguments, secrets, and files are not retained.
+            Authorization records store metadata and hashes by default; separate trace ingestion follows its own content and retention settings.
           </p>
         </div>
         <div className="agent-command__hero-actions">
@@ -246,6 +270,34 @@ export default function Agents({ addToast }) {
         <Metric label="Pending approvals" value={posture.pending} detail="High-risk actions fail closed" tone={posture.pending ? 'warning' : 'safe'} />
         <Metric label="Production approved" value={posture.productionApproved} detail="Owner or Admin decision" />
         <Metric label="Policy findings" value={posture.findings} detail="From recent persisted runs" tone={posture.findings ? 'danger' : 'safe'} />
+      </section>
+
+      <section className="agent-command__section agent-command__privacy-policy" aria-labelledby="agent-approval-privacy-title">
+        <div className="agent-command__section-heading">
+          <div>
+            <span className="agent-command__kicker">Approval evidence boundary</span>
+            <h2 id="agent-approval-privacy-title">Reviewer context policy</h2>
+          </div>
+          <label className="agent-command__policy-select">
+            <select
+              aria-label="Approval preview policy"
+              value={privacyPolicy.mode}
+              onChange={(event) => savePrivacyPolicy(event.target.value)}
+              disabled={busy === 'privacy-policy' || connectionState !== 'ready'}
+            >
+              <option value="metadata_only">Metadata only</option>
+              <option value="redacted_preview">Redacted preview</option>
+            </select>
+          </label>
+        </div>
+        <div className="agent-command__privacy-policy-copy">
+          {privacyPolicy.mode === 'metadata_only' ? (
+            <p><strong>Default, strongest privacy.</strong> Approval records retain action metadata and hashes only. Tool arguments are hashed locally and are not sent for preview.</p>
+          ) : (
+            <p><strong>Redacted review context enabled.</strong> SDK integrations may submit a short summary, resource, and impact after the workspace chooses this mode. Switching back clears all pending preview content.</p>
+          )}
+          <span>{privacyPolicy.updatedAt ? `Updated by ${privacyPolicy.updatedBy} · ${formatTime(privacyPolicy.updatedAt)}` : 'Workspace default · metadata only'}</span>
+        </div>
       </section>
 
       <section className="agent-command__section" aria-labelledby="identity-posture-title">
@@ -431,7 +483,7 @@ export default function Agents({ addToast }) {
             </div>
             <label>Allowed providers<input aria-label="Allowed providers" required value={registration.providerAccess} onChange={(event) => setRegistration({ ...registration, providerAccess: event.target.value })} /><small>Comma-separated provider IDs. Provider keys are never entered here.</small></label>
             <label>Allowed permissions<textarea aria-label="Allowed permissions" required value={registration.permissions} onChange={(event) => setRegistration({ ...registration, permissions: event.target.value })} /><small>Grant the smallest exact tool scopes this agent needs.</small></label>
-            <div className="agent-command__privacy-note"><strong>Metadata-only by default.</strong> NeuralOps stores IDs, timing, totals, status, findings, and hashes — not prompts, outputs, tool arguments, secrets, or files.</div>
+            <div className="agent-command__privacy-note"><strong>Authorization metadata only by default.</strong> Agent-control records store identity/action metadata and hashes, not raw tool arguments. Separate trace ingestion has its own content and retention settings.</div>
             <div className="agent-command__modal-actions"><button type="button" onClick={() => setRegistrationOpen(false)}>Cancel</button><button className="primary" disabled={busy === 'register'}>{busy === 'register' ? 'Issuing…' : 'Issue one-time credential'}</button></div>
           </form>
         </Modal>
@@ -455,6 +507,14 @@ export default function Agents({ addToast }) {
             <strong>{decisionTarget.record.operation || identityName(identities, decisionTarget.record.agentId)}</strong>
             <span>Idempotency: {decisionTarget.record.idempotencyKey || decisionTarget.record.id}</span>
           </div>
+          {decisionTarget.kind === 'approval' && decisionTarget.record.preview && (
+            <dl className="agent-command__approval-preview" aria-label="Redacted action preview">
+              {decisionTarget.record.preview.summary && <div><dt>Action summary</dt><dd>{decisionTarget.record.preview.summary}</dd></div>}
+              {decisionTarget.record.preview.resource && <div><dt>Resource</dt><dd>{decisionTarget.record.preview.resource}</dd></div>}
+              {decisionTarget.record.preview.impact && <div><dt>Expected impact</dt><dd>{decisionTarget.record.preview.impact}</dd></div>}
+              <p>Workspace-approved, redacted preview. Raw tool arguments are not shown.</p>
+            </dl>
+          )}
           {busy.startsWith(`decision:${decisionTarget.record.id}:`) && (
             <p className="agent-command__decision-pending" role="status">Decision pending backend confirmation. Retryable failures reuse the same action, evidence, and idempotency key.</p>
           )}
