@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from functools import wraps
+import hashlib
 from http.client import IncompleteRead
+import inspect
 import json
+import math
 import time
 from typing import Any, Callable, Literal, TypeVar
 from urllib.error import HTTPError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -41,6 +47,223 @@ class NeuralOpsAuthorizationError(NeuralOpsError):
         self.status = status
         self.approval = approval
         self.idempotency_key = idempotency_key
+
+
+def guard_openai_tool(
+    client: Any,
+    function: Callable[..., Any],
+    *,
+    identity_id: str,
+    action: str,
+    tool_category: str,
+    provider: str,
+    environment: Environment = "staging",
+    tool_name: str | None = None,
+    idempotency_key: Callable[[Any, dict[str, Any]], str] | None = None,
+    create_approval_preview: Callable[[dict[str, Any]], dict[str, str]] | None = None,
+) -> Any:
+    """Wrap an OpenAI Agents SDK function tool with NeuralOps authorization.
+
+    The tool arguments are hashed locally and are never sent by this adapter.
+    NeuralOps must authorize and atomically consume the resulting lease before
+    the wrapped function is invoked.
+    """
+    try:
+        from agents import function_tool
+        from agents.tool_context import ToolContext
+    except ImportError as exc:
+        raise ImportError(
+            "OpenAI Agents SDK integration requires the optional extra: "
+            "pip install neuralops-sdk[openai-agents]"
+        ) from exc
+
+    if not callable(function):
+        raise TypeError("function must be callable")
+    if not all(isinstance(value, str) and value.strip() for value in (identity_id, action, tool_category, provider)):
+        raise ValueError("identity_id, action, tool_category, and provider are required")
+
+    signature = inspect.signature(function)
+    context_parameter_name = next(
+        (parameter.name for parameter in signature.parameters.values() if _is_openai_context_parameter(parameter)),
+        None,
+    )
+    synthetic_context = context_parameter_name is None
+    if synthetic_context:
+        context_parameter_name = "_neuralops_tool_context"
+        while context_parameter_name in signature.parameters:
+            context_parameter_name += "_"
+        tool_signature = signature.replace(
+            parameters=(
+                inspect.Parameter(
+                    context_parameter_name,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    annotation=ToolContext,
+                ),
+                *signature.parameters.values(),
+            )
+        )
+    else:
+        first_parameter = next(iter(signature.parameters.values()), None)
+        if first_parameter is None or first_parameter.name != context_parameter_name:
+            raise ValueError("OpenAI tool context must be the first function parameter")
+        tool_signature = signature
+    name = tool_name or function.__name__
+    if not name or len(name) > 120:
+        raise ValueError("tool_name must contain 1 to 120 characters")
+    definition = "\n".join((f"{function.__module__}.{function.__qualname__}", str(signature), inspect.getdoc(function) or ""))
+    context_hash = f"sha256:{hashlib.sha256(definition.encode('utf-8')).hexdigest()}"
+
+    @wraps(function)
+    async def guarded(*args: Any, **kwargs: Any) -> Any:
+        bound = tool_signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        tool_context = bound.arguments.get(context_parameter_name)
+        if synthetic_context:
+            original_kwargs = dict(kwargs)
+            original_kwargs.pop(context_parameter_name, None)
+            original_args = args[1:] if args else args
+        else:
+            original_kwargs = kwargs
+            original_args = args
+        function_bound = signature.bind(*original_args, **original_kwargs)
+        function_bound.apply_defaults()
+        action_arguments = {
+            parameter_name: value
+            for parameter_name, value in function_bound.arguments.items()
+            if not _is_openai_context_parameter(signature.parameters[parameter_name])
+        }
+        canonical_arguments = json.dumps(
+            _json_safe_tool_arguments(action_arguments),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        content_hash = f"sha256:{hashlib.sha256(canonical_arguments.encode('utf-8')).hexdigest()}"
+        binding = {
+            "identity_id": identity_id,
+            "action": action,
+            "tool_category": tool_category,
+            "operation": name,
+            "context_hash": context_hash,
+            "content_hash": content_hash,
+            "provider": provider,
+            "environment": environment,
+        }
+
+        stable_key: str | None = None
+        if idempotency_key is not None:
+            try:
+                callback_key = await _run_openai_callback(idempotency_key, tool_context, action_arguments)
+            except Exception:
+                raise NeuralOpsAuthorizationError(
+                    "NeuralOps idempotency key generation failed; action denied",
+                    code="invalid_metadata",
+                ) from None
+            if not isinstance(callback_key, str) or not callback_key.strip():
+                raise NeuralOpsAuthorizationError(
+                    "NeuralOps idempotency callback must return a non-empty string; action denied",
+                    code="invalid_metadata",
+                )
+            stable_key = _openai_idempotency_key(callback_key)
+        else:
+            call_id = getattr(tool_context, "tool_call_id", None)
+            if isinstance(call_id, str) and call_id:
+                stable_key = _openai_idempotency_key(call_id)
+        if stable_key is not None:
+            binding["idempotency_key"] = stable_key
+
+        if (action, tool_category) != (AGENT_ACTION_METADATA_READ, AGENT_TOOL_CATEGORY_METADATA):
+            policy = await asyncio.to_thread(client.get_approval_preview_policy, identity_id)
+            if not isinstance(policy, dict) or policy.get("mode") not in {"metadata_only", "redacted_preview"}:
+                raise NeuralOpsAuthorizationError(
+                    "NeuralOps approval preview policy is invalid; action denied",
+                    code="backend_unavailable",
+                )
+            if policy["mode"] == "redacted_preview" and create_approval_preview is not None:
+                try:
+                    preview = await _run_openai_callback(create_approval_preview, action_arguments)
+                except Exception:
+                    raise NeuralOpsAuthorizationError(
+                        "NeuralOps approval preview generation failed; action denied",
+                        code="invalid_metadata",
+                    ) from None
+                binding["approval_preview"] = _normalize_approval_preview(preview)
+
+        lease = await asyncio.to_thread(client.authorize_action, **binding)
+        lease_id = lease.get("id") if isinstance(lease, dict) else None
+        lease_idempotency_key = lease.get("idempotencyKey") if isinstance(lease, dict) else None
+        if (
+            not isinstance(lease_id, str)
+            or not lease_id
+            or not isinstance(lease_idempotency_key, str)
+            or not lease_idempotency_key
+        ):
+            raise NeuralOpsAuthorizationError(
+                "NeuralOps returned an invalid authorization lease; action denied",
+                code="backend_unavailable",
+            )
+        lease_binding = {
+            **binding,
+            "lease_id": lease_id,
+            "idempotency_key": lease_idempotency_key,
+        }
+        await asyncio.to_thread(client.consume_lease, **lease_binding)
+
+        if inspect.iscoroutinefunction(function):
+            return await function(*function_bound.args, **function_bound.kwargs)
+        result = await asyncio.to_thread(function, *function_bound.args, **function_bound.kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    guarded.__signature__ = tool_signature  # type: ignore[attr-defined]
+    guarded.__annotations__ = {
+        **getattr(function, "__annotations__", {}),
+        **({context_parameter_name: ToolContext} if synthetic_context else {}),
+    }
+    return function_tool(
+        guarded,
+        name_override=name,
+        description_override=inspect.getdoc(function) or "",
+    )
+
+
+def _is_openai_context_parameter(parameter: inspect.Parameter) -> bool:
+    annotation = parameter.annotation
+    annotation_name = getattr(annotation, "__name__", "")
+    annotation_text = str(annotation)
+    return annotation_name in {"RunContextWrapper", "ToolContext"} or any(
+        context_name in annotation_text for context_name in ("RunContextWrapper", "ToolContext")
+    )
+
+
+def _openai_idempotency_key(stable_value: str) -> str:
+    digest = hashlib.sha256(stable_value.encode("utf-8")).hexdigest()
+    return f"nop_openai_{digest}"
+
+
+async def _run_openai_callback(callback: Callable[..., Any], *args: Any) -> Any:
+    if inspect.iscoroutinefunction(callback):
+        return await callback(*args)
+    result = await asyncio.to_thread(callback, *args)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+def _json_safe_tool_arguments(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("Tool arguments must contain finite numbers")
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_tool_arguments(item) for item in value]
+    if isinstance(value, dict) and all(isinstance(key, str) for key in value):
+        return {key: _json_safe_tool_arguments(item) for key, item in value.items()}
+    raise TypeError("Tool arguments must be JSON-compatible to authorize safely")
 
 
 @dataclass(frozen=True)
@@ -184,6 +407,49 @@ class NeuralOpsClient:
                 idempotency_key=str(request_metadata["idempotency_key"]),
             )
         return response["lease"]
+
+    def get_approval_preview_policy(self, identity_id: str) -> dict[str, str | None]:
+        """Read the workspace policy before deciding whether to submit a preview."""
+        if not self.agent_credential:
+            raise NeuralOpsAuthorizationError(
+                "NeuralOps agent_credential is required",
+                code="credential_required",
+            )
+        if not isinstance(identity_id, str) or not identity_id.strip():
+            raise NeuralOpsAuthorizationError(
+                "NeuralOps agent identity is required",
+                code="invalid_metadata",
+            )
+        request = Request(
+            f"{self.base_url}/api/agent-control/agent-privacy-policy/{quote(identity_id, safe='')}",
+            method="GET",
+            headers={"x-neuralops-agent-key": self.agent_credential},
+        )
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                policy = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            if exc.code in _RETRYABLE_AGENT_STATUSES:
+                raise _agent_unavailable_error(exc.code) from exc
+            raise NeuralOpsAuthorizationError(
+                f"NeuralOps agent control returned HTTP {exc.code}",
+                code="request_rejected",
+                status=exc.code,
+            ) from exc
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, IncompleteRead) as exc:
+            raise _agent_unavailable_error() from exc
+        if (
+            not isinstance(policy, dict)
+            or policy.get("mode") not in {"metadata_only", "redacted_preview"}
+            or (policy.get("updatedAt") is not None and not isinstance(policy.get("updatedAt"), str))
+            or not isinstance(policy.get("updatedBy"), str)
+        ):
+            raise _agent_unavailable_error()
+        return {
+            "mode": policy["mode"],
+            "updatedAt": policy.get("updatedAt"),
+            "updatedBy": policy["updatedBy"],
+        }
 
     def request_approval(self, **metadata: Any) -> dict[str, Any]:
         return self._agent_control_post(
@@ -337,6 +603,7 @@ _AGENT_METADATA_FIELDS = {
     "cost_usd": "costUsd",
     "status": "status",
     "policy_findings": "policyFindings",
+    "approval_preview": "approvalPreview",
 }
 
 
@@ -362,7 +629,27 @@ def _normalize_agent_metadata(metadata: dict[str, Any], *, include_lease: bool) 
                 code="invalid_metadata",
             )
         payload["leaseId"] = lease_id
+    if "approvalPreview" in payload:
+        payload["approvalPreview"] = _normalize_approval_preview(payload["approvalPreview"])
     return payload
+
+
+def _normalize_approval_preview(preview: Any) -> dict[str, str]:
+    allowed_fields = {"summary", "resource", "impact"}
+    if not isinstance(preview, dict) or "summary" not in preview or set(preview) - allowed_fields:
+        raise ValueError("Approval preview requires summary and may contain only resource and impact")
+    normalized: dict[str, str] = {}
+    for field in ("summary", "resource", "impact"):
+        if field not in preview:
+            continue
+        value = preview[field]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"Approval preview {field} must be a non-empty string")
+        max_length = 160 if field == "resource" else 240
+        if len(value) > max_length:
+            raise ValueError(f"Approval preview {field} must be at most {max_length} characters")
+        normalized[field] = value.strip()
+    return normalized
 
 
 def _agent_unavailable_error(status: int | None = None) -> NeuralOpsAuthorizationError:
@@ -675,6 +962,7 @@ __all__ = [
     "NeuralOpsClient",
     "NeuralOpsError",
     "NeuralOpsFastAPIMiddleware",
+    "guard_openai_tool",
     "trace_function",
     "wrap_openai",
 ]

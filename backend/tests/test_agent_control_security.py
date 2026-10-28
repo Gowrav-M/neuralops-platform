@@ -189,6 +189,226 @@ def test_runtime_control_paths_accept_only_credential_and_resolve_its_workspace(
     assert cross_workspace.json() == {"detail": "Invalid agent credential"}
 
 
+def test_agent_privacy_policy_defaults_to_metadata_only_and_is_workspace_scoped(secure_client: TestClient) -> None:
+    workspace_a = "privacy-policy-a"
+    workspace_b = "privacy-policy-b"
+    owner_a = auth_header(f"owner-{workspace_a}@example.com", workspace_a)
+    owner_b = auth_header(f"owner-{workspace_b}@example.com", workspace_b)
+
+    default_policy = secure_client.get("/api/agent-control/privacy-policy", headers=owner_a)
+    assert default_policy.status_code == 200
+    assert default_policy.json()["mode"] == "metadata_only"
+
+    updated = secure_client.patch(
+        "/api/agent-control/privacy-policy",
+        headers=owner_a,
+        json={"mode": "redacted_preview"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["mode"] == "redacted_preview"
+
+    isolated = secure_client.get("/api/agent-control/privacy-policy", headers=owner_b)
+    assert isolated.status_code == 200
+    assert isolated.json()["mode"] == "metadata_only"
+
+
+def test_agent_privacy_policy_requires_owner_or_admin(secure_client: TestClient) -> None:
+    workspace_id = "privacy-policy-rbac"
+    owner = auth_header(f"owner-{workspace_id}@example.com", workspace_id)
+    secure_client.get("/api/workspace", headers=owner)
+    developer = add_workspace_member(workspace_id, f"developer-{workspace_id}@example.com", "Developer")
+
+    response = secure_client.patch(
+        "/api/agent-control/privacy-policy",
+        headers=developer,
+        json={"mode": "redacted_preview"},
+    )
+
+    assert response.status_code == 403
+    admin = add_workspace_member(workspace_id, f"admin-{workspace_id}@example.com", "Admin")
+    admin_update = secure_client.patch(
+        "/api/agent-control/privacy-policy",
+        headers=admin,
+        json={"mode": "redacted_preview"},
+    )
+    assert admin_update.status_code == 200
+
+
+def test_agent_credential_can_read_its_workspace_privacy_mode_only(secure_client: TestClient) -> None:
+    first = register(secure_client, "agent-policy-read-a")
+    second = register(secure_client, "agent-policy-read-a")
+    owner = auth_header("owner-agent-policy-read-a@example.com", "agent-policy-read-a")
+    assert secure_client.patch(
+        "/api/agent-control/privacy-policy",
+        headers=owner,
+        json={"mode": "redacted_preview"},
+    ).status_code == 200
+
+    own_policy = secure_client.get(
+        f"/api/agent-control/agent-privacy-policy/{first['identity']['id']}",
+        headers={"x-neuralops-agent-key": first["credential"]},
+    )
+    other_identity = secure_client.get(
+        f"/api/agent-control/agent-privacy-policy/{second['identity']['id']}",
+        headers={"x-neuralops-agent-key": first["credential"]},
+    )
+
+    assert own_policy.status_code == 200
+    assert own_policy.json()["mode"] == "redacted_preview"
+    assert other_identity.status_code == 401
+
+
+def test_metadata_only_agent_policy_rejects_and_does_not_persist_preview(secure_client: TestClient) -> None:
+    registration = register(
+        secure_client,
+        "preview-metadata-only",
+        permissions=["shell:execute"],
+    )
+    body = {
+        **authorization_body(registration["identity"]["id"], key="metadata-preview"),
+        "action": "shell",
+        "toolCategory": "shell",
+        "operation": "run_command",
+        "approvalPreview": {"summary": "Delete temp file", "resource": "tmp/cache"},
+    }
+
+    response = secure_client.post(
+        "/api/agent-control/authorize",
+        headers={"x-neuralops-agent-key": registration["credential"]},
+        json=body,
+    )
+
+    assert response.status_code == 422
+    assert not database.list_records("agent_approvals")
+
+
+def test_redacted_preview_is_bounded_sanitized_and_persisted_for_review(secure_client: TestClient) -> None:
+    workspace_id = "preview-enabled"
+    owner = auth_header(f"owner-{workspace_id}@example.com", workspace_id)
+    assert secure_client.get("/api/workspace", headers=owner).status_code == 200
+    policy = secure_client.patch(
+        "/api/agent-control/privacy-policy",
+        headers=owner,
+        json={"mode": "redacted_preview"},
+    )
+    assert policy.status_code == 200
+    registration = register(
+        secure_client,
+        workspace_id,
+        permissions=["shell:execute"],
+    )
+    synthetic_secret = "sk_" + "live_" + "1234567890abcdef"
+    body = {
+        **authorization_body(registration["identity"]["id"], key="redacted-preview"),
+        "action": "shell",
+        "toolCategory": "shell",
+        "operation": "run_command",
+        "approvalPreview": {
+            "summary": f"Send with api_key={synthetic_secret}",
+            "resource": "private/tmp.txt",
+        },
+    }
+
+    response = secure_client.post(
+        "/api/agent-control/authorize",
+        headers={"x-neuralops-agent-key": registration["credential"]},
+        json=body,
+    )
+
+    assert response.status_code == 200
+    approval = response.json()["approval"]
+    assert approval["preview"]["summary"] == "Send with api_key=[REDACTED]"
+    assert approval["preview"]["resource"] == "private/tmp.txt"
+    persisted = json.dumps(database.list_records("agent_approvals"))
+    assert synthetic_secret not in persisted
+    assert "private/tmp.txt" in persisted
+
+
+def test_redacted_preview_rejects_unbounded_and_unknown_fields(secure_client: TestClient) -> None:
+    workspace_id = "preview-bounds"
+    owner = auth_header(f"owner-{workspace_id}@example.com", workspace_id)
+    assert secure_client.get("/api/workspace", headers=owner).status_code == 200
+    assert secure_client.patch(
+        "/api/agent-control/privacy-policy",
+        headers=owner,
+        json={"mode": "redacted_preview"},
+    ).status_code == 200
+    registration = register(
+        secure_client,
+        workspace_id,
+        permissions=["shell:execute"],
+    )
+    body = {
+        **authorization_body(registration["identity"]["id"], key="preview-bounds"),
+        "action": "shell",
+        "toolCategory": "shell",
+        "operation": "run_command",
+        "approvalPreview": {"rawArguments": "rm -rf /"},
+    }
+
+    response = secure_client.post(
+        "/api/agent-control/authorize",
+        headers={"x-neuralops-agent-key": registration["credential"]},
+        json=body,
+    )
+
+    assert response.status_code == 422
+    assert not database.list_records("agent_approvals")
+
+    too_long = secure_client.post(
+        "/api/agent-control/authorize",
+        headers={"x-neuralops-agent-key": registration["credential"]},
+        json={
+            **body,
+            "idempotencyKey": "preview-too-long",
+            "approvalPreview": {"summary": "x" * 241},
+        },
+    )
+    assert too_long.status_code == 422
+    assert not database.list_records("agent_approvals")
+
+
+def test_switching_to_metadata_only_purges_existing_previews(secure_client: TestClient) -> None:
+    workspace_id = "preview-purge"
+    owner = auth_header(f"owner-{workspace_id}@example.com", workspace_id)
+    assert secure_client.get("/api/workspace", headers=owner).status_code == 200
+    assert secure_client.patch(
+        "/api/agent-control/privacy-policy",
+        headers=owner,
+        json={"mode": "redacted_preview"},
+    ).status_code == 200
+    registration = register(secure_client, workspace_id, permissions=["shell:execute"])
+    body = {
+        **authorization_body(registration["identity"]["id"], key="preview-purge"),
+        "action": "shell",
+        "toolCategory": "shell",
+        "operation": "run_command",
+        "approvalPreview": {"summary": "Delete generated report", "resource": "reports/draft.txt"},
+    }
+    pending = secure_client.post(
+        "/api/agent-control/authorize",
+        headers={"x-neuralops-agent-key": registration["credential"]},
+        json=body,
+    )
+    assert pending.status_code == 200
+    assert pending.json()["approval"]["preview"] is not None
+
+    changed = secure_client.patch(
+        "/api/agent-control/privacy-policy",
+        headers=owner,
+        json={"mode": "metadata_only"},
+    )
+
+    assert changed.status_code == 200
+    persisted = json.dumps(database.list_records("agent_approvals"))
+    assert "reports/draft.txt" not in persisted
+    assert "preview" in persisted
+    assert any(
+        event.get("type") == "agent.privacy_policy.update"
+        for event in database.list_records("audit")
+    )
+
+
 def test_authorization_replays_only_the_same_active_lease_after_a_lost_response(secure_client: TestClient) -> None:
     registration = register(secure_client, "lost-response")
     headers = {"x-neuralops-agent-key": registration["credential"]}

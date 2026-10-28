@@ -4,14 +4,14 @@ This roadmap describes direction, not a delivery promise. Priorities may change 
 
 ## Next
 
-- Harden and document the agent-control lifecycle with more concurrency, revocation, and recovery coverage.
-- Improve installation and self-hosting guidance, including a reproducible container workflow.
-- Expand release-gate and replay evidence coverage while keeping decision inputs inspectable.
-- Improve OpenTelemetry ingestion and export interoperability.
-- Make database, auth, retention, and operational readiness defaults easier to verify for self-hosters.
+- Validate MCP and OpenAI Agents SDK adapters with real self-hosted users; prioritize compatibility fixes and tool-boundary failure cases from reproducible reports.
+- Harden approval resume, revocation races, ambiguous side-effect recovery, and privacy-policy transitions before broadening framework support.
+- Improve clean-clone installability, SDK release automation, compatibility tests, and focused integration examples.
+- Measure whether developers can identify the blocked action, approve the right request, and safely resume it without retaining raw arguments by default.
 
 ## Later
 
+- Consider additional runtime adapters only when user reports show demand and the existing adapter contracts remain maintainable.
 - Broaden policy authoring, evaluation, and evidence-export ergonomics.
 - Improve provider gateway observability and failure handling without masking unavailable dependencies.
 - Strengthen accessibility and operator workflow testing across the console.

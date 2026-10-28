@@ -42,6 +42,7 @@ jobs:
             set -e
             npm audit --audit-level=high
             npm run test:sdk
+            npm run test:sdk:python
             npm run test:deployment
             npm run lint
             npm run build

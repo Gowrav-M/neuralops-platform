@@ -57,6 +57,7 @@ These controls reduce risk; they are not a substitute for threat modeling, provi
 
 - Register scoped agent identities with explicit permissions, provider access, environment, and production-access status.
 - Request, approve, block, revoke, validate, and consume authorization leases. High-risk actions require explicit approval; approvers cannot approve their own request when authenticated workspace controls are enabled.
+- Guard external MCP handlers and OpenAI Agents SDK functions before execution with the versioned JavaScript/Python adapters. See [Agent tool integrations](docs/agent-tool-integrations.md) for the compatibility matrix, safe demos, privacy policy, and limitations.
 - Run local or configured live agent workflows through direct execution or the queued worker API, retaining run, trace, decision, and audit records.
 - Ingest traces through REST, batch ingestion, OpenTelemetry normalization, or the repository's JavaScript/Python client source.
 - Run release gates, replay stored traces, inspect evidence, and export evidence packs for review.
@@ -94,6 +95,7 @@ python -m pip install -r backend/requirements.txt
 npm run lint
 npm audit --audit-level=high
 npm run test:sdk
+npm run test:sdk:python
 npm run test:deployment
 npm run build
 python -m pytest backend

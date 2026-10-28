@@ -41,6 +41,7 @@ jobs:
           npm audit --audit-level=high
           npm run lint
           npm run test:sdk
+          npm run test:sdk:python
           npm run test:deployment
           npm run build
           python -m pytest backend

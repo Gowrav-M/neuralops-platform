@@ -99,7 +99,9 @@ test('all product tabs render without console errors and Evidence gate runs', as
 
   await sidebar.getByRole('button', { name: 'Agents', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Agent Command Center' })).toBeVisible();
-  await expect(page.locator('.agent-command__hero .page-subtitle')).toContainText('Raw prompts, outputs, arguments, secrets, and files are not retained.');
+  await expect(page.locator('.agent-command__hero .page-subtitle')).toContainText(
+    'Authorization records store metadata and hashes by default; separate trace ingestion follows its own content and retention settings',
+  );
   const drill = await page.request.post('http://127.0.0.1:8000/api/onboarding/run-proof-drill', {
     data: { type: 'prompt_injection' },
   });

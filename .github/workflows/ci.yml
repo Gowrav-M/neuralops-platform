@@ -58,6 +58,9 @@ jobs:
       - name: Test SDK contracts
         run: npm run test:sdk
 
+      - name: Test Python SDK integrations
+        run: npm run test:sdk:python
+
       - name: Test deployment verifier
         run: npm run test:deployment
 

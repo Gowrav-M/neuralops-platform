@@ -145,6 +145,50 @@ export class NeuralOps {
     );
   }
 
+  async getApprovalPreviewPolicy(identityId) {
+    if (!this.agentCredential) {
+      throw new NeuralOpsAuthorizationError('NeuralOps agentCredential is required', { code: 'credential_required' });
+    }
+    if (typeof identityId !== 'string' || identityId.length === 0) {
+      throw new NeuralOpsAuthorizationError('NeuralOps identityId is required', { code: 'invalid_metadata' });
+    }
+    const startedAt = Date.now();
+    let attempt = 0;
+    while (attempt < this.retry.maxAttempts && Date.now() - startedAt <= this.retry.maxElapsedMs) {
+      attempt += 1;
+      try {
+        const response = await fetchWithDeadline(
+          this.fetchImpl,
+          `${this.baseUrl}/api/agent-control/agent-privacy-policy/${encodeURIComponent(identityId)}`,
+          {
+            method: 'GET',
+            headers: { 'x-neuralops-agent-key': this.agentCredential },
+          },
+          Math.max(0, this.retry.maxElapsedMs - (Date.now() - startedAt)),
+        );
+        if (!response.ok) {
+          if (RETRYABLE_AGENT_STATUSES.has(response.status) && this.canRetry(attempt, startedAt)) {
+            await this.waitBeforeRetry(attempt, startedAt);
+            continue;
+          }
+          if (RETRYABLE_AGENT_STATUSES.has(response.status)) throw unavailableError(response.status);
+          throw new NeuralOpsAuthorizationError(`NeuralOps agent control returned HTTP ${response.status}`, {
+            code: 'request_rejected', status: response.status,
+          });
+        }
+        const policy = await response.json();
+        if (isRecord(policy) && ['metadata_only', 'redacted_preview'].includes(policy.mode)) {
+          return { mode: policy.mode };
+        }
+      } catch (error) {
+        if (error instanceof NeuralOpsAuthorizationError && error.code !== 'backend_unavailable') throw error;
+      }
+      if (!this.canRetry(attempt, startedAt)) throw unavailableError();
+      await this.waitBeforeRetry(attempt, startedAt);
+    }
+    throw unavailableError();
+  }
+
   requireApiKey() {
     if (!this.apiKey) {
       throw new Error('NeuralOps apiKey is required for telemetry and gateway operations');
@@ -241,12 +285,22 @@ export class NeuralOpsAuthorizationError extends Error {
 
 export const AGENT_ACTIONS = Object.freeze({
   METADATA_READ: 'metadata_read',
+  WRITE: 'write',
   SHELL: 'shell',
+  BROWSER: 'browser',
+  EXTERNAL_POST: 'external_post',
+  SECRET: 'secret',
+  DESTRUCTIVE: 'destructive',
 });
 
 export const AGENT_TOOL_CATEGORIES = Object.freeze({
   METADATA: 'metadata',
+  WRITE: 'write',
   SHELL: 'shell',
+  BROWSER: 'browser',
+  EXTERNAL_POST: 'external_post',
+  SECRET: 'secret',
+  DESTRUCTIVE: 'destructive',
 });
 
 const RETRYABLE_AGENT_STATUSES = new Set([408, 425, 429, 502, 503, 504]);
@@ -279,6 +333,9 @@ function normalizeAgentMetadata(metadata = {}, includeLease = false) {
       payload[field] = metadata[field];
     }
   }
+  if (metadata.approvalPreview !== undefined && metadata.approvalPreview !== null) {
+    payload.approvalPreview = normalizeApprovalPreview(metadata.approvalPreview);
+  }
   for (const field of ['identityId', 'action', 'toolCategory', 'operation', 'contextHash', 'contentHash', 'provider']) {
     if (typeof payload[field] !== 'string' || payload[field].length === 0) {
       throw new NeuralOpsAuthorizationError(`NeuralOps agent metadata field "${field}" is required`, { code: 'invalid_metadata' });
@@ -292,6 +349,26 @@ function normalizeAgentMetadata(metadata = {}, includeLease = false) {
     payload.leaseId = metadata.leaseId;
   }
   return payload;
+}
+
+function normalizeApprovalPreview(preview) {
+  if (!isRecord(preview)) {
+    throw new NeuralOpsAuthorizationError('NeuralOps approval preview must be a redacted object', { code: 'invalid_metadata' });
+  }
+  const normalized = {};
+  const maxLength = { summary: 240, resource: 160, impact: 240 };
+  for (const field of Object.keys(maxLength)) {
+    if (preview[field] !== undefined) {
+      if (typeof preview[field] !== 'string' || preview[field].length === 0 || preview[field].length > maxLength[field]) {
+        throw new NeuralOpsAuthorizationError(`NeuralOps approval preview ${field} is invalid`, { code: 'invalid_metadata' });
+      }
+      normalized[field] = preview[field];
+    }
+  }
+  if (Object.keys(normalized).length === 0) {
+    throw new NeuralOpsAuthorizationError('NeuralOps approval preview must contain a summary, resource, or impact', { code: 'invalid_metadata' });
+  }
+  return normalized;
 }
 
 function generateIdempotencyKey() {

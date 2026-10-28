@@ -13,6 +13,7 @@ import {
   AGENT_TOOL_CATEGORIES,
   NeuralOps,
 } from '../../sdk/javascript/index.js';
+import { guardMcpTool } from '../../sdk/javascript/mcp.js';
 
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -144,4 +145,50 @@ test('JavaScript SDK canonical contract works against a real FastAPI service', {
     && error.approval.id === firstApproval.id
     && error.approval.id === requestedApproval.id
   ));
+
+  let toolExecutions = 0;
+  const protectedTool = guardMcpTool(sdk, {
+    identityId,
+    toolName: 'simulated_shell',
+    action: AGENT_ACTIONS.SHELL,
+    toolCategory: AGENT_TOOL_CATEGORIES.SHELL,
+    provider: 'gateway',
+    environment: 'staging',
+    idempotencyKey: () => 'mcp-demo-single-use-action',
+  }, async ({ command }) => {
+    toolExecutions += 1;
+    return `Simulated command: ${command}`;
+  });
+  const toolArguments = { command: 'echo safe-demo' };
+  let toolApprovalId;
+  let protectedActionKey;
+  await assert.rejects(protectedTool(toolArguments), (error) => {
+    toolApprovalId = error.approval.id;
+    protectedActionKey = error.idempotencyKey;
+    return error.code === 'approval_required';
+  });
+  assert.equal(toolExecutions, 0, 'unapproved action must not reach the handler');
+
+  const approved = await fetch(`${baseUrl}/api/agent-control/approvals/${toolApprovalId}/approve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'approve-mcp-demo' },
+    body: JSON.stringify({ reason: 'Approved the side-effect-free demo action.', evidenceHash: `sha256:${'f'.repeat(64)}` }),
+  });
+  assert.equal(approved.status, 200, await approved.text());
+
+  assert.equal(await protectedTool(toolArguments), 'Simulated command: echo safe-demo');
+  assert.equal(toolExecutions, 1);
+  await assert.rejects(protectedTool(toolArguments), (error) => error.status === 409);
+  assert.equal(toolExecutions, 1, 'a consumed approval cannot replay a prior action');
+  assert.match(protectedActionKey, /^nop_mcp_[a-f0-9]{64}$/);
+  assert.notEqual(protectedActionKey, 'mcp-demo-single-use-action');
+
+  const revoked = await fetch(`${baseUrl}/api/agent-control/identities/${identityId}/revoke`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason: 'End the integration demo.' }),
+  });
+  assert.equal(revoked.status, 200, await revoked.text());
+  await assert.rejects(protectedTool({ command: 'echo after-revoke' }));
+  assert.equal(toolExecutions, 1, 'revoked credentials cannot execute tools');
 });
